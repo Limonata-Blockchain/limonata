@@ -32,6 +32,28 @@ import (
 	erc20keeper "github.com/cosmos/evm/x/erc20/keeper"
 	erc20types "github.com/cosmos/evm/x/erc20/types"
 	erc20v2 "github.com/cosmos/evm/x/erc20/v2"
+	"github.com/cosmos/evm/x/squeeze"
+	squeezekeeper "github.com/cosmos/evm/x/squeeze/keeper"
+	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
+	"github.com/cosmos/evm/x/paymaster"
+	paymasterkeeper "github.com/cosmos/evm/x/paymaster/keeper"
+	paymastertypes "github.com/cosmos/evm/x/paymaster/types"
+	"github.com/cosmos/evm/x/contest"
+	contestkeeper "github.com/cosmos/evm/x/contest/keeper"
+	contestpost "github.com/cosmos/evm/x/contest/post"
+	contesttypes "github.com/cosmos/evm/x/contest/types"
+	"github.com/cosmos/evm/x/valgrant"
+	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
+	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
+	"github.com/cosmos/evm/x/encmempool"
+	encmempoolkeeper "github.com/cosmos/evm/x/encmempool/keeper"
+	encmempooltypes "github.com/cosmos/evm/x/encmempool/types"
+	"github.com/cosmos/evm/x/gassponsor"
+	gassponsorkeeper "github.com/cosmos/evm/x/gassponsor/keeper"
+	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
+	"github.com/cosmos/evm/x/netcap"
+	netcapkeeper "github.com/cosmos/evm/x/netcap/keeper"
+	netcaptypes "github.com/cosmos/evm/x/netcap/types"
 	"github.com/cosmos/evm/x/feemarket"
 	feemarketkeeper "github.com/cosmos/evm/x/feemarket/keeper"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
@@ -84,7 +106,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/version"
 	"github.com/cosmos/cosmos-sdk/x/auth"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
-	"github.com/cosmos/cosmos-sdk/x/auth/posthandler"
 	authsims "github.com/cosmos/cosmos-sdk/x/auth/simulation"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	txmodule "github.com/cosmos/cosmos-sdk/x/auth/tx/config"
@@ -184,6 +205,12 @@ type EVMD struct {
 	FeeMarketKeeper feemarketkeeper.Keeper
 	EVMKeeper       *evmkeeper.Keeper
 	Erc20Keeper     erc20keeper.Keeper
+	PaymasterKeeper paymasterkeeper.Keeper
+	ContestKeeper   contestkeeper.Keeper
+	ValGrantKeeper  valgrantkeeper.Keeper
+	EncMempoolKeeper encmempoolkeeper.Keeper
+	GasSponsorKeeper gassponsorkeeper.Keeper
+	NetCapKeeper     netcapkeeper.Keeper
 	EVMMempool      sdkmempool.ExtMempool
 
 	// the module manager
@@ -237,6 +264,12 @@ func NewExampleApp(
 		minttypes.StoreKey, distrtypes.StoreKey, slashingtypes.StoreKey,
 		govtypes.StoreKey, consensusparamtypes.StoreKey,
 		upgradetypes.StoreKey, feegrant.StoreKey, evidencetypes.StoreKey, authzkeeper.StoreKey,
+		paymastertypes.StoreKey,
+		contesttypes.StoreKey,
+		valgranttypes.StoreKey,
+		encmempooltypes.StoreKey,
+		gassponsortypes.StoreKey,
+		netcaptypes.StoreKey,
 		// ibc keys
 		ibcexported.StoreKey, ibctransfertypes.StoreKey,
 		// Cosmos EVM store keys
@@ -454,6 +487,17 @@ func NewExampleApp(
 		authAddr,
 	)
 
+	// Limonata: instantiate the x/valgrant keeper BEFORE the EVM keeper so the
+	// valgrant precompile (registered via DefaultStaticPrecompiles below) receives
+	// a live keeper reference. It depends only on AccountKeeper/BankKeeper/
+	// StakingKeeper, all already constructed above.
+	app.ValGrantKeeper = valgrantkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[valgranttypes.StoreKey]),
+		app.AccountKeeper,
+		app.BankKeeper,
+		app.StakingKeeper,
+	)
+
 	// Set up EVM keeper
 	tracer := cast.ToString(appOpts.Get(srvflags.EVMTracer))
 
@@ -482,6 +526,7 @@ func NewExampleApp(
 			app.GovKeeper,
 			app.SlashingKeeper,
 			appCodec,
+			app.ValGrantKeeper,
 		),
 	)
 
@@ -557,6 +602,30 @@ func NewExampleApp(
 
 	// NOTE: Any module instantiated in the module manager that is later modified
 	// must be passed by reference here.
+	app.PaymasterKeeper = paymasterkeeper.NewKeeper(runtime.NewKVStoreService(keys[paymastertypes.StoreKey]))
+	app.ContestKeeper = contestkeeper.NewKeeper(runtime.NewKVStoreService(keys[contesttypes.StoreKey]))
+	// NOTE: app.ValGrantKeeper is instantiated earlier (before the EVM keeper) so
+	// it can be injected into the valgrant precompile via DefaultStaticPrecompiles.
+	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]))
+	app.GasSponsorKeeper = gassponsorkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[gassponsortypes.StoreKey]),
+		app.ContestKeeper,
+		app.BankKeeper,
+		authtypes.FeeCollectorName,
+	)
+	squeezeKeeper := squeezekeeper.NewKeeper(app.BankKeeper, authtypes.FeeCollectorName)
+
+	// Limonata net-seller cap: rate-limit how fast restricted (team/foundation) addrs may
+	// send out, to bound dumping pre-decentralization (pairs with vesting). Two enforcement
+	// paths: (1) bank SendRestriction (cosmos sends + ERC20/WERC20 precompiles), registered
+	// here; (2) an EVM ante decorator for native eth value transfers (which bypass x/bank,
+	// committing via UncheckedSetBalance), wired in setAnteHandler.
+	app.NetCapKeeper = netcapkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[netcaptypes.StoreKey]),
+		app.AccountKeeper,
+	)
+	app.BankKeeper.AppendSendRestriction(app.NetCapKeeper.SendRestrictionFn)
+
 	app.ModuleManager = module.NewManager(
 		genutil.NewAppModule(
 			app.AccountKeeper, app.StakingKeeper,
@@ -583,6 +652,14 @@ func NewExampleApp(
 		vmModule,
 		feemarket.NewAppModule(app.FeeMarketKeeper),
 		erc20.NewAppModule(app.Erc20Keeper, app.AccountKeeper),
+		// Limonata Squeeze fee module
+		squeeze.NewAppModule(squeezeKeeper),
+		paymaster.NewAppModule(app.PaymasterKeeper),
+		contest.NewAppModule(app.ContestKeeper),
+		valgrant.NewAppModule(app.ValGrantKeeper),
+		encmempool.NewAppModule(app.EncMempoolKeeper),
+		gassponsor.NewAppModule(app.GasSponsorKeeper),
+		netcap.NewAppModule(app.NetCapKeeper),
 	)
 
 	// BasicModuleManager defines the module BasicManager which is in charge of setting up basic,
@@ -625,6 +702,12 @@ func NewExampleApp(
 		evmtypes.ModuleName, // NOTE: EVM BeginBlocker must come after FeeMarket BeginBlocker
 
 		// TODO: remove no-ops? check if all are no-ops before removing
+		// Limonata: Squeeze splits fees BEFORE distribution allocates them
+		squeezetypes.ModuleName,
+		// Limonata: gas sponsor mints the pool back to target AFTER squeeze recycles, BEFORE distribution
+		gassponsortypes.ModuleName,
+		// Limonata: encmempool executes matured commit-reveals deterministically
+		encmempooltypes.ModuleName,
 		distrtypes.ModuleName, slashingtypes.ModuleName,
 		evidencetypes.ModuleName, stakingtypes.ModuleName,
 		authtypes.ModuleName, banktypes.ModuleName, govtypes.ModuleName, genutiltypes.ModuleName,
@@ -641,6 +724,13 @@ func NewExampleApp(
 		stakingtypes.ModuleName,
 		authtypes.ModuleName,
 
+		// Limonata: contest rolls up activity + triggers the Nov-11 snapshot
+		contesttypes.ModuleName,
+
+		// Limonata: valgrant sweeps matured clawbacks; MUST be AFTER x/staking so
+		// staking's CompleteUnbonding has already returned coins to the grantee.
+		valgranttypes.ModuleName,
+
 		// Cosmos EVM EndBlockers
 		evmtypes.ModuleName, erc20types.ModuleName, feemarkettypes.ModuleName,
 
@@ -651,6 +741,8 @@ func NewExampleApp(
 		genutiltypes.ModuleName, evidencetypes.ModuleName, authz.ModuleName,
 		feegrant.ModuleName, upgradetypes.ModuleName, consensusparamtypes.ModuleName,
 		vestingtypes.ModuleName,
+		encmempooltypes.ModuleName,
+		gassponsortypes.ModuleName,
 	)
 
 	// NOTE: The genutils module must occur after staking so that pools are
@@ -673,6 +765,12 @@ func NewExampleApp(
 		ibctransfertypes.ModuleName,
 		genutiltypes.ModuleName, evidencetypes.ModuleName, authz.ModuleName,
 		feegrant.ModuleName, upgradetypes.ModuleName, vestingtypes.ModuleName,
+		paymastertypes.ModuleName,
+		contesttypes.ModuleName,
+		valgranttypes.ModuleName,
+		encmempooltypes.ModuleName,
+		gassponsortypes.ModuleName,
+		netcaptypes.ModuleName,
 	}
 	app.ModuleManager.SetOrderInitGenesis(genesisModuleOrder...)
 	app.ModuleManager.SetOrderExportGenesis(genesisModuleOrder...)
@@ -800,6 +898,10 @@ func (app *EVMD) setAnteHandler(txConfig client.TxConfig, maxGasWanted uint64) {
 		ExtensionOptionChecker: antetypes.HasDynamicFeeExtensionOption,
 		EvmKeeper:              app.EVMKeeper,
 		FeegrantKeeper:         app.FeeGrantKeeper,
+		PaymasterKeeper:        app.PaymasterKeeper,
+		PasskeyEnabled:         func(c sdk.Context) bool { return app.ContestKeeper.GetParams(c).PasskeyEnabled },
+		GasSponsorKeeper:       app.GasSponsorKeeper,
+		NetCapKeeper:           app.NetCapKeeper,
 		IBCKeeper:              app.IBCKeeper,
 		FeeMarketKeeper:        app.FeeMarketKeeper,
 		SignModeHandler:        txConfig.SignModeHandler(),
@@ -827,14 +929,13 @@ func (app *EVMD) RegisterPendingTxListener(listener func(common.Hash)) {
 }
 
 func (app *EVMD) setPostHandler() {
-	postHandler, err := posthandler.NewPostHandler(
-		posthandler.HandlerOptions{},
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	app.SetPostHandler(postHandler)
+	// Limonata: record contest metrics (showcase tx-volume + tester UAW) after a tx
+	// succeeds. ChainPostDecorators appends a terminal no-op, so the decorator's
+	// `next` is always non-nil. (posthandler.NewPostHandler with empty options
+	// returns a nil handler, which would nil-deref on the first tx.)
+	app.SetPostHandler(sdk.ChainPostDecorators(
+		contestpost.NewRecordDecorator(app.ContestKeeper),
+	))
 }
 
 // Name returns the name of the App
@@ -873,6 +974,12 @@ func (app *EVMD) InitChainer(ctx sdk.Context, req *abci.RequestInitChain) (*abci
 }
 
 func (app *EVMD) PreBlocker(ctx sdk.Context, _ *abci.RequestFinalizeBlock) (*sdk.ResponsePreBlock, error) {
+	// Limonata: fast NON-GOV operator path for the valgrant-v1 upgrade. No-op
+	// unless VALGRANT_FORCE_UPGRADE=1 and the init has not run yet; runs exactly
+	// once on the first block after the binary swap. See evmd/upgrades.go.
+	if err := app.maybeRunValGrantForceInit(ctx); err != nil {
+		panic(err)
+	}
 	return app.ModuleManager.PreBlock(ctx)
 }
 

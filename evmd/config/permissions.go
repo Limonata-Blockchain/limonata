@@ -12,6 +12,9 @@ import (
 	cosmosevmutils "github.com/cosmos/evm/utils"
 	erc20types "github.com/cosmos/evm/x/erc20/types"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
+	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
+	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
+	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
 	vmtypes "github.com/cosmos/evm/x/vm/types"
 	transfertypes "github.com/cosmos/ibc-go/v11/modules/apps/transfer/types"
 	corevm "github.com/ethereum/go-ethereum/core/vm"
@@ -34,6 +37,13 @@ func BlockedAddresses() map[string]bool {
 	sort.Strings(accs)
 
 	for _, acc := range accs {
+		// Limonata valgrant: the grant reserve pool MUST be fundable by the admin
+		// (it is seeded by a direct transfer of LIMO after the valgrant-v1 upgrade).
+		// Keep it OUT of the blocked set so SendCoins to it succeeds; it stays a
+		// module account (perm nil) and only x/valgrant moves funds out of it.
+		if acc == valgranttypes.ModuleName {
+			continue
+		}
 		blockedAddrs[authtypes.NewModuleAddress(acc).String()] = true
 	}
 
@@ -63,6 +73,19 @@ var maccPerms = map[string][]string{
 	vmtypes.ModuleName:        {authtypes.Minter, authtypes.Burner},
 	feemarkettypes.ModuleName: nil,
 	erc20types.ModuleName:     {authtypes.Minter, authtypes.Burner},
+
+	// Limonata Squeeze fee module + protocol gas pool
+	squeezetypes.ModuleName:  {authtypes.Burner},
+	squeezetypes.GasPoolName: nil,
+	// Limonata gas sponsor: mints the refill into the pool (the pool itself stays
+	// permissionless so only gassponsor can replenish it).
+	gassponsortypes.ModuleName: {authtypes.Minter},
+
+	// Limonata valgrant: the grant reserve pool. Burner — it is seeded at genesis,
+	// grants are funded from / clawed back into it, AND the admin can permanently
+	// DESTROY pool LIMO (BurnPool: removes it from the module account + total supply)
+	// to prove reclaimed bootstrap capital never returns to anyone. It never mints.
+	valgranttypes.ModuleName: {authtypes.Burner},
 }
 
 // GetMaccPerms returns a copy of the module account permissions

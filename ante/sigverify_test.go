@@ -81,7 +81,7 @@ func TestConsumeSignatureVerificationGas(t *testing.T) {
 			"PubKeySecp256r1",
 			args{storetypes.NewInfiniteGasMeter(), nil, skR1.PubKey(), params},
 			p.SigVerifyCostSecp256r1(),
-			true,
+			false,
 		},
 		{
 			"Multisig",

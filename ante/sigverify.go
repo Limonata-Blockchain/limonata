@@ -9,6 +9,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256r1"
 	"github.com/cosmos/cosmos-sdk/crypto/types/multisig"
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
@@ -48,6 +49,10 @@ func SigVerificationGasConsumer(
 	case *secp256k1.PubKey:
 		// Cosmos keys
 		meter.ConsumeGas(params.SigVerifyCostSecp256k1, "ante verify: secp256k1")
+		return nil
+	case *secp256r1.PubKey:
+		// P-256 keys (WebAuthn / passkey accounts)
+		meter.ConsumeGas(params.SigVerifyCostSecp256r1(), "ante verify: secp256r1")
 		return nil
 	case *ed25519.PubKey:
 		// Validator keys

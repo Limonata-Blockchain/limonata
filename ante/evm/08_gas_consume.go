@@ -42,12 +42,14 @@ func ConsumeFeesAndEmitEvent(
 	evmKeeper anteinterfaces.EVMKeeper,
 	fees sdktypes.Coins,
 	from sdktypes.AccAddress,
+	sponsored bool,
 ) error {
 	if err := deductFees(
 		ctx,
 		evmKeeper,
 		fees,
 		from,
+		sponsored,
 	); err != nil {
 		return err
 	}
@@ -67,6 +69,7 @@ func deductFees(
 	evmKeeper anteinterfaces.EVMKeeper,
 	fees sdktypes.Coins,
 	feePayer sdktypes.AccAddress,
+	sponsored bool,
 ) error {
 	if fees.IsZero() {
 		return nil
@@ -76,6 +79,7 @@ func deductFees(
 		ctx,
 		fees,
 		common.BytesToAddress(feePayer),
+		sponsored,
 	); err != nil {
 		return errorsmod.Wrapf(err, "failed to deduct transaction costs from user balance")
 	}

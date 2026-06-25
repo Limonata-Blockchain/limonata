@@ -18,7 +18,9 @@ import (
 	"github.com/cosmos/evm/precompiles/p256"
 	slashingprecompile "github.com/cosmos/evm/precompiles/slashing"
 	stakingprecompile "github.com/cosmos/evm/precompiles/staking"
+	valgrantprecompile "github.com/cosmos/evm/precompiles/valgrant"
 	erc20Keeper "github.com/cosmos/evm/x/erc20/keeper"
+	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
 	transferkeeper "github.com/cosmos/ibc-go/v11/modules/apps/transfer/keeper"
 	channelkeeper "github.com/cosmos/ibc-go/v11/modules/core/04-channel/keeper"
 
@@ -184,5 +186,15 @@ func (s StaticPrecompiles) WithSlashingPrecompile(
 	)
 
 	s[slashingPrecompile.Address()] = slashingPrecompile
+	return s
+}
+
+// WithValGrantPrecompile registers the Limonata x/valgrant admin precompile.
+func (s StaticPrecompiles) WithValGrantPrecompile(
+	valgrantKeeper valgrantkeeper.Keeper,
+	bankKeeper cmn.BankKeeper,
+) StaticPrecompiles {
+	valgrantPrecompile := valgrantprecompile.NewPrecompile(valgrantKeeper, bankKeeper)
+	s[valgrantPrecompile.Address()] = valgrantPrecompile
 	return s
 }

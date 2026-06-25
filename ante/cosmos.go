@@ -3,6 +3,7 @@ package ante
 import (
 	cosmosante "github.com/cosmos/evm/ante/cosmos"
 	evmante "github.com/cosmos/evm/ante/evm"
+	pmante "github.com/cosmos/evm/x/paymaster/ante"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 	ibcante "github.com/cosmos/ibc-go/v11/modules/core/ante"
 
@@ -32,12 +33,12 @@ func newCosmosAnteHandler(ctx sdk.Context, options HandlerOptions) sdk.AnteHandl
 		ante.NewValidateMemoDecorator(options.AccountKeeper),
 		cosmosante.NewMinGasPriceDecorator(&feemarketParams),
 		ante.NewConsumeGasForTxSizeDecorator(options.AccountKeeper),
-		ante.NewDeductFeeDecorator(options.AccountKeeper, options.BankKeeper, options.FeegrantKeeper, txFeeChecker),
+		pmante.NewDeductFeeDecorator(options.AccountKeeper, options.BankKeeper, options.FeegrantKeeper, options.PaymasterKeeper, txFeeChecker),
 		// SetPubKeyDecorator must be called before all signature verification decorators
 		ante.NewSetPubKeyDecorator(options.AccountKeeper),
 		ante.NewValidateSigCountDecorator(options.AccountKeeper),
 		ante.NewSigGasConsumeDecorator(options.AccountKeeper, options.SigGasConsumer),
-		ante.NewSigVerificationDecorator(options.AccountKeeper, options.SignModeHandler),
+		cosmosante.NewWebAuthnSigVerificationDecorator(options.AccountKeeper, options.SignModeHandler, options.PasskeyEnabled),
 		ante.NewIncrementSequenceDecorator(options.AccountKeeper),
 		ibcante.NewRedundantRelayDecorator(options.IBCKeeper),
 	)

@@ -1,0 +1,64 @@
+syntax = "proto3";
+package cosmos.evm.encmempool.v1;
+
+import "amino/amino.proto";
+import "cosmos/msg/v1/msg.proto";
+import "cosmos_proto/cosmos.proto";
+import "gogoproto/gogo.proto";
+
+option go_package = "github.com/cosmos/evm/x/encmempool/types";
+
+// Msg defines the x/encmempool Msg service: a commit-reveal mempool primitive.
+//
+// EXPERIMENTAL PROOF-OF-CONCEPT. This is a hash-commitment with an enforced
+// on-chain reveal delay and deterministic reveal ordering. It is NOT encryption
+// and provides NO MEV resistance on a single-validator chain. It is the
+// commit -> delayed-reveal -> execute state machine that a real threshold
+// encryption scheme (Shutter / Ferveo) plugs into later.
+service Msg {
+  option (cosmos.msg.v1.service) = true;
+
+  // CommitTx records a hash-commitment to a future transaction.
+  rpc CommitTx(MsgCommitTx) returns (MsgCommitTxResponse);
+
+  // RevealTx reveals the committed transaction body after the reveal delay.
+  rpc RevealTx(MsgRevealTx) returns (MsgRevealTxResponse);
+}
+
+// MsgCommitTx records sha256(reveal_tx || salt) at the current block height.
+message MsgCommitTx {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "cosmos/evm/encmempool/MsgCommitTx";
+
+  // sender is the committer (the only one who can reveal this commit).
+  string sender = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // commit_hash = sha256(reveal_tx || salt), 32 bytes.
+  bytes commit_hash = 2;
+}
+
+message MsgCommitTxResponse {
+  // commit_height is the block height the commit was recorded at.
+  uint64 commit_height = 1;
+  // seq identifies this commit among the sender's commits at that height.
+  uint64 seq = 2;
+}
+
+// MsgRevealTx reveals the committed body; rejected before commit_height +
+// reveal_delay, or if sha256(reveal_tx || salt) does not match the commitment.
+message MsgRevealTx {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "cosmos/evm/encmempool/MsgRevealTx";
+
+  // sender must equal the original committer.
+  string sender = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // commit_height is the height the matching commit was recorded at.
+  uint64 commit_height = 2;
+  // seq identifies the specific commit.
+  uint64 seq = 3;
+  // reveal_tx is the raw committed payload (opaque to this module).
+  bytes reveal_tx = 4;
+  // salt is the commitment blinding factor.
+  bytes salt = 5;
+}
+
+message MsgRevealTxResponse {}

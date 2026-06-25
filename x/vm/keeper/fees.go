@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	evmtrace "github.com/cosmos/evm/trace"
+	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
 	"github.com/cosmos/evm/x/vm/types"
 
 	errorsmod "cosmossdk.io/errors"
@@ -46,17 +47,34 @@ func CheckSenderBalance(
 	return nil
 }
 
-// DeductTxCostsFromUserBalance deducts the fees from the user balance.
+// DeductTxCostsFromUserBalance deducts the fees from the user balance, UNLESS the tx is
+// sponsored — in which case the protocol gas pool pays instead, leaving the user's
+// balance untouched. The sponsorship decision is made once in the ante and passed in.
 func (k *Keeper) DeductTxCostsFromUserBalance(
 	ctx sdk.Context,
 	fees sdk.Coins,
 	from common.Address,
+	sponsored bool,
 ) (err error) {
 	ctx, span := ctx.StartSpan(tracer, "DeductTxCostsFromUserBalance", trace.WithAttributes(
 		attribute.String("from", from.Hex()),
 		attribute.String("fees", fees.String()),
 	))
 	defer func() { evmtrace.EndSpanErr(span, err) }()
+
+	// Sponsored: the gas pool pays the fee. Move it pool -> fee_collector (real,
+	// base-denom module-to-module, no decimal conversion) so x/squeeze still splits it,
+	// while the user's balance is never touched.
+	if sponsored {
+		if fees.IsZero() {
+			return nil
+		}
+		if err = k.bankWrapper.SendCoinsFromModuleToModule(ctx, squeezetypes.GasPoolName, authtypes.FeeCollectorName, fees); err != nil {
+			return errorsmod.Wrapf(err, "gas pool failed to sponsor fee %s for %s", fees, from)
+		}
+		return nil
+	}
+
 	// fetch sender account
 	signerAcc, err := authante.GetSignerAcc(ctx, k.accountKeeper, from.Bytes())
 	if err != nil {

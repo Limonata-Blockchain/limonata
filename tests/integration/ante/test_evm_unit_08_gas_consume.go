@@ -173,6 +173,7 @@ func (s *EvmUnitAnteTestSuite) TestConsumeGasAndEmitEvent() {
 				unitNetwork.App.GetEVMKeeper(),
 				fees,
 				sender,
+				false,
 			)
 
 			if tc.expectedError != "" {

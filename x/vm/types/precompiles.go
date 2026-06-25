@@ -14,6 +14,9 @@ const (
 	GovPrecompileAddress          = "0x0000000000000000000000000000000000000805"
 	SlashingPrecompileAddress     = "0x0000000000000000000000000000000000000806"
 	ICS02PrecompileAddress        = "0x0000000000000000000000000000000000000807"
+	// ValGrantPrecompileAddress is the Limonata x/valgrant admin precompile.
+	// Fresh slot 0x900 (does not collide with any existing static precompile).
+	ValGrantPrecompileAddress = "0x0000000000000000000000000000000000000900"
 )
 
 // AvailableStaticPrecompiles defines the full list of all available EVM extension addresses.
@@ -31,4 +34,5 @@ var AvailableStaticPrecompiles = []string{
 	GovPrecompileAddress,
 	SlashingPrecompileAddress,
 	ICS02PrecompileAddress,
+	ValGrantPrecompileAddress,
 }

@@ -79,6 +79,7 @@ func RunBenchmarkEthGasConsumeDecorator(b *testing.B, create network.CreateEvmAp
 					s.GetNetwork().App.GetEVMKeeper(),
 					fees,
 					bechAddr,
+					false,
 				)
 				s.Require().NoError(err)
 			}

@@ -15,10 +15,13 @@ func newMonoEVMAnteHandler(ctx sdk.Context, options HandlerOptions) sdk.AnteHand
 			options.AccountKeeper,
 			options.FeeMarketKeeper,
 			options.EvmKeeper,
+			options.GasSponsorKeeper,
 			options.MaxTxGasWanted,
 			&evmParams,
 			&feemarketParams,
 		),
+		// net-seller cap on NATIVE eth value transfers (bypass x/bank; nil keeper = off)
+		NewNetCapEVMDecorator(options.NetCapKeeper),
 		NewTxListenerDecorator(options.PendingTxListener),
 	}
 

@@ -34,6 +34,7 @@ type MonoDecorator struct {
 	accountKeeper   anteinterfaces.AccountKeeper
 	feeMarketKeeper anteinterfaces.FeeMarketKeeper
 	evmKeeper       anteinterfaces.EVMKeeper
+	sponsorKeeper   anteinterfaces.SponsorKeeper
 	maxGasWanted    uint64
 	evmParams       *evmtypes.Params
 	feemarketParams *feemarkettypes.Params
@@ -49,6 +50,7 @@ func NewEVMMonoDecorator(
 	accountKeeper anteinterfaces.AccountKeeper,
 	feeMarketKeeper anteinterfaces.FeeMarketKeeper,
 	evmKeeper anteinterfaces.EVMKeeper,
+	sponsorKeeper anteinterfaces.SponsorKeeper,
 	maxGasWanted uint64,
 	evmParams *evmtypes.Params,
 	feemarketParams *feemarkettypes.Params,
@@ -57,6 +59,7 @@ func NewEVMMonoDecorator(
 		accountKeeper:   accountKeeper,
 		feeMarketKeeper: feeMarketKeeper,
 		evmKeeper:       evmKeeper,
+		sponsorKeeper:   sponsorKeeper,
 		maxGasWanted:    maxGasWanted,
 		evmParams:       evmParams,
 		feemarketParams: feemarketParams,
@@ -222,11 +225,21 @@ func (md MonoDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, ne
 		return ctx, err
 	}
 
+	// Gas sponsorship: decide ONCE whether the protocol gas pool pays this tx's fee
+	// (approved dApp or per-account baseline), persist it in the per-tx object store so
+	// the deduction here and the unused-gas refund (RefundGas) act on the same decision.
+	sponsored := false
+	if md.sponsorKeeper != nil {
+		sponsored, _ = md.sponsorKeeper.IsSponsored(ctx, from, ethTx.To(), msgFees)
+	}
+	md.evmKeeper.SetTxSponsored(ctx, sponsored)
+
 	err = ConsumeFeesAndEmitEvent(
 		ctx,
 		md.evmKeeper,
 		msgFees,
 		from,
+		sponsored,
 	)
 	if err != nil {
 		return ctx, err

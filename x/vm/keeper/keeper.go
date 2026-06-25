@@ -418,6 +418,24 @@ func (k Keeper) AddTransientGasUsed(ctx sdk.Context, gasUsed uint64) (uint64, er
 	return result, nil
 }
 
+// SetTxSponsored records (in the per-tx-index object store) whether the current tx's
+// fee is paid by the gas pool. Written once in the ante; read in RefundGas so the
+// unused-gas refund routes to the pool (not the user) without recomputing the
+// decision. Keyed by ctx.TxIndex(), so CheckTx/DeliverTx and every node agree.
+func (k Keeper) SetTxSponsored(ctx sdk.Context, sponsored bool) {
+	ctx.ObjectStore(k.objectKey).Set(types.ObjectSponsorKey(ctx.TxIndex()), sponsored)
+}
+
+// GetTxSponsored reports whether the current tx was marked sponsored in the ante.
+func (k Keeper) GetTxSponsored(ctx sdk.Context) bool {
+	v := ctx.ObjectStore(k.objectKey).Get(types.ObjectSponsorKey(ctx.TxIndex()))
+	if v == nil {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
+}
+
 // KVStoreKeys returns KVStore keys injected to keeper
 func (k Keeper) KVStoreKeys() map[string]storetypes.StoreKey {
 	return k.storeKeys

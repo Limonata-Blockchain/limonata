@@ -1,0 +1,90 @@
+syntax = "proto3";
+package cosmos.evm.valgrant.v1;
+
+import "amino/amino.proto";
+import "cosmos/msg/v1/msg.proto";
+import "cosmos_proto/cosmos.proto";
+import "gogoproto/gogo.proto";
+
+option go_package = "github.com/cosmos/evm/x/valgrant/types";
+
+// Msg defines the x/valgrant Msg service: admin-gated issuance of locked
+// validator grants (PermanentLockedAccount + liquid gas allowance funded from
+// the valgrant reserve pool) and admin-gated clawback that force-undelegates
+// and sweeps the locked principal back to the pool.
+service Msg {
+  option (cosmos.msg.v1.service) = true;
+
+  // IssueLocked creates a PermanentLockedAccount for a validator candidate
+  // (admin-gated). Funds it with locked principal + a small liquid gas
+  // allowance, both sent from the valgrant module reserve pool.
+  rpc IssueLocked(MsgIssueLocked) returns (MsgIssueLockedResponse);
+
+  // Clawback force-undelegates the grantee's delegations and sweeps the locked
+  // principal back into the valgrant pool (admin-gated), leaving earned rewards
+  // and the gas allowance with the grantee, then marks the grant revoked.
+  rpc Clawback(MsgClawback) returns (MsgClawbackResponse);
+
+  // BurnPool permanently DESTROYS LIMO from the valgrant reserve pool
+  // (admin-gated): the coins are removed from the module account AND from total
+  // supply, proving reclaimed bootstrap capital never comes back to anyone.
+  rpc BurnPool(MsgBurnPool) returns (MsgBurnPoolResponse);
+}
+
+// MsgIssueLocked issues a locked grant to a fresh grantee account (admin-gated).
+message MsgIssueLocked {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/valgrant/MsgIssueLocked";
+
+  // admin is the bech32 address authorized to issue grants (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // grantee is the bech32 cosmos address receiving the locked account.
+  string grantee = 2 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // locked_amount is the principal in aLIMO (PermanentLockedAccount).
+  string locked_amount = 3;
+  // gas_allowance is the liquid gas allowance in aLIMO.
+  string gas_allowance = 4;
+  // validator_operator is the validator operator address (optional).
+  string validator_operator = 5;
+}
+
+message MsgIssueLockedResponse {}
+
+// MsgClawback claws back a grant from the grantee (admin-gated).
+message MsgClawback {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/valgrant/MsgClawback";
+
+  // admin is the bech32 address authorized to clawback (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // grantee is the bech32 cosmos address whose grant to clawback.
+  string grantee = 2 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+}
+
+message MsgClawbackResponse {
+  // undelegate_amount is the total amount undelegated before the clawback sweep.
+  string undelegate_amount = 1;
+  // swept_amount is the locked principal swept back to the pool immediately.
+  string swept_amount = 2;
+  // pending_amount is principal still unbonding; swept later via EndBlock.
+  string pending_amount = 3;
+}
+
+// MsgBurnPool permanently destroys LIMO from the valgrant reserve pool
+// (admin-gated). The burned coins are removed from the module account AND from
+// total supply.
+message MsgBurnPool {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/valgrant/MsgBurnPool";
+
+  // admin is the bech32 address authorized to burn the pool (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // amount is the aLIMO amount to destroy. "0" or empty burns the ENTIRE current
+  // pool balance.
+  string amount = 2;
+}
+
+message MsgBurnPoolResponse {
+  // burned is the aLIMO amount actually destroyed (removed from total supply).
+  string burned = 1;
+}

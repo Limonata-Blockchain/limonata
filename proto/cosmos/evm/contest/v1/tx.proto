@@ -1,0 +1,72 @@
+syntax = "proto3";
+package cosmos.evm.contest.v1;
+
+import "amino/amino.proto";
+import "cosmos/msg/v1/msg.proto";
+import "cosmos_proto/cosmos.proto";
+import "gogoproto/gogo.proto";
+
+option go_package = "github.com/cosmos/evm/x/contest/types";
+
+// Msg defines the x/contest Msg service: admin-gated management of the on-chain
+// Ecosystem Hub showcase registry, so dApps can be registered and scored live
+// during the contest (not only at genesis).
+service Msg {
+  option (cosmos.msg.v1.service) = true;
+
+  // RegisterShowcase adds or approves a showcase app in the on-chain registry so
+  // its on-chain activity is scored. The signer must be the contest admin
+  // configured in genesis params.
+  rpc RegisterShowcase(MsgRegisterShowcase) returns (MsgRegisterShowcaseResponse);
+
+  // RemoveShowcase removes a showcase app from the on-chain registry.
+  rpc RemoveShowcase(MsgRemoveShowcase) returns (MsgRemoveShowcaseResponse);
+
+  // SetPasskeyEnabled toggles the EXPERIMENTAL WebAuthn/P-256 passkey ante path.
+  // Admin-gated. This is the governance switch gating the audit-pending passkey
+  // feature; it ships off and can be turned off again if the audit finds issues.
+  rpc SetPasskeyEnabled(MsgSetPasskeyEnabled) returns (MsgSetPasskeyEnabledResponse);
+}
+
+// MsgRegisterShowcase registers/approves a showcase app (admin-gated).
+message MsgRegisterShowcase {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/contest/MsgRegisterShowcase";
+
+  // admin is the bech32 address authorized to manage the registry (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // address is the contract to register (EVM lower-hex 0x… or bech32 wasm addr).
+  string address = 2;
+  // dev is the identifier credited for Developer-track points.
+  string dev = 3;
+  // vm is "evm" or "wasm".
+  string vm = 4;
+}
+
+message MsgRegisterShowcaseResponse {}
+
+// MsgRemoveShowcase removes a showcase app from the registry (admin-gated).
+message MsgRemoveShowcase {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/contest/MsgRemoveShowcase";
+
+  // admin is the bech32 address authorized to manage the registry (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // address is the contract to remove.
+  string address = 2;
+}
+
+message MsgRemoveShowcaseResponse {}
+
+// MsgSetPasskeyEnabled toggles the experimental passkey ante path (admin-gated).
+message MsgSetPasskeyEnabled {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/contest/MsgSetPasskeyEnabled";
+
+  // admin is the bech32 address authorized to manage the registry (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // enabled turns the passkey ante path on (true) or off (false).
+  bool enabled = 2;
+}
+
+message MsgSetPasskeyEnabledResponse {}

@@ -44,6 +44,7 @@ type BankKeeper interface {
 	SpendableCoin(ctx context.Context, addr sdk.AccAddress, denom string) sdk.Coin
 	GetBalance(ctx context.Context, addr sdk.AccAddress, denom string) sdk.Coin
 	SendCoinsFromModuleToAccount(ctx context.Context, senderModule string, recipientAddr sdk.AccAddress, amt sdk.Coins) error
+	SendCoinsFromModuleToModule(ctx context.Context, senderModule, recipientModule string, amt sdk.Coins) error
 	MintCoins(ctx context.Context, moduleName string, amt sdk.Coins) error
 	BurnCoins(ctx context.Context, moduleName string, amt sdk.Coins) error
 	IterateAccountBalances(ctx context.Context, account sdk.AccAddress, cb func(coin sdk.Coin) bool)

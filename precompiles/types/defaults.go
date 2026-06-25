@@ -8,6 +8,7 @@ import (
 	ibcutils "github.com/cosmos/evm/ibc"
 	cmn "github.com/cosmos/evm/precompiles/common"
 	erc20Keeper "github.com/cosmos/evm/x/erc20/keeper"
+	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
 	transferkeeper "github.com/cosmos/ibc-go/v11/modules/apps/transfer/keeper"
 	channelkeeper "github.com/cosmos/ibc-go/v11/modules/core/04-channel/keeper"
 
@@ -74,6 +75,7 @@ func DefaultStaticPrecompiles(
 	govKeeper govkeeper.Keeper,
 	slashingKeeper slashingkeeper.Keeper,
 	codec codec.Codec,
+	valgrantKeeper valgrantkeeper.Keeper,
 	opts ...Option,
 ) map[common.Address]vm.PrecompiledContract {
 	precompiles := NewStaticPrecompiles().
@@ -86,7 +88,8 @@ func DefaultStaticPrecompiles(
 		WithICS20Precompile(bankKeeper, stakingKeeper, transferKeeper, channelKeeper, erc20Keeper).
 		WithBankPrecompile(bankKeeper, erc20Keeper).
 		WithGovPrecompile(govKeeper, bankKeeper, codec, opts...).
-		WithSlashingPrecompile(slashingKeeper, bankKeeper, opts...)
+		WithSlashingPrecompile(slashingKeeper, bankKeeper, opts...).
+		WithValGrantPrecompile(valgrantKeeper, bankKeeper)
 
 	return map[common.Address]vm.PrecompiledContract(precompiles)
 }

@@ -534,7 +534,7 @@ func (s *KeeperTestSuite) TestVerifyFeeAndDeductTxCostsFromUserBalance() {
 				s.Require().Nil(fees, "invalid test %d passed. fees value must be nil - '%s'", i, tc.name)
 			}
 
-			err = s.Network.App.GetEVMKeeper().DeductTxCostsFromUserBalance(s.Network.GetContext(), fees, common.BytesToAddress(tx.From))
+			err = s.Network.App.GetEVMKeeper().DeductTxCostsFromUserBalance(s.Network.GetContext(), fees, common.BytesToAddress(tx.From), false)
 			if tc.expectPassDeduct {
 				s.Require().NoError(err, "valid test %d failed - '%s'", i, tc.name)
 			} else {

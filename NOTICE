@@ -11,3 +11,16 @@ This product This product includes software developed by Cosmos Labs and is lice
 Attribution
 
 If you distribute this software or derivative works, you must include a copy of this NOTICE file (or equivalent attribution) in your distribution, as required by Section 4(d) of the Apache License, Version 2.0.
+
+---
+
+About Limonata
+
+Limonata is derived from cosmos/evm (https://github.com/cosmos/evm) and the
+Cosmos stack above, and is licensed under the Apache License, Version 2.0.
+
+Modifications and additional modules — including x/squeeze, x/gassponsor,
+x/paymaster, x/encmempool, x/contest, x/valgrant, x/netcap, the P-256 /
+WebAuthn (passkey) signature path, and the valgrant precompile — are
+Copyright 2026 The Limonata Authors, licensed under the Apache License,
+Version 2.0. The original Cosmos Labs notice above is retained as required.

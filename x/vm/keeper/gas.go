@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	evmtrace "github.com/cosmos/evm/trace"
+	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
 	"github.com/cosmos/evm/x/vm/types"
 
 	errorsmod "cosmossdk.io/errors"
@@ -55,11 +56,16 @@ func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64
 		// positive amount refund
 		refundedCoins := sdk.Coins{sdk.NewCoin(denom, sdkmath.NewIntFromBigInt(remaining))}
 
-		// refund to sender from the fee collector module account, which is the escrow account in charge of collecting tx fees
+		// refund to sender from the fee collector module account, which is the escrow account in charge of collecting tx fees.
+		// If the tx was sponsored, the gas POOL paid the fee, so the unused-gas refund must
+		// go back to the pool, never the user (else the user profits from sponsored gas).
 		var err error
-		if k.virtualFeeCollection {
+		switch {
+		case k.GetTxSponsored(ctx):
+			err = k.bankWrapper.SendCoinsFromModuleToModule(ctx, authtypes.FeeCollectorName, squeezetypes.GasPoolName, refundedCoins)
+		case k.virtualFeeCollection:
 			err = k.bankWrapper.SendCoinsFromModuleToAccountVirtual(ctx, authtypes.FeeCollectorName, msg.From.Bytes(), refundedCoins)
-		} else {
+		default:
 			err = k.bankWrapper.SendCoinsFromModuleToAccount(ctx, authtypes.FeeCollectorName, msg.From.Bytes(), refundedCoins)
 		}
 		if err != nil {

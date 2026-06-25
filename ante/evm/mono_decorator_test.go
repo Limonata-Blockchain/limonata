@@ -170,7 +170,7 @@ func setupMonoEnv(t *testing.T) monoTestEnv {
 	feemarketParams := feeMarketKeeper.GetParams(sdk.Context{})
 
 	return monoTestEnv{
-		dec:     evm.NewEVMMonoDecorator(accountKeeper, feeMarketKeeper, keeper, 0, &params, &feemarketParams),
+		dec:     evm.NewEVMMonoDecorator(accountKeeper, feeMarketKeeper, keeper, nil, 0, &params, &feemarketParams),
 		privKey: privKey,
 		cfg:     encoding.MakeConfig(uint64(constants.EighteenDecimalsChainID)),
 	}

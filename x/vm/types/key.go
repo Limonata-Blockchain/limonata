@@ -36,6 +36,7 @@ const (
 const (
 	prefixObjectBloom = iota + 1
 	prefixObjectGasUsed
+	prefixObjectSponsor
 )
 
 // KVStore key prefixes
@@ -51,6 +52,7 @@ var (
 var (
 	KeyPrefixObjectBloom   = []byte{prefixObjectBloom}
 	KeyPrefixObjectGasUsed = []byte{prefixObjectGasUsed}
+	KeyPrefixObjectSponsor = []byte{prefixObjectSponsor}
 )
 
 // AddressStoragePrefix returns a prefix to iterate over a given account storage.
@@ -66,6 +68,15 @@ func StateKey(address common.Address, key []byte) []byte {
 func ObjectGasUsedKey(txIndex int) []byte {
 	var key [1 + 8]byte
 	key[0] = prefixObjectGasUsed
+	binary.BigEndian.PutUint64(key[1:], uint64(txIndex)) //nolint:gosec
+	return key[:]
+}
+
+// ObjectSponsorKey is the per-tx-index object-store key carrying whether the current
+// tx's fee is sponsored by the gas pool (written in the ante, read in RefundGas).
+func ObjectSponsorKey(txIndex int) []byte {
+	var key [1 + 8]byte
+	key[0] = prefixObjectSponsor
 	binary.BigEndian.PutUint64(key[1:], uint64(txIndex)) //nolint:gosec
 	return key[:]
 }

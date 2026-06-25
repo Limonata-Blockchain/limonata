@@ -3,6 +3,7 @@ package ante
 import (
 	anteinterfaces "github.com/cosmos/evm/ante/interfaces"
 	antetypes "github.com/cosmos/evm/ante/types"
+	pmante "github.com/cosmos/evm/x/paymaster/ante"
 	"github.com/cosmos/evm/x/vm/types"
 	"github.com/cosmos/gogoproto/proto"
 	ibckeeper "github.com/cosmos/ibc-go/v11/modules/core/keeper"
@@ -29,6 +30,10 @@ type HandlerOptions struct {
 	FeeMarketKeeper        anteinterfaces.FeeMarketKeeper
 	EvmKeeper              anteinterfaces.EVMKeeper
 	FeegrantKeeper         ante.FeegrantKeeper
+	PaymasterKeeper        pmante.PaymasterResolver
+	PasskeyEnabled         func(sdk.Context) bool          // EXPERIMENTAL passkey ante gate (nil = off)
+	GasSponsorKeeper       anteinterfaces.SponsorKeeper    // EVM gas sponsorship resolver (nil = off)
+	NetCapKeeper           anteinterfaces.NetCapChecker    // net-seller cap on native EVM transfers (nil = off)
 	ExtensionOptionChecker ante.ExtensionOptionChecker
 	SignModeHandler        *txsigning.HandlerMap
 	SigGasConsumer         func(meter storetypes.GasMeter, sig signing.SignatureV2, params authtypes.Params) error
