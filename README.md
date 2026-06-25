@@ -53,6 +53,20 @@ Click **"Connect to RPC"** on [limonata.xyz](https://limonata.xyz), or add it ma
 
 - Network name: `Limonata Testnet` · RPC: `https://rpc.limonata.xyz` · Chain ID: `10777` · Symbol: `LIMO` · Explorer: `https://explorer.limonata.xyz`
 
+## Become a validator
+
+On Limonata, **validating is access, not capital.** There is no public token sale, so you don't *buy* a validator stake — you **apply** for one.
+
+- Approved operators receive a **locked, non-transferable** bonding grant (`x/valgrant`): you can stake it to secure the network, but you can never sell it (even after unbonding), and it is **clawback-able** by governance.
+- You keep the **rewards** your validator earns — that's liquid, your compensation for operating.
+- By design, as operators move to self-funding, the bootstrap grants are **burned** — never returned to the foundation, so no one profits from capitalizing validators.
+
+The goal: *"anyone can run a validator"* is real, not nominal — without a token sale.
+
+> **Status:** the locked grants + clawback (the `x/valgrant` module + the `0x900` admin precompile) are live on testnet. The burn-at-taper and KPI-gated grant issuance are on the roadmap (mainnet, counsel-gated).
+
+See the [validator guide](https://limonata.xyz/VALIDATOR.md) to run a node.
+
 ## Built on cosmos/evm
 
 Limonata is derived from [cosmos/evm](https://github.com/cosmos/evm) (Apache License 2.0). The upstream README is preserved as [`README.cosmos-evm.md`](README.cosmos-evm.md). See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
