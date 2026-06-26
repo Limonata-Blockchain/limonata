@@ -23,7 +23,7 @@ Limonata is a Cosmos SDK + [cosmos/evm](https://github.com/cosmos/evm) Layer&nbs
 
 **Public testnet:** RPC `https://rpc.limonata.xyz` · Explorer `https://explorer.limonata.xyz` · Faucet `https://faucet.limonata.xyz` · Site `https://limonata.xyz`
 
-> 📖 **[How Limonata works - full, honest live-vs-roadmap breakdown](HOW_IT_WORKS.md)**: who actually pays gas (and why an account needs a little LIMO, never zero), the coin & cap table, vesting, the net-seller cap, and every module's real LIVE/ROADMAP status.
+> 📖 **How Limonata works**: [Testnet (live today)](HOW_IT_WORKS.md) explains what runs now and how to use it; [the mainnet plan](HOW_IT_WORKS_MAINNET.md) covers the cap table, vesting, the net-seller cap, the inflation/sybil economics ([ECONOMICS.md](ECONOMICS.md)), and what is still being built.
 
 ## What's different (the custom modules)
 
@@ -65,7 +65,7 @@ On Limonata, **validating is access, not capital.** There is no public token sal
 
 The goal: *"anyone can run a validator"* is real, not nominal - without a token sale.
 
-> **Status:** the `x/valgrant` module + the `0x900` admin precompile are **built and proven on staging, but NOT yet activated on the live testnet** - which currently runs a single validator with the team delegating stake manually as an interim. Live grant activation, burn-at-taper, and KPI-gated grant issuance are all on the roadmap (counsel-gated for mainnet). See [`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) §6 for the full live-vs-roadmap breakdown.
+> **Status:** the `x/valgrant` module + the `0x900` admin precompile are **built and proven on staging, but NOT yet activated on the live testnet** - which currently runs a single validator with the team delegating stake manually as an interim. Live grant activation, burn-at-taper, and KPI-gated grant issuance are all on the roadmap (counsel-gated for mainnet). See [`HOW_IT_WORKS_MAINNET.md`](HOW_IT_WORKS_MAINNET.md) §6 for the full validator model and live-vs-roadmap breakdown.
 
 See the [validator guide](https://limonata.xyz/VALIDATOR.md) to run a node.
 
