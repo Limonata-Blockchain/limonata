@@ -19,6 +19,15 @@ type Params struct {
 	// MinPoolBalance is the top-up target: each block the pool is minted back up to
 	// at least this balance (aLIMO, math.Int as string).
 	MinPoolBalance string `json:"min_pool_balance"`
+	// ColdStartDaily is the flat per-account daily free-gas allowance granted to EVERY
+	// account regardless of balance, so a brand-new (dust) account can still transact
+	// (aLIMO, math.Int as string). The history-scaled bonus is added on top. Empty -> 0.
+	ColdStartDaily string `json:"cold_start_daily"`
+	// BalanceDivisor sets the history-scaled bonus: bonus = held aLIMO / BalanceDivisor.
+	// With "1" the bonus is 1:1 with held LIMO. Total allowance is
+	// min(BaselineDaily, ColdStartDaily + bonus), so HOLDING LIMO (skin-in-the-game) is
+	// what unlocks more sponsored gas and bounds sybil minting. Empty/"0" -> 1.
+	BalanceDivisor string `json:"balance_divisor"`
 }
 
 // GenesisState is the x/gassponsor genesis (plain JSON, no proto).
@@ -29,9 +38,11 @@ type GenesisState struct {
 func DefaultParams() Params {
 	return Params{
 		Enabled:        true,
-		BaselineDaily:  "1000000000000000000",         // 1 LIMO/day baseline free gas per account
+		BaselineDaily:  "1000000000000000000",         // 1 LIMO/day max allowance per account (cap)
 		RefillEnabled:  true,
 		MinPoolBalance: "200000000000000000000000000", // 200,000,000 LIMO
+		ColdStartDaily: "100000000000000000",          // 0.1 LIMO/day flat cold-start for every account
+		BalanceDivisor: "1",                            // bonus = held LIMO / 1 (1:1), capped at BaselineDaily
 	}
 }
 
@@ -43,6 +54,16 @@ func (gs GenesisState) Validate() error {
 	}
 	if _, ok := math.NewIntFromString(gs.Params.MinPoolBalance); !ok {
 		return fmt.Errorf("invalid min_pool_balance %q", gs.Params.MinPoolBalance)
+	}
+	if gs.Params.ColdStartDaily != "" {
+		if _, ok := math.NewIntFromString(gs.Params.ColdStartDaily); !ok {
+			return fmt.Errorf("invalid cold_start_daily %q", gs.Params.ColdStartDaily)
+		}
+	}
+	if gs.Params.BalanceDivisor != "" {
+		if d, ok := math.NewIntFromString(gs.Params.BalanceDivisor); !ok || !d.IsPositive() {
+			return fmt.Errorf("invalid balance_divisor %q (must be a positive integer)", gs.Params.BalanceDivisor)
+		}
 	}
 	return nil
 }

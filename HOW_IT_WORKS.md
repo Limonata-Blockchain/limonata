@@ -27,7 +27,7 @@ On most chains you pay gas and must hold the native coin just to move. On Limona
 
 > **Grab a little test LIMO from the faucet once. After that, everything you do is gasless and your balance never drops.** That small balance is a one-time proof-of-funds; it is never actually spent on sponsored gas.
 
-Every account gets a protocol-paid allowance of **10 LIMO/day** of gas. At the near-zero fees on the testnet, that covers an effectively unlimited number of ordinary transactions.
+Every account gets a protocol-paid daily gas allowance that is **history-scaled**: a small flat cold-start (0.1 LIMO/day) for any account, plus a bonus that grows with the LIMO you hold, up to a 10 LIMO/day cap. At the near-zero fees on the testnet, even the cold-start covers an effectively unlimited number of ordinary transactions. Tying the bonus to held LIMO is what bounds sybil farming of the free gas. **Developers can also fund gas for their own contract** (see `x/sponsorpool` below): deposit LIMO earmarked for a contract and its users transact free, paid from your deposit, until it runs dry.
 
 **Be precise about "free":** free for the user means *the user does not pay; the protocol absorbs the cost.* Gasless never means nobody pays. How that subsidy is funded, and what it means for the coin supply, is covered in the [mainnet plan](/how-it-works/mainnet).
 
@@ -50,7 +50,8 @@ These are live on the testnet today:
 
 | Module | What it does |
 |---|---|
-| `x/gassponsor` | The protocol pays EVM gas: a 10 LIMO/day per-account allowance, paid from an on-chain gas pool that refills itself. |
+| `x/gassponsor` | The protocol pays EVM gas from an on-chain self-refilling pool: a history-scaled per-account daily allowance (a 0.1 LIMO/day cold-start + a bonus that grows with held LIMO, capped at 10 LIMO/day). |
+| `x/sponsorpool` (precompile `0x901`) | Developer-funded gas: a dev deposits LIMO earmarked for their contract (`deposit(address,uint256)`); transactions to that contract are sponsored from the deposit until it runs dry. Permissionless, withdrawable, and non-inflationary (the dev funds it, not new mint). |
 | `x/squeeze` | Every block, splits collected fees: 40% burned, 10% recycled into the gas pool, ~50% to validators. |
 | `x/paymaster` | The same gasless idea for Cosmos-SDK transactions (one active sponsorship policy). |
 | `x/encmempool` | A commit-reveal ordering primitive (the foundation for later anti-MEV work). |

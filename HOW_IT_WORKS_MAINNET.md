@@ -9,11 +9,11 @@
 | Capability | Status | Note |
 |---|---|---|
 | Uncapped sponsorship for featured dApps | **BUILT, not wired live** | The protocol path exists, but no dApp is registered on-chain and the approval is admin-gated. Today all sponsored gas flows through the per-account baseline. |
-| Developer self-funded sponsorship (self-serve paymaster) | **PLANNED** | The intended model where a developer funds gas for their own users with their own LIMO. Currently a scaffold with no message server. |
+| Developer self-funded sponsorship | **LIVE (2026-06-26)** | `x/sponsorpool` + precompile `0x901`: a developer deposits LIMO earmarked for their contract; its transactions are sponsored from that deposit (permissionless, withdrawable, non-inflationary because the dev funds it). |
 | `x/valgrant` validator grants + `0x900` admin precompile | **BUILT, not on live chain** | Locked-grant validator bootstrap, proven on staging, absent from the live genesis. See section 6. |
 | Encrypted mempool / real anti-MEV | **PLANNED** | Today `x/encmempool` is a commit-reveal ordering primitive only, no encryption or threshold key. |
 | Second validator / join automation | **PLANNED** | The live testnet runs a single validator. |
-| History-scaled gas allowance | **PLANNED** | The key anti-sybil and inflation-control mechanism (see section 3). Not in the code yet. |
+| History-scaled gas allowance | **LIVE (2026-06-26)** | The per-account daily allowance is now a 0.1 LIMO/day cold-start + a bonus that grows with held LIMO, capped at 10/day - the key anti-sybil and inflation-control mechanism (see section 3). |
 | On-chain governance (replace the admin key) | **PLANNED** | Today one admin key gates dApp approval; decentralizing that is on the roadmap. |
 | Mainnet genesis | **PLANNED** | Real key custody, a governed reserve, and a 12-month + 36-month vesting schedule. Only the testnet is genesis'd today. |
 | 250M airdrop distribution | **PLANNED, method undecided** | The largest single allocation; its method is a deliberate decision, gated on counsel (see section 7). |

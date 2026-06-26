@@ -51,6 +51,9 @@ import (
 	"github.com/cosmos/evm/x/gassponsor"
 	gassponsorkeeper "github.com/cosmos/evm/x/gassponsor/keeper"
 	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
+	"github.com/cosmos/evm/x/sponsorpool"
+	sponsorpoolkeeper "github.com/cosmos/evm/x/sponsorpool/keeper"
+	sponsorpooltypes "github.com/cosmos/evm/x/sponsorpool/types"
 	"github.com/cosmos/evm/x/netcap"
 	netcapkeeper "github.com/cosmos/evm/x/netcap/keeper"
 	netcaptypes "github.com/cosmos/evm/x/netcap/types"
@@ -210,6 +213,7 @@ type EVMD struct {
 	ValGrantKeeper  valgrantkeeper.Keeper
 	EncMempoolKeeper encmempoolkeeper.Keeper
 	GasSponsorKeeper gassponsorkeeper.Keeper
+	SponsorPoolKeeper sponsorpoolkeeper.Keeper
 	NetCapKeeper     netcapkeeper.Keeper
 	EVMMempool      sdkmempool.ExtMempool
 
@@ -269,6 +273,7 @@ func NewExampleApp(
 		valgranttypes.StoreKey,
 		encmempooltypes.StoreKey,
 		gassponsortypes.StoreKey,
+		sponsorpooltypes.StoreKey,
 		netcaptypes.StoreKey,
 		// ibc keys
 		ibcexported.StoreKey, ibctransfertypes.StoreKey,
@@ -498,6 +503,15 @@ func NewExampleApp(
 		app.StakingKeeper,
 	)
 
+	// Limonata: x/sponsorpool keeper, also instantiated BEFORE the EVM keeper so its 0x901
+	// precompile gets a live reference. Deposits land in the gas pool (squeezetypes.GasPoolName),
+	// which keeps the pool above its mint target so escrow-funded gas is dev-funded (no mint).
+	app.SponsorPoolKeeper = sponsorpoolkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[sponsorpooltypes.StoreKey]),
+		app.BankKeeper,
+		squeezetypes.GasPoolName,
+	)
+
 	// Set up EVM keeper
 	tracer := cast.ToString(appOpts.Get(srvflags.EVMTracer))
 
@@ -527,6 +541,7 @@ func NewExampleApp(
 			app.SlashingKeeper,
 			appCodec,
 			app.ValGrantKeeper,
+			app.SponsorPoolKeeper,
 		),
 	)
 
@@ -611,6 +626,7 @@ func NewExampleApp(
 		runtime.NewKVStoreService(keys[gassponsortypes.StoreKey]),
 		app.ContestKeeper,
 		app.BankKeeper,
+		app.SponsorPoolKeeper,
 		authtypes.FeeCollectorName,
 	)
 	squeezeKeeper := squeezekeeper.NewKeeper(app.BankKeeper, authtypes.FeeCollectorName)
@@ -659,6 +675,7 @@ func NewExampleApp(
 		valgrant.NewAppModule(app.ValGrantKeeper),
 		encmempool.NewAppModule(app.EncMempoolKeeper),
 		gassponsor.NewAppModule(app.GasSponsorKeeper),
+		sponsorpool.NewAppModule(app.SponsorPoolKeeper),
 		netcap.NewAppModule(app.NetCapKeeper),
 	)
 
@@ -770,6 +787,7 @@ func NewExampleApp(
 		valgranttypes.ModuleName,
 		encmempooltypes.ModuleName,
 		gassponsortypes.ModuleName,
+		sponsorpooltypes.ModuleName,
 		netcaptypes.ModuleName,
 	}
 	app.ModuleManager.SetOrderInitGenesis(genesisModuleOrder...)

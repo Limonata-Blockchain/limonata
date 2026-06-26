@@ -19,7 +19,9 @@ import (
 	slashingprecompile "github.com/cosmos/evm/precompiles/slashing"
 	stakingprecompile "github.com/cosmos/evm/precompiles/staking"
 	valgrantprecompile "github.com/cosmos/evm/precompiles/valgrant"
+	sponsorpoolprecompile "github.com/cosmos/evm/precompiles/sponsorpool"
 	erc20Keeper "github.com/cosmos/evm/x/erc20/keeper"
+	sponsorpoolkeeper "github.com/cosmos/evm/x/sponsorpool/keeper"
 	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
 	transferkeeper "github.com/cosmos/ibc-go/v11/modules/apps/transfer/keeper"
 	channelkeeper "github.com/cosmos/ibc-go/v11/modules/core/04-channel/keeper"
@@ -196,5 +198,16 @@ func (s StaticPrecompiles) WithValGrantPrecompile(
 ) StaticPrecompiles {
 	valgrantPrecompile := valgrantprecompile.NewPrecompile(valgrantKeeper, bankKeeper)
 	s[valgrantPrecompile.Address()] = valgrantPrecompile
+	return s
+}
+
+// WithSponsorPoolPrecompile registers the Limonata x/sponsorpool precompile (0x901):
+// developers deposit/withdraw native LIMO to fund gas for a specific contract.
+func (s StaticPrecompiles) WithSponsorPoolPrecompile(
+	sponsorPoolKeeper sponsorpoolkeeper.Keeper,
+	bankKeeper cmn.BankKeeper,
+) StaticPrecompiles {
+	pc := sponsorpoolprecompile.NewPrecompile(sponsorPoolKeeper, bankKeeper)
+	s[pc.Address()] = pc
 	return s
 }

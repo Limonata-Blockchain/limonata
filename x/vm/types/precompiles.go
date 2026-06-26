@@ -17,6 +17,9 @@ const (
 	// ValGrantPrecompileAddress is the Limonata x/valgrant admin precompile.
 	// Fresh slot 0x900 (does not collide with any existing static precompile).
 	ValGrantPrecompileAddress = "0x0000000000000000000000000000000000000900"
+	// SponsorPoolPrecompileAddress is the Limonata x/sponsorpool precompile: developers
+	// deposit/withdraw native LIMO to fund gas for a specific contract. Slot 0x901.
+	SponsorPoolPrecompileAddress = "0x0000000000000000000000000000000000000901"
 )
 
 // AvailableStaticPrecompiles defines the full list of all available EVM extension addresses.
@@ -35,4 +38,5 @@ var AvailableStaticPrecompiles = []string{
 	SlashingPrecompileAddress,
 	ICS02PrecompileAddress,
 	ValGrantPrecompileAddress,
+	SponsorPoolPrecompileAddress,
 }

@@ -22,11 +22,12 @@ type Keeper struct {
 	storeService corestore.KVStoreService
 	contest      types.ContestReader
 	bank         types.BankKeeper
+	pool         types.SponsorPoolReader
 	feeCollector string
 }
 
-func NewKeeper(ss corestore.KVStoreService, contest types.ContestReader, bank types.BankKeeper, feeCollector string) Keeper {
-	return Keeper{storeService: ss, contest: contest, bank: bank, feeCollector: feeCollector}
+func NewKeeper(ss corestore.KVStoreService, contest types.ContestReader, bank types.BankKeeper, pool types.SponsorPoolReader, feeCollector string) Keeper {
+	return Keeper{storeService: ss, contest: contest, bank: bank, pool: pool, feeCollector: feeCollector}
 }
 
 func (k Keeper) store(ctx context.Context) corestore.KVStore { return k.storeService.OpenKVStore(ctx) }
@@ -81,18 +82,55 @@ func (k Keeper) IsSponsored(ctx sdk.Context, sender sdk.AccAddress, to *common.A
 		}
 	}
 
-	// 2. Per-account daily baseline (bounded, debited here).
-	baseline, ok := math.NewIntFromString(p.BaselineDaily)
-	if !ok || !baseline.IsPositive() {
+	// 1.5 Per-contract developer escrow (x/sponsorpool): dev-funded, non-inflationary.
+	// Reserve debits the escrow accounting; the gas pool pays the fee via the normal
+	// sponsored path (the deposit keeps the pool above its mint target, so no extra mint).
+	// (true, true) skips the per-account baseline counter and routes refunds to the pool.
+	if to != nil && k.pool != nil && k.pool.Reserve(ctx, strings.ToLower(to.Hex()), amt) {
+		return true, true
+	}
+
+	// 2. Per-account daily allowance (history-scaled: cold-start + balance bonus, capped
+	//    at BaselineDaily). Bounded, and debited here.
+	allow := k.effectiveAllowance(ctx, p, sender)
+	if !allow.IsPositive() {
 		return false, false
 	}
 	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
 	used := k.allowanceUsed(ctx, day, sender)
-	if used.Add(amt).LTE(baseline) {
+	if used.Add(amt).LTE(allow) {
 		k.setAllowanceUsed(ctx, day, sender, used.Add(amt))
 		return true, false
 	}
 	return false, false
+}
+
+// effectiveAllowance is an account's history-scaled daily free-gas cap:
+//
+//	allowance = min(BaselineDaily, ColdStartDaily + heldLIMO / BalanceDivisor)
+//
+// Every account gets the flat ColdStartDaily so a brand-new (dust) account can start;
+// holding LIMO (skin-in-the-game) adds a bonus up to the BaselineDaily cap. This bounds
+// sybil minting: more sponsored gas requires holding more real LIMO per account.
+func (k Keeper) effectiveAllowance(ctx sdk.Context, p types.Params, sender sdk.AccAddress) math.Int {
+	baseline, ok := math.NewIntFromString(p.BaselineDaily)
+	if !ok || !baseline.IsPositive() {
+		return math.ZeroInt()
+	}
+	cold, ok := math.NewIntFromString(p.ColdStartDaily)
+	if !ok {
+		cold = math.ZeroInt()
+	}
+	div, ok := math.NewIntFromString(p.BalanceDivisor)
+	if !ok || !div.IsPositive() {
+		div = math.OneInt()
+	}
+	held := k.bank.GetAllBalances(ctx, sender).AmountOf(types.FeeDenom)
+	allow := cold.Add(held.Quo(div))
+	if allow.GT(baseline) {
+		allow = baseline
+	}
+	return allow
 }
 
 // --- per-account daily allowance ---
@@ -125,4 +163,10 @@ func (k Keeper) setAllowanceUsed(ctx context.Context, day uint64, sender sdk.Acc
 func (k Keeper) AllowanceUsed(ctx sdk.Context, sender sdk.AccAddress) math.Int {
 	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
 	return k.allowanceUsed(ctx, day, sender)
+}
+
+// EffectiveAllowance exposes an account's current history-scaled daily allowance cap
+// (query/telemetry/tests).
+func (k Keeper) EffectiveAllowance(ctx sdk.Context, sender sdk.AccAddress) math.Int {
+	return k.effectiveAllowance(ctx, k.GetParams(ctx), sender)
 }
