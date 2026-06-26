@@ -183,6 +183,73 @@ The intended Limonata model is **apply, don't buy**. There is no public token sa
 | Mainnet genesis (real key custody, governed reserve, 12mo+36mo vesting) | only testnet (MODE default) is genesis'd live |
 | 250M airdrop distribution + Mainnet Genesis | future |
 
+
+---
+
+## 8. Steady-state inflation and the sybil surface (mainnet)
+
+> This section is the honest accounting of where "free gas" lands over time, and why the steady-state inflation rate is **not yet bounded in code**. It is conservative on purpose: the headline numbers below are upper bounds, and the single mitigation that would bound them (history-scaled allowance) is **designed but not built**.
+
+### 8.1 Per-fee supply deltas (code-verified)
+
+Every block, `x/squeeze` burns 40% of the fee collector (the only burn on chain), recycles 10% into the gas pool, and sends ~50% to validators; then `x/gassponsor` re-mints the pool back up to its 200,000,000 LIMO target. Tracing one effective fee `X` (the post-refund amount that actually nets into `fee_collector`, identical in form for both paths):
+
+- **Sponsored fee:** net supply change = **+0.5X**. This is an **UPPER BOUND**, valid only when the pool is exactly at target with no carried excess. The refill is asymmetric (it never removes excess above target), so in mixed traffic a buffer builds from recycled user-paid grants and absorbs later sponsored deficits, dragging the realized coefficient down from +0.5 toward -0.4.
+- **User-paid fee:** net supply change = **-0.4X** (exact). The user moves pre-existing balance; only the 40% burn changes supply.
+
+### 8.2 The formula
+
+Let `F` = total annual gas fees (LIMO, effective post-refund value into `fee_collector`) and `s` = sponsored fraction.
+
+```
+net_supply_change = F * (0.9*s - 0.4)
+annual inflation r = F * (0.9*s - 0.4) / 1e9
+```
+
+- **Break-even:** `s* = 4/9 ~ 44.4%`. Above 44.4% sponsored, net inflationary (upper bound); below it, the burn dominates and it is net deflationary. Because the realized coefficient drops below 0.5 once an excess buffer builds, 4/9 is a *lower bound* on the true break-even.
+- **Design case (`s -> 1`, gasless UX):** `r ~ 0.5 * F / 1e9`.
+- **The denominator:** `r` is against **total** supply (~1B LIMO, which includes the premine and the locked validator grants). Dilution of the **circulating float** is proportionally larger.
+
+### 8.3 Scenario table
+
+All rows assume `s ~ 1`, so net mint = `0.5 * F`. Maxed rows use the live baseline: `F = accounts x 10 LIMO/day x 365`. All rows are upper bounds (they assume gas-used ~ gas-limit; unused gas is refunded to the pool and lowers realized mint).
+
+| Scenario | Accounts | Sponsored gas/acct/day | Annual sponsored gas F | Net mint | Inflation (vs total supply) |
+|---|---:|---:|---:|---:|---:|
+| Organic-light | 10,000 | 0.1 LIMO | 365,000 LIMO | +182,500 LIMO | +0.018% |
+| Organic-heavy | 100,000 | 1 LIMO | 36,500,000 LIMO | +18,250,000 LIMO | +1.83% |
+| Sybil-baseline-maxed | 100,000 | 10 LIMO (full baseline) | 365,000,000 LIMO | +182,500,000 LIMO | +18.25% |
+| Sybil-at-scale | 1,000,000 | 10 LIMO (full baseline) | 3,650,000,000 LIMO | +1,825,000,000 LIMO | +182.5% (supply ~2.8x in one year) |
+
+The protocol cannot distinguish organic-heavy (100k genuine accounts at 1 LIMO/day) from a sybil farm; both mint by the same mechanism. About **5,480 maxed accounts already mint 1% of total supply per year**, and more against the circulating float.
+
+### 8.4 The synthesis: inflation IS the sybil surface
+
+The pool is re-minted to target every block, so the protocol mints whatever it takes to cover sponsored gas: net mint `= 0.5 * F` (upper bound). But `F` is not a market price. It is capped by:
+
+```
+F_max = (farmable accounts N) * baseline * 365
+r_max ~ 0.5 * N * 3650 / 1e9 = N * 1.825e-6   (vs total supply)
+```
+
+The live baseline is **10 LIMO/day** and accounts are **~free**: lazily created at no fee, with the only cost a one-time, reusable balance the affordability gate checks but never debits. The single-tx floor is ~21,000 aLIMO; to actually max the 10 LIMO/day counter at a feasible ~1e5 txs/day you hold a reusable float on the order of **~1e-4 LIMO** (about 0.001% of the gas it unlocks). So inflation is a direct linear function of how many accounts an attacker chooses to farm. There is no separate inflation parameter. **Steady-state inflation and the sybil surface are the same quantity.**
+
+**The base-fee tension.** At the live `base_fee ~ 0`, an organic zero-priced tx is free-by-truncation (not sponsored): it debits no counter and triggers no mint, so organic inflation is ~0 today. But **minting is already farmable on demand today**: set a positive gas price (the base fee is ~0, so the price is pure tip), sponsorship engages, and the pool re-mints. A positive mainnet fee floor does not create the attack; it only *additionally* forces organic traffic into the minted path. Under the current flat-baseline design you cannot get price-based anti-spam and zero sponsored-mint at once.
+
+### 8.5 Mitigations
+
+| Mitigation | Status | Effect |
+|---|---|---|
+| History-scaled allowance (scale baseline by account age / tx-history / min-balance) | **ROADMAP (designed, NOT built)** | The linchpin: bounds F to genuine long-lived accounts, collapses the sybil surface. Verified absent in code (Params has no scaling knob even reserved). |
+| Lower mainnet baseline (vs live 10 LIMO/day; source default 1 LIMO/day) | **ROADMAP decision** | Linearly lowers per-account yield; a knob, not a structural fix. |
+| Non-zero mainnet fee floor | **ROADMAP decision** | Restores anti-spam, but forces organic traffic into the minted path; set jointly with baseline + history-scaling. |
+| Route sponsorship via approved-dApp / dev-funded models | **CODE LIVE / use ROADMAP** | Puts an accountable payer in front of the mint; zero live dApp registrations today. |
+| Asymmetric pool buffer (excess never clawed back) | **LIVE (structural)** | Mild natural dampener pulling realized inflation below +0.5X; not a control. |
+| Per-epoch mint cap / circuit-breaker | **ROADMAP (not built)** | Would hard-bound worst-case inflation independent of account count. |
+
+### 8.6 Honest admission
+
+The steady-state inflation rate **is not yet bounded in code.** The only allowance gate is a flat per-(day, sender) baseline against a single constant, and the history-scaling rule that would bound it to genuine accounts is design intent, not in the binary. The +0.5X figure is an upper bound, organic inflation is ~0 today only because the live base fee is ~0 (attacker-driven minting is already possible), and `r` is quoted against total supply so circulating-float dilution is larger. Before mainnet the open decisions are: a target inflation cap, the baseline size, whether/what fee floor, the history-scaling curve, the pool refill policy, and whether the open baseline path is enabled at launch at all. The full quantitative model is in [`ECONOMICS.md`](ECONOMICS.md). Until the history-scaled allowance is built, treat the open per-account baseline path as unbounded.
 ---
 
 ### Footnotes on honesty
