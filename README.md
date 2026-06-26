@@ -30,7 +30,8 @@ Limonata is a Cosmos SDK + [cosmos/evm](https://github.com/cosmos/evm) Layer&nbs
 Limonata adds protocol-level modules on top of cosmos/evm:
 
 - **`x/squeeze`** - every block, transaction fees are split in BeginBlock: 50% to validators, 40% burned, 10% recycled into the gas pool.
-- **`x/gassponsor`** - the protocol pays EVM gas from an on-chain pool: a per-account daily allowance + uncapped for approved dApps, refilled by the squeeze recycle (and a mint backstop). Users transact without holding LIMO.
+- **`x/gassponsor`** - the protocol pays EVM gas from a self-refilling on-chain pool: a **history-scaled** per-account daily allowance (a small cold-start for every account, plus a bonus that grows with the LIMO you hold, capped) which bounds sybil farming of the free gas.
+- **`x/sponsorpool`** (precompile `0x901`) - **developer-funded gas**: a dev deposits LIMO earmarked for their contract; transactions to that contract are sponsored from the deposit until it runs dry. Permissionless, withdrawable, and non-inflationary (the dev funds it, not new mint).
 - **`x/paymaster`** - gasless sponsorship for Cosmos-SDK transactions from the same pool.
 - **`x/encmempool`** - a commit-reveal mempool (anti-MEV foundation).
 - **`x/contest`** - on-chain Ecosystem Development Contest leaderboard.
