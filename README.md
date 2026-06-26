@@ -23,6 +23,8 @@ Limonata is a Cosmos SDK + [cosmos/evm](https://github.com/cosmos/evm) Layer&nbs
 
 **Public testnet:** RPC `https://rpc.limonata.xyz` · Explorer `https://explorer.limonata.xyz` · Faucet `https://faucet.limonata.xyz` · Site `https://limonata.xyz`
 
+> 📖 **[How Limonata works — full, honest live-vs-roadmap breakdown](HOW_IT_WORKS.md)**: who actually pays gas (and why an account needs a little LIMO, never zero), the coin & cap table, vesting, the net-seller cap, and every module's real LIVE/ROADMAP status.
+
 ## What's different (the custom modules)
 
 Limonata adds protocol-level modules on top of cosmos/evm:
@@ -58,12 +60,12 @@ Click **"Connect to RPC"** on [limonata.xyz](https://limonata.xyz), or add it ma
 On Limonata, **validating is access, not capital.** There is no public token sale, so you don't *buy* a validator stake — you **apply** for one.
 
 - Approved operators receive a **locked, non-transferable** bonding grant (`x/valgrant`): you can stake it to secure the network, but you can never sell it (even after unbonding), and it is **clawback-able** by governance.
-- You keep the **rewards** your validator earns — that's liquid, your compensation for operating.
+- You keep the **rewards** your validator earns — that's liquid, your compensation for operating. *(Honest caveat: today `x/mint` staking inflation is off and fees are ~0, so those rewards are effectively zero right now — the stream only becomes meaningful with real fee volume or a future schedule. It's a property of the model, not current income.)*
 - By design, as operators move to self-funding, the bootstrap grants are **burned** — never returned to the foundation, so no one profits from capitalizing validators.
 
 The goal: *"anyone can run a validator"* is real, not nominal — without a token sale.
 
-> **Status:** the locked grants + clawback (the `x/valgrant` module + the `0x900` admin precompile) are live on testnet. The burn-at-taper and KPI-gated grant issuance are on the roadmap (mainnet, counsel-gated).
+> **Status:** the `x/valgrant` module + the `0x900` admin precompile are **built and proven on staging, but NOT yet activated on the live testnet** — which currently runs a single validator with the team delegating stake manually as an interim. Live grant activation, burn-at-taper, and KPI-gated grant issuance are all on the roadmap (counsel-gated for mainnet). See [`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) §6 for the full live-vs-roadmap breakdown.
 
 See the [validator guide](https://limonata.xyz/VALIDATOR.md) to run a node.
 
