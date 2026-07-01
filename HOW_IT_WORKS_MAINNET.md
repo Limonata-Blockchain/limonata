@@ -1,121 +1,116 @@
 # How Limonata Works: The Mainnet Plan
 
-> This page describes where Limonata is going: what is designed but not yet live, the token economics behind "free gas," and the decisions still open before a mainnet launch. For what is actually running today, see [How it works: testnet](/how-it-works). This page is intent, and it is conservative. Items are tagged **BUILT** (the code exists and is proven on staging, but is not activated on the live chain) or **PLANNED** (not built yet). Nothing here is a promise.
+> This is the plan for mainnet - how the coin is split, how "free gas" is paid for, and how validators join. For what runs **today**, see the [testnet page](/how-it-works). This is intent, not a promise. Tags: **BUILT** = the code exists and is proven on staging; **PLANNED** = not built yet.
 
 ---
 
-## 1. What is designed but not yet activated
+## 1. The coin
 
-| Capability | Status | Note |
-|---|---|---|
-| Uncapped sponsorship for featured dApps | **BUILT, not wired live** | The protocol path exists, but no dApp is registered on-chain and the approval is admin-gated. Today all sponsored gas flows through the per-account baseline. |
-| Developer self-funded sponsorship | **LIVE (2026-06-26)** | `x/sponsorpool` + precompile `0x901`: a developer deposits LIMO earmarked for their contract; its transactions are sponsored from that deposit (permissionless, withdrawable, non-inflationary because the dev funds it). |
-| `x/valgrant` validator grants + `0x900` admin precompile | **BUILT, not on live chain** | Locked-grant validator bootstrap, proven on staging, absent from the live genesis. See section 6. |
-| Encrypted mempool / real anti-MEV | **PLANNED** | Today `x/encmempool` is a commit-reveal ordering primitive only, no encryption or threshold key. |
-| Second validator / join automation | **PLANNED** | The live testnet runs a single validator. |
-| History-scaled gas allowance | **LIVE (2026-06-26)** | The per-account daily allowance is now a 0.1 LIMO/day cold-start + a bonus that grows with held LIMO, capped at 10/day - the key anti-sybil and inflation-control mechanism (see section 3). |
-| On-chain governance (replace the admin key) | **PLANNED** | Today one admin key gates dApp approval; decentralizing that is on the roadmap. |
-| Mainnet genesis | **PLANNED** | Real key custody, a governed reserve, and a 12-month + 36-month vesting schedule. Only the testnet is genesis'd today. |
-| 250M airdrop distribution | **PLANNED, method undecided** | The largest single allocation; its method is a deliberate decision, gated on counsel (see section 7). |
+`LIMO` is a pure **utility coin**: it pays for gas and for staking, nothing else. No yield, dividend, profit-share, governance share, or equity.
+
+**Total supply at launch: 1,000,000,000 LIMO.** (It is not strictly fixed - the gas pool tops itself up by minting to keep transactions free; see section 3.)
 
 ---
 
-## 2. The coin and supply at mainnet
+## 2. Where the 1 billion LIMO goes
 
-`LIMO` is a pure network-utility coin: gas and staking only. No yield, dividend, profit-share, governance vote, or equity.
+Think of it in **three groups**:
 
-- **Total supply: 1,000,000,000 LIMO.** `x/mint` staking inflation is 0. **Caveat:** the supply is not strictly hard-capped, because the gas pool refills by minting (see section 3).
+**① The team's share - 25%**
+| Bucket | LIMO | |
+|---|---:|---|
+| Founder & core team | 100M | locked, vests over a 12-month cliff + 36 months |
+| Foundation / treasury | 150M | same vesting; funds the project's operations |
 
-### Cap table (planned mainnet genesis)
+**② Protocol pools - 25% (owned by no one; they run features)**
+| Bucket | LIMO | |
+|---|---:|---|
+| Gas pool | 200M | pays for free ("gasless") transactions |
+| Validator bootstrap pool | 50M | funds the locked validator grants (section 5) |
 
-| Bucket | LIMO | % | Form |
-|---|---:|---:|---|
-| Airdrop reserve | 250,000,000 | 25% | distribution method undecided (section 7) |
-| Gas pool | 200,000,000 | 20% | module account, refill target |
-| Foundation / treasury | 150,000,000 | 15% | vesting |
-| Strategic reserve | 149,990,000 | ~15% | governed reserve key |
-| Founder / core team | 100,000,000 | 10% | vesting |
-| Relayer / IBC float | 50,000,000 | 5% | liquid |
-| Safety buffer | 50,000,000 | 5% | liquid |
-| Valgrant bootstrap pool | 50,000,000 | 5% | module account |
-| Genesis validator | 10,000 | ~0% | liquid |
+**③ Reserves & operations - 50%**
+| Bucket | LIMO | |
+|---|---:|---|
+| Ecosystem & community reserve | 250M | for the ecosystem; allocation undecided, governed |
+| Strategic reserve | 150M | long-term, governance-locked |
+| Relayer / IBC float | 50M | pays cross-chain (IBC) relayers |
+| Safety buffer | 50M | emergency fund (incidents, bugs) |
 
-### Vesting and anti-dump
+*(A tiny "genesis validator" account - about 10,000 LIMO - runs the very first block. It's a technical bootstrap, not anyone's wealth.)*
 
-- **Founder (100M) and Foundation (150M)** vest on a **12-month cliff + 36 monthly steps**. Nothing is spendable until the cliff elapses. (On the testnet this is compressed to seconds for observability.)
-- **Net-seller cap (`x/netcap`, live on testnet):** a rolling-window rate-limit on outbound transfers from the founder and foundation, enforced on both Cosmos sends and native EVM transfers. The **mainnet window and cap are a placeholder** and must be set with counsel.
-
----
-
-## 3. The economics: who pays for "free gas," and inflation
-
-This is the honest accounting of "free gas" over time. Headline numbers are upper bounds; the one mechanism that would bound them (history-scaled allowance) is planned, not built. The full quantitative model is in [`ECONOMICS.md`](ECONOMICS.md).
-
-**Per fee, net supply change (code-verified):**
-- Sponsored fee: **+0.5X** (an upper bound; a buffer in the pool can pull this toward -0.4X).
-- User-paid fee: **-0.4X** (the 40% squeeze burn is the only burn on chain).
-
-**Annual:** with `F` = total annual gas fees and `s` = sponsored fraction:
-```
-inflation r = F * (0.9*s - 0.4) / 1e9
-```
-Break-even at `s = 44.4%`; the design runs at `s -> 1` (gasless), so `r ~ 0.5 * F / 1e9`.
-
-| Scenario | Accounts | Gas/acct/day | Inflation/yr (vs total supply) |
-|---|---:|---:|---:|
-| Organic-light | 10,000 | 0.1 LIMO | +0.018% |
-| Organic-heavy | 100,000 | 1 LIMO | +1.83% |
-| Sybil, baseline maxed | 100,000 | 10 LIMO | +18.25% |
-| Sybil, at scale | 1,000,000 | 10 LIMO | +182.5% |
-
-**The core finding: steady-state inflation IS the sybil surface.** The pool re-mints to cover all sponsored gas, and sponsored gas is capped only by (number of accounts) x (per-account baseline). Accounts are effectively free to create, so inflation scales linearly with how many accounts draw the allowance. About 5,480 maxed accounts mint 1% of total supply per year, and more against the circulating float (the 1B includes the premine and locked grants, which do not circulate). Today realized inflation is ~0 because the live base fee is ~0, but minting is already exploitable by setting a positive gas price.
-
-**The linchpin (PLANNED):** a **history-scaled allowance** that gives a fresh account ~0 allowance and only grows it for long-lived genuine accounts. This bounds the sybil surface and therefore the inflation. Until it is built, the open per-account baseline path should be treated as unbounded.
+**The team cannot dump.** The founder and foundation coins are **locked**: nothing unlocks for 12 months, then it releases slowly over 36 months. On top of that, a rate-limit caps how much those wallets can ever send out per period. The premine is held, not sold.
 
 ---
 
-## 4. The open decisions before mainnet
+## 3. "Free gas" - who pays, and inflation
 
-These are quantitative choices to make (with counsel where relevant) before a mainnet launch:
+Free gas isn't actually free - **a pool pays for it.** When the network covers your transaction, the cost comes out of the **200M Gas Pool**, and the pool refills itself by **minting a little new LIMO**.
 
-1. A target steady-state inflation cap (for example <= 2%/yr).
-2. The per-account daily gas baseline (live is 10 LIMO/day; the code default is 1).
-3. Whether to set a positive minimum gas fee for anti-spam, and its value.
-4. The history-scaling curve (how allowance grows with account age and history).
-5. The pool refill policy (claw back excess above target? a per-epoch mint cap?).
-6. Whether the open per-account baseline path is even enabled at mainnet genesis, or sponsorship is gated behind approved-dApp and developer-funded models from day one.
+So two honest points:
+- "Gasless" is a **subsidy**, and it adds **mild inflation** over time. The supply is **not hard-capped**.
+- The thing that keeps inflation in check is a **limit on how much free gas each account gets** - lots for long-lived real accounts, ~0 for fresh throwaway accounts - so it can't be farmed by spinning up wallets. **(BUILT.)**
 
----
-
-## 5. Decentralization roadmap
-
-The chain is honest that it is team-operated today: a single validator, team-set genesis, and dApp sponsorship approval gated by one admin key (no on-chain governance yet). The path to "credibly neutral" runs through:
-
-- single validator -> multiple independent operators (second-validator enablement, join automation);
-- one admin key -> on-chain governance for sensitive roles (dApp approval, parameters);
-- activating `x/valgrant` so validator onboarding is by application and grant, not by team delegation.
+Staking inflation is **off** by default; the only minting is the gas-pool refill. The full math is in [`ECONOMICS.md`](ECONOMICS.md).
 
 ---
 
-## 6. Validating at mainnet (the valgrant model)
+## 4. Decentralization - measurable, on a schedule
 
-The intended model is **apply, do not buy.** There is no public token sale, so you do not purchase a validator stake; you apply for one.
+The chain is honest that it is **team-operated today**. But the mechanisms that make decentralization real are now **built** (proven on staging, to ship in the mainnet binary):
 
-- An approved operator receives a **locked, non-transferable** grant: you can stake it to secure the network, but you can never sell it, and it is clawback-able.
-- You keep the **liquid rewards** your validator earns. **Honest caveat:** today inflation is off and fees are ~0, so those rewards are effectively zero; the stream only becomes meaningful with real fee volume or a future schedule. It is a property of the model, not current income.
-- As operators move to self-funding, the bootstrap grants are meant to be **burned**, never returned to the foundation, so no one profits from capitalizing validators.
-
-**Status:** the `x/valgrant` module and its `0x900` admin precompile are built and proven on staging, but **not yet activated on the live chain** (which uses the interim team-delegation model described on the [testnet page](/how-it-works)). Burn-at-taper and governance clawback are planned.
+- **The validator set grows on a schedule:** it starts at **16** curated operators and governance raises the cap over time → **16 → 30 → 50 → 100**.
+- **No one can dominate:** each validator's voting power is **capped at 10%** at the consensus layer (`x/vpcap`) - even if their stake is bigger, their power isn't.
+- **The team's control shrinks, and it's measured on-chain:** the network's decentralization (Nakamoto coefficient, the foundation's voting-power share) is **computed every block**. The foundation's share falls on a published ladder: **<15% → <10% → <5% → <3%**.
+- **The admin key is handed to governance:** sensitive roles can be **rotated or revoked by on-chain vote**, not by one key.
 
 ---
 
-## 7. Regulatory-gated items (airdrop and contest)
+## 5. Becoming a validator (the heart of the model)
 
-The two places where potentially valuable LIMO is distributed in connection with activity are the highest regulatory exposure, so they are deliberately undecided and gated on counsel:
+The model is **apply, don't buy.** There's no token sale - you don't purchase a validator stake, you **apply** for one.
 
-- The **250M airdrop** method is not set. The method (retrospective and no-strings, versus conditioned on activity) largely determines how the token is characterized. No method is promised.
-- The **ecosystem contest** distribution is being structured so that recognition does not read as compensation or an investment offer.
-- The project geo-fences acquisition surfaces away from Canada, the United States, and China, and is structuring for the francophone-Europe market. Nothing on this page is an offer, solicitation, or promise of any asset or return.
+- An approved operator gets a **locked grant**: stake you can use to secure the network, but can **never sell**, and that can be clawed back. You never buy or hold LIMO to take part.
+- You earn a **share of network fees + your commission** - pay for operating a node, not a return on a purchase. *(Honest caveat: today fees are ~0 and staking inflation is off, so rewards are effectively zero; they only become real with fee volume or a future schedule.)*
+- As new operators self-fund their own stake later, the leftover bootstrap pool is **burned** - never returned to the team.
+
+**How the ~16 genesis operators are chosen:** by **application and vetting** - a proven track record, solid infrastructure (uptime, monitoring), and diversity (no single country or cloud dominates). Permissioned at genesis, opening up as the set grows. The foundation runs one or two; the rest are independent.
+
+**The steps:**
+1. **Apply** with your operator and infrastructure details.
+2. **Get selected** - seats are allocated.
+3. **Send a fresh address** - you generate a new account.
+4. **Receive your grant** - a locked bonding stake + a small gas allowance (since there's no public faucet at mainnet, that allowance is what lets you pay the first transaction fee).
+5. **Run `create-validator`** from the granted account.
+6. **Validate and earn** for operating the node.
+
+The **grant always comes first** - it funds the account you validate from.
+
+---
+
+## 6. What's built vs. still planned
+
+| | Status |
+|---|---|
+| Per-validator 10% voting-power cap (`x/vpcap`) | **BUILT** |
+| On-chain decentralization KPIs (`x/valgrant`) | **BUILT** |
+| Governance can rotate/revoke admin roles | **BUILT** |
+| Locked validator grants (`x/valgrant`, `0x900`) | **LIVE** - a real external operator already validates on a grant |
+| Self-funded gas sponsorship (`x/sponsorpool`, `0x901`) | **LIVE** |
+| History-scaled (anti-sybil) gas allowance | **LIVE** |
+| Mainnet genesis (real key custody, governed reserve, vesting) | **PLANNED** |
+| Encrypted mempool / real anti-MEV | **BUILT** - threshold-encrypted mempool (2-of-3 keypers), proven end-to-end + full gov-upgrade dry-run; deploying to **testnet** at block 766558 (upgrade `encmempool-threshold-vpcap-v1`). [Guide](/how-it-works/encrypted-mempool). |
+
+---
+
+## 7. The legal note
+
+A few things are deliberately **undecided and gated on counsel**, because they're where a token could be mischaracterized:
+
+- Any **ecosystem or community distribution** from the reserve, if and when made, would be a deliberate, counsel-reviewed decision. No method, amount, or eligibility is promised here.
+- The **ecosystem contest** is being structured so recognition doesn't read as compensation or an investment offer.
+- Acquisition surfaces are geo-fenced away from Canada, the US, and China, with the francophone-Europe market in mind.
+
+**Nothing on this page is an offer, solicitation, or promise of any asset or return.**
 
 ---
 
