@@ -11,7 +11,7 @@ Limonata is an independent EVM Layer 1 built on the Cosmos SDK and [cosmos/evm](
 | EVM chain ID | `10777` (`0x2a19`) |
 | Cosmos chain-id | `limonata_10777-1` |
 | Coin | `LIMO` (base denom `aLIMO`, 18 decimals) |
-| Finality | ~0.3s blocks, single-slot BFT, no reorg window |
+| Finality | ~2s blocks, single-slot BFT, no reorg window |
 | Tooling | Solidity, MetaMask, Hardhat, Foundry, Viem, Ethers, all unchanged |
 | RPC | `https://rpc.limonata.xyz` |
 | Explorer | `https://explorer.limonata.xyz` |
@@ -54,7 +54,7 @@ These are live on the testnet today:
 | `x/sponsorpool` (precompile `0x901`) | Developer-funded gas: a dev deposits LIMO earmarked for their contract (`deposit(address,uint256)`); transactions to that contract are sponsored from the deposit until it runs dry. Permissionless, withdrawable, and non-inflationary (the dev funds it, not new mint). |
 | `x/squeeze` | Every block, splits collected fees: 40% burned, 10% recycled into the gas pool, ~50% to validators. |
 | `x/paymaster` | The same gasless idea for Cosmos-SDK transactions (one active sponsorship policy). |
-| `x/encmempool` | A commit-reveal ordering primitive (the foundation for later anti-MEV work). |
+| `x/encmempool` | Commit-reveal ordering today; a **threshold-encrypted (anti-MEV) mempool** - submit transactions encrypted, order fixed before anyone can read them, decrypted only when ≥2 of 3 keypers cooperate - activates at block 766558 via a governance upgrade. [Guide](/how-it-works/encrypted-mempool). |
 | `x/contest` | An on-chain ecosystem leaderboard. |
 | `x/netcap` | A net-seller cap: a rolling-window rate-limit on outbound transfers from the founder and foundation addresses, enforced on both Cosmos sends and native EVM transfers (an anti-dump guardrail on the premine). |
 | Passkey / P-256 | On-chain secp256r1 (RIP-7212) signature support and a WebAuthn signing path, so wallets can sign with a passkey. |
