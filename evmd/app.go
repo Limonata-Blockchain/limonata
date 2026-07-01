@@ -45,6 +45,9 @@ import (
 	"github.com/cosmos/evm/x/valgrant"
 	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
 	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
+	"github.com/cosmos/evm/x/vpcap"
+	vpcapkeeper "github.com/cosmos/evm/x/vpcap/keeper"
+	vpcaptypes "github.com/cosmos/evm/x/vpcap/types"
 	"github.com/cosmos/evm/x/encmempool"
 	encmempoolkeeper "github.com/cosmos/evm/x/encmempool/keeper"
 	encmempooltypes "github.com/cosmos/evm/x/encmempool/types"
@@ -211,6 +214,7 @@ type EVMD struct {
 	PaymasterKeeper paymasterkeeper.Keeper
 	ContestKeeper   contestkeeper.Keeper
 	ValGrantKeeper  valgrantkeeper.Keeper
+	VPCapKeeper     vpcapkeeper.Keeper
 	EncMempoolKeeper encmempoolkeeper.Keeper
 	GasSponsorKeeper gassponsorkeeper.Keeper
 	SponsorPoolKeeper sponsorpoolkeeper.Keeper
@@ -271,6 +275,7 @@ func NewExampleApp(
 		paymastertypes.StoreKey,
 		contesttypes.StoreKey,
 		valgranttypes.StoreKey,
+		vpcaptypes.StoreKey,
 		encmempooltypes.StoreKey,
 		gassponsortypes.StoreKey,
 		sponsorpooltypes.StoreKey,
@@ -503,6 +508,14 @@ func NewExampleApp(
 		app.StakingKeeper,
 	)
 
+	// Limonata: x/vpcap caps each validator's consensus voting power at a
+	// fraction of total (applied at the app-level EndBlocker). Read-only on
+	// StakingKeeper; inert until enabled in params/genesis.
+	app.VPCapKeeper = vpcapkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[vpcaptypes.StoreKey]),
+		app.StakingKeeper,
+	)
+
 	// Limonata: x/sponsorpool keeper, also instantiated BEFORE the EVM keeper so its 0x901
 	// precompile gets a live reference. Deposits land in the gas pool (squeezetypes.GasPoolName),
 	// which keeps the pool above its mint target so escrow-funded gas is dev-funded (no mint).
@@ -673,6 +686,7 @@ func NewExampleApp(
 		paymaster.NewAppModule(app.PaymasterKeeper),
 		contest.NewAppModule(app.ContestKeeper),
 		valgrant.NewAppModule(app.ValGrantKeeper),
+		vpcap.NewAppModule(app.VPCapKeeper),
 		encmempool.NewAppModule(app.EncMempoolKeeper),
 		gassponsor.NewAppModule(app.GasSponsorKeeper),
 		sponsorpool.NewAppModule(app.SponsorPoolKeeper),
@@ -785,6 +799,7 @@ func NewExampleApp(
 		paymastertypes.ModuleName,
 		contesttypes.ModuleName,
 		valgranttypes.ModuleName,
+		vpcaptypes.ModuleName,
 		encmempooltypes.ModuleName,
 		gassponsortypes.ModuleName,
 		sponsorpooltypes.ModuleName,
@@ -966,7 +981,19 @@ func (app *EVMD) BeginBlocker(ctx sdk.Context) (sdk.BeginBlock, error) {
 
 // EndBlocker application updates every end block
 func (app *EVMD) EndBlocker(ctx sdk.Context) (sdk.EndBlock, error) {
-	return app.ModuleManager.EndBlock(ctx)
+	eb, err := app.ModuleManager.EndBlock(ctx)
+	if err != nil {
+		return eb, err
+	}
+	// Limonata x/vpcap: cap each validator's consensus power at the configured
+	// fraction of total. Runs AFTER staking's EndBlock (this block's bonded
+	// set/power is final) and FULL-REPLACES the validator updates when enabled.
+	if capped, ok, cerr := app.VPCapKeeper.ComputeCappedValidatorUpdates(ctx); cerr != nil {
+		return eb, cerr
+	} else if ok {
+		eb.ValidatorUpdates = capped
+	}
+	return eb, nil
 }
 
 func (app *EVMD) FinalizeBlock(req *abci.RequestFinalizeBlock) (res *abci.ResponseFinalizeBlock, err error) {
@@ -996,6 +1023,12 @@ func (app *EVMD) PreBlocker(ctx sdk.Context, _ *abci.RequestFinalizeBlock) (*sdk
 	// unless VALGRANT_FORCE_UPGRADE=1 and the init has not run yet; runs exactly
 	// once on the first block after the binary swap. See evmd/upgrades.go.
 	if err := app.maybeRunValGrantForceInit(ctx); err != nil {
+		panic(err)
+	}
+	// Limonata: fast NON-GOV operator path for the encmempool/vpcap upgrade. No-op
+	// unless ENCMEMPOOL_FORCE_UPGRADE=1 and migrations have not run yet; runs once
+	// on the first block after the binary swap. See evmd/upgrades.go.
+	if err := app.maybeRunEncMempoolForceInit(ctx); err != nil {
 		panic(err)
 	}
 	return app.ModuleManager.PreBlock(ctx)

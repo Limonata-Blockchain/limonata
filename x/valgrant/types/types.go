@@ -38,6 +38,23 @@ type PendingClawback struct {
 // Params are the governance-set valgrant parameters.
 type Params struct {
 	Admin string `json:"admin"` // bech32 addr authorized to issue/clawback ("" = disabled)
+	// FoundationValidators are the valoper addresses counted as foundation/team
+	// for the foundation-VP KPI (there is no on-chain foundation tag). Genesis-
+	// or gov-set. Empty => foundation VP is reported as 0.
+	FoundationValidators []string `json:"foundation_validators,omitempty"`
+}
+
+// KPISnapshot is the latest on-chain decentralization snapshot, recorded each
+// block in EndBlock (after staking) and exposed via the valgrant_kpi event +
+// the store. v1: computed + recorded for TRANSPARENCY; gating is done off-chain.
+type KPISnapshot struct {
+	Height              int64 `json:"height"`
+	Unix                int64 `json:"unix"`
+	ActiveValidators    int   `json:"active_validators"`
+	NakamotoCoefficient int   `json:"nakamoto_coefficient"` // min validators to exceed 1/3 of power (halting threshold)
+	FoundationVPBps     int64 `json:"foundation_vp_bps"`    // foundation share of total power, basis points
+	TopValidatorVPBps   int64 `json:"top_validator_vp_bps"` // largest single validator share, basis points
+	TotalPower          int64 `json:"total_power"`
 }
 
 // GenesisState is the x/valgrant genesis (plain JSON, no proto).
@@ -47,7 +64,7 @@ type GenesisState struct {
 }
 
 func DefaultParams() Params {
-	return Params{Admin: ""}
+	return Params{Admin: "", FoundationValidators: nil}
 }
 
 func DefaultGenesisState() *GenesisState {

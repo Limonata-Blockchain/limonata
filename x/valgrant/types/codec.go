@@ -14,6 +14,7 @@ func RegisterInterfaces(registry codectypes.InterfaceRegistry) {
 		&MsgIssueLocked{},
 		&MsgClawback{},
 		&MsgBurnPool{},
+		&MsgUpdateParams{},
 	)
 	msgservice.RegisterMsgServiceDesc(registry, &_Msg_serviceDesc)
 }

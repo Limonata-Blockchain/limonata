@@ -9,6 +9,8 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -79,6 +81,21 @@ func (m msgServer) SetPasskeyEnabled(goCtx context.Context, msg *types.MsgSetPas
 		sdk.NewAttribute("enabled", strconv.FormatBool(msg.Enabled)),
 	))
 	return &types.MsgSetPasskeyEnabledResponse{}, nil
+}
+
+// SetAdmin rotates or revokes (admin="") the contest admin. Gov-gated: only the
+// x/gov module account may call it — the on-chain governance handoff for contest.
+func (m msgServer) SetAdmin(goCtx context.Context, msg *types.MsgSetAdmin) (*types.MsgSetAdminResponse, error) {
+	govAddr := authtypes.NewModuleAddress(govtypes.ModuleName).String()
+	if msg.Authority != govAddr {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "expected gov authority %s, got %s", govAddr, msg.Authority)
+	}
+	p := m.GetParams(goCtx)
+	p.Admin = msg.Admin
+	if err := m.SetParams(goCtx, p); err != nil {
+		return nil, err
+	}
+	return &types.MsgSetAdminResponse{}, nil
 }
 
 func (m msgServer) requireAdmin(goCtx context.Context, signer string) error {

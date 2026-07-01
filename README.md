@@ -5,7 +5,7 @@
 <h1 align="center">Limonata</h1>
 
 <p align="center"><b>The highway, not the cars.</b><br/>
-An EVM Layer&nbsp;1 on Cosmos SDK - single-slot finality (~0.3s), near-zero fees, gasless UX, and a full EVM toolkit. What you build on top is yours.</p>
+An EVM Layer&nbsp;1 on Cosmos SDK - single-slot finality (~2s), near-zero fees, gasless UX, and a full EVM toolkit. What you build on top is yours.</p>
 
 ---
 
@@ -18,7 +18,7 @@ Limonata is a Cosmos SDK + [cosmos/evm](https://github.com/cosmos/evm) Layer&nbs
 | Chain ID (EVM) | `10777` (`0x2a19`) |
 | Cosmos chain-id | `limonata_10777-1` |
 | Native coin | `LIMO` (base denom `aLIMO`, 18 decimals) |
-| Block time | ~0.3s, single-slot BFT finality |
+| Block time | ~2s, single-slot BFT finality |
 | Tooling | Solidity / MetaMask / Hardhat / Foundry / Viem - unchanged |
 
 **Public testnet:** RPC `https://rpc.limonata.xyz` · Explorer `https://explorer.limonata.xyz` · Faucet `https://faucet.limonata.xyz` · Site `https://limonata.xyz`
@@ -37,7 +37,8 @@ Limonata adds protocol-level modules on top of cosmos/evm:
 - **`x/contest`** - on-chain Ecosystem Development Contest leaderboard.
 - **`x/valgrant`** - locked-grant validator bootstrap pool (`PermanentLockedAccount` grants + clawback) so new operators can bond without buying in.
 - **`x/netcap`** - a net-seller cap: a rolling-window rate-limit on outbound transfers from designated addresses, enforced on **both** Cosmos sends (bank `SendRestriction`) and native EVM transfers (ante decorator), since EVM value transfers bypass `x/bank`.
-- On-chain **P-256 / WebAuthn (passkey)** signature path + a `valgrant` admin precompile.
+- On-chain **P-256 / WebAuthn (passkey)** signature path: sign Cosmos transactions with Face ID / a fingerprint, verified natively (no seed phrase, no extension). Developer guide: [`PASSKEY.md`](PASSKEY.md). Live demo: [limonata.xyz/passkey](https://limonata.xyz/passkey).
+- A `valgrant` admin precompile (`0x900`).
 
 ## Build & run
 
@@ -48,7 +49,7 @@ make install            # builds & installs the `evmd` binary
 evmd version
 ```
 
-Genesis + a 0.3s single-node testnet are produced by the scripts in this project's deployment tooling (see `limonata-genesis.sh`). Validator onboarding: see the [validator guide](https://limonata.xyz/VALIDATOR.md).
+Genesis + a ~2s single-node testnet are produced by the scripts in this project's deployment tooling (see `limonata-genesis.sh`). Validator onboarding: see the [validator guide](https://limonata.xyz/VALIDATOR.md).
 
 ## Add Limonata to your wallet
 

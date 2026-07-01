@@ -15,4 +15,5 @@ var (
 	ParamsKey           = []byte{0x01} // -> JSON Params
 	GrantsPrefix        = []byte{0x02} // 0x02 | grantee(bech32) -> JSON Grant
 	PendingClawbackPref = []byte{0x03} // 0x03 | grantee(bech32) -> JSON PendingClawback
+	KPISnapshotKey      = []byte{0x04} // -> JSON KPISnapshot (latest decentralization snapshot)
 )

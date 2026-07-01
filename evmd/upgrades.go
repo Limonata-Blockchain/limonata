@@ -2,6 +2,8 @@ package evmd
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"slices"
 
@@ -15,6 +17,7 @@ import (
 
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
+	vpcaptypes "github.com/cosmos/evm/x/vpcap/types"
 )
 
 // UpgradeName defines the on-chain upgrade name for the sample EVMD upgrade
@@ -110,6 +113,112 @@ func (app *EVMD) applyValGrantInit(ctx sdk.Context) error {
 	return nil
 }
 
+// --- Limonata: encrypted-mempool (threshold) + x/vpcap in-place upgrade ---
+//
+// This upgrade adds the x/vpcap KV store (the ONLY new store; encmempool's new
+// threshold keys live under the existing encmempool store, valgrant's KPI under
+// the existing valgrant store, contest's change is msg-only) and optionally
+// activates the threshold-encrypted mempool. x/vpcap stays DISABLED (Enabled=
+// false, default) — its store is added only so the new binary loads; the cap is
+// a separate mainnet decision. The dry-run proved a plain binary swap FAILS with
+// "version of store vpcap mismatch ... new stores should be added using
+// StoreUpgrades", which this wiring fixes.
+const EncMempoolUpgradeName = "encmempool-threshold-vpcap-v1"
+
+// EncMempoolForceUpgradeEnv enables the fast NON-GOV single-operator path (same
+// shape as valgrant's): swap the binary with the env set, the vpcap store is
+// added at the next height and the one-shot below runs migrations + activation.
+const EncMempoolForceUpgradeEnv = "ENCMEMPOOL_FORCE_UPGRADE"
+
+// EncMempoolActivationEnv carries activation params as JSON on the FORCE path
+// ONLY: {"threshold_pub":"<base64>","threshold":2,"keypers":["addr",...],"decrypt_delay":15}.
+// The multi-validator GOV path MUST NOT read env (validators could differ ->
+// state divergence): it uses bakedEncActivation(), baked into the release binary.
+const EncMempoolActivationEnv = "ENCMEMPOOL_ACTIVATION"
+
+func encMempoolForceUpgrade() bool { return os.Getenv(EncMempoolForceUpgradeEnv) == "1" }
+
+// encActivation holds the parameters that turn the encrypted mempool ON.
+type encActivation struct {
+	ThresholdPub []byte
+	Threshold    uint32
+	Keypers      []string
+	DecryptDelay uint64
+}
+
+// bakedEncActivation returns the activation compiled into THIS binary for the GOV
+// path (deterministic: every validator runs the same binary). The threshold key
+// + keyper set below are baked for the Limonata testnet (10777) encrypted-mempool
+// activation; the threshold public key was produced by a trusted `keyper setup
+// --n 3 --t 2` whose secret shares Jason holds (never shared). keypers are ordered
+// so keypers[i] holds share-(i+1).
+func bakedEncActivation() (encActivation, bool) {
+	const thresholdPubB64 = "Aw2DNwiH87yToy7Q+HC3Bv4hBiihRYlqnqp5nKsTIfwN"
+	pub, err := base64.StdEncoding.DecodeString(thresholdPubB64)
+	if err != nil || len(pub) != 33 {
+		return encActivation{}, false
+	}
+	return encActivation{
+		ThresholdPub: pub,
+		Threshold:    2, // need 2 of 3 keypers to decrypt
+		Keypers: []string{
+			"cosmos1p7jf6dgs9fwyl353hs8l8qjw83l5z0vdj5hv2a", // keyper1 <- share-1
+			"cosmos1vvxdr3np5ke3tu6scu4945z6j4zlnwf3khjz4d", // keyper2 <- share-2
+			"cosmos1g5kykywdmu90fkcxkqmq0hegumsvuyly6ugn7e", // keyper3 <- share-3
+		},
+		DecryptDelay: 15, // ~30s at 2s blocks: time for keypers to post shares
+	}, true
+}
+
+// envEncActivation parses ENCMEMPOOL_ACTIVATION for the FORCE / dry-run path.
+func envEncActivation() (encActivation, bool) {
+	raw := os.Getenv(EncMempoolActivationEnv)
+	if raw == "" {
+		return encActivation{}, false
+	}
+	var j struct {
+		ThresholdPub string   `json:"threshold_pub"`
+		Threshold    uint32   `json:"threshold"`
+		Keypers      []string `json:"keypers"`
+		DecryptDelay uint64   `json:"decrypt_delay"`
+	}
+	if err := json.Unmarshal([]byte(raw), &j); err != nil {
+		return encActivation{}, false
+	}
+	pub, err := base64.StdEncoding.DecodeString(j.ThresholdPub)
+	if err != nil || len(pub) == 0 || j.Threshold == 0 || len(j.Keypers) == 0 {
+		return encActivation{}, false
+	}
+	return encActivation{ThresholdPub: pub, Threshold: j.Threshold, Keypers: j.Keypers, DecryptDelay: j.DecryptDelay}, true
+}
+
+// applyEncMempoolInit activates the encrypted mempool deterministically from act,
+// preserving the existing reveal-path params (reveal_delay, max_reveal_window).
+// Idempotent (no-op if already enabled). If not configured it does nothing — the
+// upgrade then only added the vpcap store. NEVER touches user funds.
+func (app *EVMD) applyEncMempoolInit(ctx sdk.Context, act encActivation, configured bool) error {
+	logger := ctx.Logger().With("upgrade", EncMempoolUpgradeName)
+	if !configured {
+		logger.Info("encrypted mempool activation not configured; vpcap store added, mempool left disabled")
+		return nil
+	}
+	p := app.EncMempoolKeeper.GetParams(ctx)
+	if p.EncEnabled {
+		logger.Info("encrypted mempool already enabled; no-op")
+		return nil
+	}
+	p.EncEnabled = true
+	p.ThresholdPub = act.ThresholdPub
+	p.Threshold = act.Threshold
+	p.Keypers = act.Keypers
+	p.DecryptDelay = act.DecryptDelay
+	if err := app.EncMempoolKeeper.SetParams(ctx, p); err != nil {
+		return err
+	}
+	logger.Info("encrypted mempool ACTIVATED", "threshold", act.Threshold, "keypers", len(act.Keypers), "decrypt_delay", act.DecryptDelay)
+	return nil
+}
+
 func (app EVMD) RegisterUpgradeHandlers() {
 	app.UpgradeKeeper.SetUpgradeHandler(
 		UpgradeName,
@@ -143,9 +252,38 @@ func (app EVMD) RegisterUpgradeHandlers() {
 		},
 	)
 
+	// Limonata: encmempool-threshold + vpcap GOV upgrade handler. x/vpcap is a
+	// brand-new module (not in fromVM) so RunMigrations registers it + runs its
+	// InitGenesis (default Enabled=false); the vpcap KV store is created by the
+	// store loader wired below. Then optionally activate the encrypted mempool
+	// from the binary-baked params (deterministic across all validators).
+	app.UpgradeKeeper.SetUpgradeHandler(
+		EncMempoolUpgradeName,
+		func(ctx context.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+			sdkCtx := sdk.UnwrapSDKContext(ctx)
+			newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), fromVM)
+			if err != nil {
+				return nil, err
+			}
+			act, configured := bakedEncActivation()
+			if err := app.applyEncMempoolInit(sdkCtx, act, configured); err != nil {
+				return nil, err
+			}
+			return newVM, nil
+		},
+	)
+
 	upgradeInfo, err := app.UpgradeKeeper.ReadUpgradeInfoFromDisk()
 	if err != nil {
 		panic(err)
+	}
+
+	// Limonata: fast NON-GOV path for the encmempool/vpcap upgrade. Adds the vpcap
+	// store at the next height after the swap; the PreBlocker one-shot then runs
+	// migrations + activation. Single-operator/dry-run only.
+	if encMempoolForceUpgrade() {
+		app.SetStoreLoader(forceAddStoreLoader(vpcaptypes.StoreKey))
+		return
 	}
 
 	// Fast NON-GOV operator path: when VALGRANT_FORCE_UPGRADE=1, install a
@@ -173,6 +311,13 @@ func (app EVMD) RegisterUpgradeHandlers() {
 		// Limonata: create the new x/valgrant KV store at the upgrade height.
 		storeUpgrades := storetypes.StoreUpgrades{
 			Added: []string{valgranttypes.StoreKey},
+		}
+		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
+	case EncMempoolUpgradeName:
+		// Limonata: create the new x/vpcap KV store at the upgrade height (the only
+		// new store this upgrade introduces).
+		storeUpgrades := storetypes.StoreUpgrades{
+			Added: []string{vpcaptypes.StoreKey},
 		}
 		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
 	}
@@ -252,5 +397,40 @@ func (app *EVMD) maybeRunValGrantForceInit(ctx sdk.Context) error {
 	}
 
 	logger.Info("valgrant force one-shot init complete")
+	return nil
+}
+
+// maybeRunEncMempoolForceInit is the fast NON-GOV one-shot for the encmempool/
+// vpcap upgrade. No-op unless ENCMEMPOOL_FORCE_UPGRADE=1 and migrations have not
+// run yet (detected by x/vpcap being absent from the on-chain version map). On
+// the first block after the binary swap it registers x/vpcap (RunMigrations runs
+// its InitGenesis) and activates the encrypted mempool from ENCMEMPOOL_ACTIVATION.
+// Runs exactly once. NEVER touches user funds.
+func (app *EVMD) maybeRunEncMempoolForceInit(ctx sdk.Context) error {
+	if !encMempoolForceUpgrade() {
+		return nil
+	}
+	vm, err := app.UpgradeKeeper.GetModuleVersionMap(ctx)
+	if err != nil {
+		return err
+	}
+	if _, registered := vm[vpcaptypes.ModuleName]; registered {
+		return nil // migrations already ran -> done
+	}
+	logger := ctx.Logger().With("upgrade", EncMempoolUpgradeName, "path", "force-operator")
+	logger.Info("running encmempool/vpcap force (non-gov) one-shot")
+
+	newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), vm)
+	if err != nil {
+		return err
+	}
+	if err := app.UpgradeKeeper.SetModuleVersionMap(ctx, newVM); err != nil {
+		return err
+	}
+	act, configured := envEncActivation()
+	if err := app.applyEncMempoolInit(ctx, act, configured); err != nil {
+		return err
+	}
+	logger.Info("encmempool/vpcap force one-shot complete")
 	return nil
 }

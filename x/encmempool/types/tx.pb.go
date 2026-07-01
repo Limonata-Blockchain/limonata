@@ -259,45 +259,299 @@ func (m *MsgRevealTxResponse) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_MsgRevealTxResponse proto.InternalMessageInfo
 
+// MsgSubmitEncrypted submits a threshold-encrypted transaction body. Only the
+// ciphertext is stored, ordered by (decrypt_height, seq); nobody can read it until
+// the keypers' shares are combined in BeginBlock.
+type MsgSubmitEncrypted struct {
+	Submitter string `protobuf:"bytes,1,opt,name=submitter,proto3" json:"submitter,omitempty"`
+	A         []byte `protobuf:"bytes,2,opt,name=a,proto3" json:"a,omitempty"`
+	Nonce     []byte `protobuf:"bytes,3,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	Body      []byte `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+}
+
+func (m *MsgSubmitEncrypted) Reset()         { *m = MsgSubmitEncrypted{} }
+func (m *MsgSubmitEncrypted) String() string { return proto.CompactTextString(m) }
+func (*MsgSubmitEncrypted) ProtoMessage()    {}
+func (*MsgSubmitEncrypted) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{4}
+}
+func (m *MsgSubmitEncrypted) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgSubmitEncrypted) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgSubmitEncrypted.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgSubmitEncrypted) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgSubmitEncrypted.Merge(m, src)
+}
+func (m *MsgSubmitEncrypted) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgSubmitEncrypted) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgSubmitEncrypted.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgSubmitEncrypted proto.InternalMessageInfo
+
+func (m *MsgSubmitEncrypted) GetSubmitter() string {
+	if m != nil {
+		return m.Submitter
+	}
+	return ""
+}
+
+func (m *MsgSubmitEncrypted) GetA() []byte {
+	if m != nil {
+		return m.A
+	}
+	return nil
+}
+
+func (m *MsgSubmitEncrypted) GetNonce() []byte {
+	if m != nil {
+		return m.Nonce
+	}
+	return nil
+}
+
+func (m *MsgSubmitEncrypted) GetBody() []byte {
+	if m != nil {
+		return m.Body
+	}
+	return nil
+}
+
+type MsgSubmitEncryptedResponse struct {
+	DecryptHeight uint64 `protobuf:"varint,1,opt,name=decrypt_height,json=decryptHeight,proto3" json:"decrypt_height,omitempty"`
+	Seq           uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+}
+
+func (m *MsgSubmitEncryptedResponse) Reset()         { *m = MsgSubmitEncryptedResponse{} }
+func (m *MsgSubmitEncryptedResponse) String() string { return proto.CompactTextString(m) }
+func (*MsgSubmitEncryptedResponse) ProtoMessage()    {}
+func (*MsgSubmitEncryptedResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{5}
+}
+func (m *MsgSubmitEncryptedResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgSubmitEncryptedResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgSubmitEncryptedResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgSubmitEncryptedResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgSubmitEncryptedResponse.Merge(m, src)
+}
+func (m *MsgSubmitEncryptedResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgSubmitEncryptedResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgSubmitEncryptedResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgSubmitEncryptedResponse proto.InternalMessageInfo
+
+func (m *MsgSubmitEncryptedResponse) GetDecryptHeight() uint64 {
+	if m != nil {
+		return m.DecryptHeight
+	}
+	return 0
+}
+
+func (m *MsgSubmitEncryptedResponse) GetSeq() uint64 {
+	if m != nil {
+		return m.Seq
+	}
+	return 0
+}
+
+// MsgSubmitDecryptionShare is an authorized keyper's partial decryption (x_i*A)
+// for one encrypted tx.
+type MsgSubmitDecryptionShare struct {
+	Keyper        string `protobuf:"bytes,1,opt,name=keyper,proto3" json:"keyper,omitempty"`
+	DecryptHeight uint64 `protobuf:"varint,2,opt,name=decrypt_height,json=decryptHeight,proto3" json:"decrypt_height,omitempty"`
+	Seq           uint64 `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
+	Index         uint64 `protobuf:"varint,4,opt,name=index,proto3" json:"index,omitempty"`
+	D             []byte `protobuf:"bytes,5,opt,name=d,proto3" json:"d,omitempty"`
+}
+
+func (m *MsgSubmitDecryptionShare) Reset()         { *m = MsgSubmitDecryptionShare{} }
+func (m *MsgSubmitDecryptionShare) String() string { return proto.CompactTextString(m) }
+func (*MsgSubmitDecryptionShare) ProtoMessage()    {}
+func (*MsgSubmitDecryptionShare) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{6}
+}
+func (m *MsgSubmitDecryptionShare) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgSubmitDecryptionShare) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgSubmitDecryptionShare.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgSubmitDecryptionShare) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgSubmitDecryptionShare.Merge(m, src)
+}
+func (m *MsgSubmitDecryptionShare) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgSubmitDecryptionShare) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgSubmitDecryptionShare.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgSubmitDecryptionShare proto.InternalMessageInfo
+
+func (m *MsgSubmitDecryptionShare) GetKeyper() string {
+	if m != nil {
+		return m.Keyper
+	}
+	return ""
+}
+
+func (m *MsgSubmitDecryptionShare) GetDecryptHeight() uint64 {
+	if m != nil {
+		return m.DecryptHeight
+	}
+	return 0
+}
+
+func (m *MsgSubmitDecryptionShare) GetSeq() uint64 {
+	if m != nil {
+		return m.Seq
+	}
+	return 0
+}
+
+func (m *MsgSubmitDecryptionShare) GetIndex() uint64 {
+	if m != nil {
+		return m.Index
+	}
+	return 0
+}
+
+func (m *MsgSubmitDecryptionShare) GetD() []byte {
+	if m != nil {
+		return m.D
+	}
+	return nil
+}
+
+type MsgSubmitDecryptionShareResponse struct {
+}
+
+func (m *MsgSubmitDecryptionShareResponse) Reset()         { *m = MsgSubmitDecryptionShareResponse{} }
+func (m *MsgSubmitDecryptionShareResponse) String() string { return proto.CompactTextString(m) }
+func (*MsgSubmitDecryptionShareResponse) ProtoMessage()    {}
+func (*MsgSubmitDecryptionShareResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{7}
+}
+func (m *MsgSubmitDecryptionShareResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgSubmitDecryptionShareResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgSubmitDecryptionShareResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgSubmitDecryptionShareResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgSubmitDecryptionShareResponse.Merge(m, src)
+}
+func (m *MsgSubmitDecryptionShareResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgSubmitDecryptionShareResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgSubmitDecryptionShareResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgSubmitDecryptionShareResponse proto.InternalMessageInfo
+
 func init() {
 	proto.RegisterType((*MsgCommitTx)(nil), "cosmos.evm.encmempool.v1.MsgCommitTx")
 	proto.RegisterType((*MsgCommitTxResponse)(nil), "cosmos.evm.encmempool.v1.MsgCommitTxResponse")
 	proto.RegisterType((*MsgRevealTx)(nil), "cosmos.evm.encmempool.v1.MsgRevealTx")
 	proto.RegisterType((*MsgRevealTxResponse)(nil), "cosmos.evm.encmempool.v1.MsgRevealTxResponse")
+	proto.RegisterType((*MsgSubmitEncrypted)(nil), "cosmos.evm.encmempool.v1.MsgSubmitEncrypted")
+	proto.RegisterType((*MsgSubmitEncryptedResponse)(nil), "cosmos.evm.encmempool.v1.MsgSubmitEncryptedResponse")
+	proto.RegisterType((*MsgSubmitDecryptionShare)(nil), "cosmos.evm.encmempool.v1.MsgSubmitDecryptionShare")
+	proto.RegisterType((*MsgSubmitDecryptionShareResponse)(nil), "cosmos.evm.encmempool.v1.MsgSubmitDecryptionShareResponse")
 }
 
 func init() { proto.RegisterFile("cosmos/evm/encmempool/v1/tx.proto", fileDescriptor_ec253a7da7cb1f1f) }
 
 var fileDescriptor_ec253a7da7cb1f1f = []byte{
-	// 437 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x9c, 0x52, 0x3d, 0x8f, 0xd3, 0x40,
-	0x10, 0xcd, 0x5e, 0x7c, 0xa7, 0xdc, 0x5e, 0x90, 0x60, 0x09, 0xc2, 0x18, 0xc9, 0x04, 0x23, 0xa4,
-	0x28, 0x52, 0x6c, 0x02, 0x1d, 0x1d, 0xa1, 0xa1, 0x20, 0x8d, 0xa1, 0xa2, 0x49, 0x1c, 0x67, 0xb5,
-	0xb6, 0x94, 0xf5, 0x1a, 0xcf, 0x62, 0x99, 0x0e, 0x51, 0x52, 0x21, 0xf1, 0x47, 0x52, 0xf0, 0x23,
-	0x28, 0x23, 0x2a, 0x44, 0x85, 0x92, 0x22, 0x7f, 0x03, 0x65, 0xd7, 0x36, 0x16, 0x28, 0x7c, 0x35,
-	0xd6, 0xcc, 0x9b, 0xe7, 0x79, 0x33, 0x6f, 0x07, 0xdf, 0x0e, 0x05, 0x70, 0x01, 0x1e, 0xcd, 0xb9,
-	0x47, 0x93, 0x90, 0x53, 0x9e, 0x0a, 0xb1, 0xf2, 0xf2, 0xb1, 0x27, 0x0b, 0x37, 0xcd, 0x84, 0x14,
-	0xc4, 0xd4, 0x14, 0x97, 0xe6, 0xdc, 0xfd, 0x41, 0x71, 0xf3, 0xb1, 0x75, 0x25, 0xe0, 0x71, 0x22,
-	0x3c, 0xf5, 0xd5, 0x64, 0xeb, 0x7a, 0xd9, 0x8f, 0x03, 0x3b, 0x34, 0xe1, 0xc0, 0xca, 0xc2, 0x0d,
-	0x5d, 0x98, 0xa9, 0xcc, 0x2b, 0x5b, 0xea, 0x52, 0x8f, 0x09, 0x26, 0x34, 0x7e, 0x88, 0x34, 0xea,
-	0x7c, 0x40, 0xf8, 0x62, 0x0a, 0xec, 0xb1, 0xe0, 0x3c, 0x96, 0xcf, 0x0b, 0x72, 0x0f, 0x9f, 0x01,
-	0x4d, 0x96, 0x34, 0x33, 0x51, 0x1f, 0x0d, 0xce, 0x27, 0xe6, 0xe7, 0x8f, 0xa3, 0x5e, 0xd9, 0xe7,
-	0xd1, 0x72, 0x99, 0x51, 0x80, 0x67, 0x32, 0x8b, 0x13, 0xe6, 0x97, 0x3c, 0x72, 0x0b, 0x5f, 0x84,
-	0xea, 0xef, 0x59, 0x14, 0x40, 0x64, 0x9e, 0xf4, 0xd1, 0xa0, 0xeb, 0x63, 0x0d, 0x3d, 0x09, 0x20,
-	0x7a, 0x38, 0x7e, 0xbb, 0x5f, 0x0f, 0x4b, 0xf6, 0xbb, 0xfd, 0x7a, 0x78, 0xc4, 0x8c, 0xc6, 0x14,
-	0xce, 0x53, 0x7c, 0xb5, 0x91, 0xfa, 0x14, 0x52, 0x91, 0x00, 0x25, 0x77, 0xf0, 0xa5, 0x4a, 0x8a,
-	0xc6, 0x2c, 0x92, 0x6a, 0x46, 0xc3, 0xef, 0x96, 0x62, 0x0a, 0x23, 0x97, 0x71, 0x1b, 0xe8, 0x4b,
-	0x35, 0x87, 0xe1, 0x1f, 0x42, 0xe7, 0xab, 0xde, 0xd1, 0xa7, 0x39, 0x0d, 0x56, 0xff, 0xb5, 0xe3,
-	0x2f, 0xc2, 0x27, 0xc7, 0x85, 0xdb, 0xb5, 0x30, 0xb9, 0x89, 0xcf, 0x33, 0x25, 0x3a, 0x93, 0x85,
-	0x69, 0x28, 0x63, 0x3a, 0x59, 0x35, 0x05, 0xc1, 0x06, 0x04, 0x2b, 0x69, 0x9e, 0x2a, 0x5c, 0xc5,
-	0xff, 0x60, 0x55, 0xb5, 0x8c, 0x73, 0x4d, 0x59, 0x55, 0xa5, 0x95, 0x55, 0xf7, 0x37, 0x08, 0xb7,
-	0xa7, 0xc0, 0xc8, 0x1c, 0x77, 0xea, 0xb7, 0xbd, 0xeb, 0x1e, 0xbb, 0x31, 0xb7, 0xe1, 0xb6, 0x35,
-	0xfa, 0x2b, 0x5a, 0xfd, 0x28, 0x73, 0xdc, 0xa9, 0x9d, 0xfd, 0xbd, 0x42, 0x45, 0xfb, 0x83, 0xc2,
-	0xcf, 0xbb, 0x58, 0xa7, 0x6f, 0xf6, 0xeb, 0x21, 0x9a, 0x4c, 0x3e, 0x6d, 0x6d, 0xb4, 0xd9, 0xda,
-	0xe8, 0xdb, 0xd6, 0x46, 0xef, 0x77, 0x76, 0x6b, 0xb3, 0xb3, 0x5b, 0x5f, 0x76, 0x76, 0xeb, 0xc5,
-	0x80, 0xc5, 0x32, 0x7a, 0xb5, 0x70, 0x43, 0xc1, 0xbd, 0x86, 0x63, 0x45, 0xd3, 0x33, 0xf9, 0x3a,
-	0xa5, 0xb0, 0x38, 0x53, 0x57, 0xff, 0xe0, 0x7b, 0x00, 0x00, 0x00, 0xff, 0xff, 0xec, 0xc8, 0x5b,
-	0x54, 0x91, 0x03, 0x00, 0x00,
+	// 647 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x9c, 0x55, 0xb1, 0x6f, 0xd3, 0x4e,
+	0x18, 0xed, 0x35, 0x49, 0xd5, 0x7e, 0x4d, 0x7f, 0x3f, 0x38, 0x52, 0x61, 0x8c, 0x14, 0x8a, 0x51,
+	0xa5, 0xa8, 0xa2, 0x36, 0x2d, 0x88, 0x21, 0x48, 0x48, 0x14, 0x90, 0x18, 0xe8, 0xe2, 0xc2, 0xc2,
+	0xd2, 0x3a, 0xf1, 0xc9, 0xb6, 0xe8, 0xf9, 0x8c, 0xef, 0x1a, 0x25, 0x1b, 0x62, 0x41, 0x62, 0x42,
+	0xe2, 0x1f, 0xe9, 0xc0, 0x3f, 0xc0, 0xc6, 0x58, 0x98, 0x10, 0x13, 0x6a, 0x87, 0x8a, 0xff, 0x02,
+	0xf9, 0xce, 0x76, 0x8d, 0x5b, 0xb7, 0x09, 0x4b, 0x74, 0xf7, 0xdd, 0xbb, 0xef, 0x7d, 0xef, 0xf9,
+	0xd9, 0x81, 0x9b, 0x7d, 0xc6, 0x29, 0xe3, 0x16, 0x19, 0x50, 0x8b, 0x84, 0x7d, 0x4a, 0x68, 0xc4,
+	0xd8, 0xae, 0x35, 0x58, 0xb3, 0xc4, 0xd0, 0x8c, 0x62, 0x26, 0x18, 0xd6, 0x14, 0xc4, 0x24, 0x03,
+	0x6a, 0x9e, 0x40, 0xcc, 0xc1, 0x9a, 0x7e, 0xd9, 0xa1, 0x41, 0xc8, 0x2c, 0xf9, 0xab, 0xc0, 0xfa,
+	0xd5, 0xb4, 0x1f, 0xe5, 0x5e, 0xd2, 0x84, 0x72, 0x2f, 0x3d, 0xb8, 0xa6, 0x0e, 0xb6, 0xe5, 0xce,
+	0x4a, 0x5b, 0xaa, 0xa3, 0x96, 0xc7, 0x3c, 0xa6, 0xea, 0xc9, 0x4a, 0x55, 0x8d, 0x4f, 0x08, 0xe6,
+	0x37, 0xb9, 0xf7, 0x98, 0x51, 0x1a, 0x88, 0x17, 0x43, 0x7c, 0x07, 0x66, 0x38, 0x09, 0x5d, 0x12,
+	0x6b, 0x68, 0x09, 0x75, 0xe6, 0x36, 0xb4, 0xef, 0x9f, 0x57, 0x5b, 0x69, 0x9f, 0x47, 0xae, 0x1b,
+	0x13, 0xce, 0xb7, 0x44, 0x1c, 0x84, 0x9e, 0x9d, 0xe2, 0xf0, 0x0d, 0x98, 0xef, 0xcb, 0xdb, 0xdb,
+	0xbe, 0xc3, 0x7d, 0x6d, 0x7a, 0x09, 0x75, 0x9a, 0x36, 0xa8, 0xd2, 0x33, 0x87, 0xfb, 0xdd, 0xb5,
+	0x77, 0xc7, 0xfb, 0x2b, 0x29, 0xfa, 0xc3, 0xf1, 0xfe, 0x4a, 0x85, 0x19, 0x85, 0x29, 0x8c, 0xe7,
+	0x70, 0xa5, 0xb0, 0xb5, 0x09, 0x8f, 0x58, 0xc8, 0x09, 0xbe, 0x05, 0x0b, 0x19, 0x15, 0x09, 0x3c,
+	0x5f, 0xc8, 0x19, 0xeb, 0x76, 0x33, 0x25, 0x93, 0x35, 0x7c, 0x09, 0x6a, 0x9c, 0xbc, 0x91, 0x73,
+	0xd4, 0xed, 0x64, 0x69, 0xfc, 0x54, 0x1a, 0x6d, 0x32, 0x20, 0xce, 0xee, 0x3f, 0x69, 0x3c, 0x45,
+	0x3c, 0x5d, 0x4d, 0x5c, 0xcb, 0x89, 0xf1, 0x75, 0x98, 0x8b, 0x25, 0xe9, 0xb6, 0x18, 0x6a, 0x75,
+	0x69, 0xcc, 0x6c, 0x9c, 0x4d, 0x81, 0xa1, 0xce, 0x9d, 0x5d, 0xa1, 0x35, 0x64, 0x5d, 0xae, 0x27,
+	0xb0, 0x2a, 0x13, 0x63, 0x2c, 0x4a, 0xab, 0xb2, 0x6d, 0x66, 0x95, 0xf1, 0x05, 0x01, 0xde, 0xe4,
+	0xde, 0xd6, 0x5e, 0x8f, 0x06, 0xe2, 0x69, 0xd8, 0x8f, 0x47, 0x91, 0x20, 0x2e, 0xbe, 0x0f, 0x73,
+	0x5c, 0x96, 0xc4, 0x18, 0xea, 0x4f, 0xa0, 0xb8, 0x09, 0xc8, 0x49, 0x1f, 0x2d, 0x72, 0x70, 0x0b,
+	0x1a, 0x21, 0x0b, 0xfb, 0x44, 0x6a, 0x6d, 0xda, 0x6a, 0x93, 0x08, 0xea, 0x31, 0x77, 0x94, 0x0a,
+	0x95, 0xeb, 0xee, 0x83, 0x44, 0xd0, 0x49, 0x9f, 0x44, 0x53, 0xa7, 0x52, 0x53, 0x69, 0x58, 0xe3,
+	0x25, 0xe8, 0xa7, 0xab, 0x79, 0x18, 0x96, 0xe1, 0x3f, 0x97, 0xc8, 0xe2, 0xdf, 0x69, 0x58, 0x48,
+	0xab, 0x95, 0x71, 0xf8, 0x8d, 0x40, 0xcb, 0xfb, 0x3e, 0x51, 0xe0, 0x80, 0x85, 0x5b, 0xbe, 0x13,
+	0x93, 0x24, 0x1b, 0xaf, 0xc9, 0x28, 0x1a, 0x27, 0x1b, 0x0a, 0x77, 0xc6, 0x1c, 0xd3, 0xe7, 0xcc,
+	0x51, 0x48, 0x47, 0x0b, 0x1a, 0x41, 0xe8, 0x12, 0x95, 0x8c, 0xba, 0xad, 0x36, 0x89, 0xd3, 0x6e,
+	0x9a, 0x09, 0xe4, 0x76, 0x1f, 0xca, 0x40, 0x28, 0xa6, 0xc4, 0x3c, 0xf3, 0x02, 0xf3, 0x4a, 0x72,
+	0x0c, 0x03, 0x96, 0xaa, 0xce, 0x32, 0x23, 0xd7, 0xbf, 0xd5, 0xa0, 0xb6, 0xc9, 0x3d, 0xbc, 0x03,
+	0xb3, 0xf9, 0x67, 0x60, 0xd9, 0xac, 0xfa, 0x1c, 0x99, 0x85, 0x17, 0x53, 0x5f, 0x1d, 0x0b, 0x96,
+	0x3f, 0xb2, 0x1d, 0x98, 0xcd, 0x5f, 0xc2, 0xf3, 0x19, 0x32, 0xd8, 0x05, 0x0c, 0xe5, 0xd8, 0xe3,
+	0x3d, 0xf8, 0xbf, 0x1c, 0xf9, 0xdb, 0xe7, 0x76, 0x28, 0xa1, 0xf5, 0x7b, 0x93, 0xa0, 0x73, 0xda,
+	0xf7, 0x08, 0x16, 0xcf, 0xce, 0xd3, 0xfa, 0x18, 0xfd, 0x4a, 0x77, 0xf4, 0xee, 0xe4, 0x77, 0xb2,
+	0x49, 0xf4, 0xc6, 0xdb, 0xe3, 0xfd, 0x15, 0xb4, 0xb1, 0xf1, 0xf5, 0xb0, 0x8d, 0x0e, 0x0e, 0xdb,
+	0xe8, 0xd7, 0x61, 0x1b, 0x7d, 0x3c, 0x6a, 0x4f, 0x1d, 0x1c, 0xb5, 0xa7, 0x7e, 0x1c, 0xb5, 0xa7,
+	0x5e, 0x75, 0xbc, 0x40, 0xf8, 0x7b, 0x3d, 0xb3, 0xcf, 0xa8, 0x55, 0x08, 0xd3, 0xb0, 0x18, 0x27,
+	0x31, 0x8a, 0x08, 0xef, 0xcd, 0xc8, 0x7f, 0x88, 0xbb, 0x7f, 0x02, 0x00, 0x00, 0xff, 0xff, 0xe4,
+	0x61, 0x5f, 0x9d, 0xbd, 0x06, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -316,6 +570,12 @@ type MsgClient interface {
 	CommitTx(ctx context.Context, in *MsgCommitTx, opts ...grpc.CallOption) (*MsgCommitTxResponse, error)
 	// RevealTx reveals the committed transaction body after the reveal delay.
 	RevealTx(ctx context.Context, in *MsgRevealTx, opts ...grpc.CallOption) (*MsgRevealTxResponse, error)
+	// SubmitEncrypted submits a threshold-encrypted transaction; its body is
+	// unreadable until >= t keyper decryption shares are combined after ordering.
+	SubmitEncrypted(ctx context.Context, in *MsgSubmitEncrypted, opts ...grpc.CallOption) (*MsgSubmitEncryptedResponse, error)
+	// SubmitDecryptionShare lets an authorized keyper publish its decryption share
+	// for an encrypted tx; BeginBlock decrypts once >= t shares are present.
+	SubmitDecryptionShare(ctx context.Context, in *MsgSubmitDecryptionShare, opts ...grpc.CallOption) (*MsgSubmitDecryptionShareResponse, error)
 }
 
 type msgClient struct {
@@ -344,12 +604,36 @@ func (c *msgClient) RevealTx(ctx context.Context, in *MsgRevealTx, opts ...grpc.
 	return out, nil
 }
 
+func (c *msgClient) SubmitEncrypted(ctx context.Context, in *MsgSubmitEncrypted, opts ...grpc.CallOption) (*MsgSubmitEncryptedResponse, error) {
+	out := new(MsgSubmitEncryptedResponse)
+	err := c.cc.Invoke(ctx, "/cosmos.evm.encmempool.v1.Msg/SubmitEncrypted", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *msgClient) SubmitDecryptionShare(ctx context.Context, in *MsgSubmitDecryptionShare, opts ...grpc.CallOption) (*MsgSubmitDecryptionShareResponse, error) {
+	out := new(MsgSubmitDecryptionShareResponse)
+	err := c.cc.Invoke(ctx, "/cosmos.evm.encmempool.v1.Msg/SubmitDecryptionShare", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MsgServer is the server API for Msg service.
 type MsgServer interface {
 	// CommitTx records a hash-commitment to a future transaction.
 	CommitTx(context.Context, *MsgCommitTx) (*MsgCommitTxResponse, error)
 	// RevealTx reveals the committed transaction body after the reveal delay.
 	RevealTx(context.Context, *MsgRevealTx) (*MsgRevealTxResponse, error)
+	// SubmitEncrypted submits a threshold-encrypted transaction; its body is
+	// unreadable until >= t keyper decryption shares are combined after ordering.
+	SubmitEncrypted(context.Context, *MsgSubmitEncrypted) (*MsgSubmitEncryptedResponse, error)
+	// SubmitDecryptionShare lets an authorized keyper publish its decryption share
+	// for an encrypted tx; BeginBlock decrypts once >= t shares are present.
+	SubmitDecryptionShare(context.Context, *MsgSubmitDecryptionShare) (*MsgSubmitDecryptionShareResponse, error)
 }
 
 // UnimplementedMsgServer can be embedded to have forward compatible implementations.
@@ -361,6 +645,12 @@ func (*UnimplementedMsgServer) CommitTx(ctx context.Context, req *MsgCommitTx) (
 }
 func (*UnimplementedMsgServer) RevealTx(ctx context.Context, req *MsgRevealTx) (*MsgRevealTxResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RevealTx not implemented")
+}
+func (*UnimplementedMsgServer) SubmitEncrypted(ctx context.Context, req *MsgSubmitEncrypted) (*MsgSubmitEncryptedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SubmitEncrypted not implemented")
+}
+func (*UnimplementedMsgServer) SubmitDecryptionShare(ctx context.Context, req *MsgSubmitDecryptionShare) (*MsgSubmitDecryptionShareResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SubmitDecryptionShare not implemented")
 }
 
 func RegisterMsgServer(s grpc1.Server, srv MsgServer) {
@@ -403,6 +693,42 @@ func _Msg_RevealTx_Handler(srv interface{}, ctx context.Context, dec func(interf
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Msg_SubmitEncrypted_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MsgSubmitEncrypted)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MsgServer).SubmitEncrypted(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/cosmos.evm.encmempool.v1.Msg/SubmitEncrypted",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MsgServer).SubmitEncrypted(ctx, req.(*MsgSubmitEncrypted))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Msg_SubmitDecryptionShare_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MsgSubmitDecryptionShare)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MsgServer).SubmitDecryptionShare(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/cosmos.evm.encmempool.v1.Msg/SubmitDecryptionShare",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MsgServer).SubmitDecryptionShare(ctx, req.(*MsgSubmitDecryptionShare))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var Msg_serviceDesc = _Msg_serviceDesc
 var _Msg_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "cosmos.evm.encmempool.v1.Msg",
@@ -415,6 +741,14 @@ var _Msg_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevealTx",
 			Handler:    _Msg_RevealTx_Handler,
+		},
+		{
+			MethodName: "SubmitEncrypted",
+			Handler:    _Msg_SubmitEncrypted_Handler,
+		},
+		{
+			MethodName: "SubmitDecryptionShare",
+			Handler:    _Msg_SubmitDecryptionShare_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -568,6 +902,165 @@ func (m *MsgRevealTxResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	return len(dAtA) - i, nil
 }
 
+func (m *MsgSubmitEncrypted) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgSubmitEncrypted) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgSubmitEncrypted) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if len(m.Body) > 0 {
+		i -= len(m.Body)
+		copy(dAtA[i:], m.Body)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Body)))
+		i--
+		dAtA[i] = 0x22
+	}
+	if len(m.Nonce) > 0 {
+		i -= len(m.Nonce)
+		copy(dAtA[i:], m.Nonce)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Nonce)))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if len(m.A) > 0 {
+		i -= len(m.A)
+		copy(dAtA[i:], m.A)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.A)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.Submitter) > 0 {
+		i -= len(m.Submitter)
+		copy(dAtA[i:], m.Submitter)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Submitter)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgSubmitEncryptedResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgSubmitEncryptedResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgSubmitEncryptedResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.Seq != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.Seq))
+		i--
+		dAtA[i] = 0x10
+	}
+	if m.DecryptHeight != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.DecryptHeight))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgSubmitDecryptionShare) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgSubmitDecryptionShare) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgSubmitDecryptionShare) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if len(m.D) > 0 {
+		i -= len(m.D)
+		copy(dAtA[i:], m.D)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.D)))
+		i--
+		dAtA[i] = 0x2a
+	}
+	if m.Index != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.Index))
+		i--
+		dAtA[i] = 0x20
+	}
+	if m.Seq != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.Seq))
+		i--
+		dAtA[i] = 0x18
+	}
+	if m.DecryptHeight != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.DecryptHeight))
+		i--
+		dAtA[i] = 0x10
+	}
+	if len(m.Keyper) > 0 {
+		i -= len(m.Keyper)
+		copy(dAtA[i:], m.Keyper)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Keyper)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgSubmitDecryptionShareResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgSubmitDecryptionShareResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgSubmitDecryptionShareResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	return len(dAtA) - i, nil
+}
+
 func encodeVarintTx(dAtA []byte, offset int, v uint64) int {
 	offset -= sovTx(v)
 	base := offset
@@ -639,6 +1132,81 @@ func (m *MsgRevealTx) Size() (n int) {
 }
 
 func (m *MsgRevealTxResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	return n
+}
+
+func (m *MsgSubmitEncrypted) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Submitter)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	l = len(m.A)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	l = len(m.Nonce)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	l = len(m.Body)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	return n
+}
+
+func (m *MsgSubmitEncryptedResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.DecryptHeight != 0 {
+		n += 1 + sovTx(uint64(m.DecryptHeight))
+	}
+	if m.Seq != 0 {
+		n += 1 + sovTx(uint64(m.Seq))
+	}
+	return n
+}
+
+func (m *MsgSubmitDecryptionShare) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Keyper)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	if m.DecryptHeight != 0 {
+		n += 1 + sovTx(uint64(m.DecryptHeight))
+	}
+	if m.Seq != 0 {
+		n += 1 + sovTx(uint64(m.Seq))
+	}
+	if m.Index != 0 {
+		n += 1 + sovTx(uint64(m.Index))
+	}
+	l = len(m.D)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	return n
+}
+
+func (m *MsgSubmitDecryptionShareResponse) Size() (n int) {
 	if m == nil {
 		return 0
 	}
@@ -1072,6 +1640,501 @@ func (m *MsgRevealTxResponse) Unmarshal(dAtA []byte) error {
 		}
 		if fieldNum <= 0 {
 			return fmt.Errorf("proto: MsgRevealTxResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgSubmitEncrypted) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgSubmitEncrypted: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgSubmitEncrypted: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Submitter", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Submitter = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field A", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.A = append(m.A[:0], dAtA[iNdEx:postIndex]...)
+			if m.A == nil {
+				m.A = []byte{}
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Nonce", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Nonce = append(m.Nonce[:0], dAtA[iNdEx:postIndex]...)
+			if m.Nonce == nil {
+				m.Nonce = []byte{}
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Body", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Body = append(m.Body[:0], dAtA[iNdEx:postIndex]...)
+			if m.Body == nil {
+				m.Body = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgSubmitEncryptedResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgSubmitEncryptedResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgSubmitEncryptedResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field DecryptHeight", wireType)
+			}
+			m.DecryptHeight = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.DecryptHeight |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+			}
+			m.Seq = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Seq |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgSubmitDecryptionShare) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgSubmitDecryptionShare: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgSubmitDecryptionShare: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Keyper", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Keyper = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field DecryptHeight", wireType)
+			}
+			m.DecryptHeight = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.DecryptHeight |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+			}
+			m.Seq = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Seq |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Index", wireType)
+			}
+			m.Index = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Index |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field D", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.D = append(m.D[:0], dAtA[iNdEx:postIndex]...)
+			if m.D == nil {
+				m.D = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgSubmitDecryptionShareResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgSubmitDecryptionShareResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgSubmitDecryptionShareResponse: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
 		default:

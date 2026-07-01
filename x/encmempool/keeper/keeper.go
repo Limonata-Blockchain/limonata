@@ -94,6 +94,79 @@ func (k Keeper) DeletePending(ctx context.Context, commitHeight uint64, sender s
 	_ = k.store(ctx).Delete(pendingKey(commitHeight, sender, seq))
 }
 
+// --- encrypted txs + decryption shares (threshold path) ---
+
+func (k Keeper) nextEncSeq(ctx context.Context) uint64 {
+	st := k.store(ctx)
+	bz, _ := st.Get(types.EncSeqKey)
+	var cur uint64
+	if len(bz) == 8 {
+		cur = binary.BigEndian.Uint64(bz)
+	}
+	_ = st.Set(types.EncSeqKey, u64(cur+1))
+	return cur
+}
+
+// SubmitEncTx assigns a seq + decrypt height and stores the ciphertext, ordered by
+// (decryptHeight, seq). The order is fixed here, before any body can be read.
+func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight, decryptDelay uint64, a, nonce, body []byte) types.EncTx {
+	e := types.EncTx{
+		Submitter: submitter, SubmitHeight: submitHeight,
+		DecryptHeight: submitHeight + decryptDelay, Seq: k.nextEncSeq(ctx),
+		A: a, Nonce: nonce, Body: body,
+	}
+	_ = k.store(ctx).Set(encTxKey(e.DecryptHeight, e.Seq), mustJSON(e))
+	return e
+}
+
+func (k Keeper) DeleteEncTx(ctx context.Context, decryptHeight, seq uint64) {
+	_ = k.store(ctx).Delete(encTxKey(decryptHeight, seq))
+}
+
+func (k Keeper) SetEncShare(ctx context.Context, s types.EncShare) error {
+	return k.store(ctx).Set(encShareKey(s.DecryptHeight, s.Seq, s.Keyper), mustJSON(s))
+}
+
+func (k Keeper) DeleteSharesFor(ctx context.Context, decryptHeight, seq uint64) {
+	for _, s := range k.CollectShares(ctx, decryptHeight, seq) {
+		_ = k.store(ctx).Delete(encShareKey(decryptHeight, seq, s.Keyper))
+	}
+}
+
+// IterateEncTxAtHeight visits every EncTx whose decrypt height == h, in seq order.
+func (k Keeper) IterateEncTxAtHeight(ctx context.Context, h uint64, fn func(types.EncTx)) {
+	pfx := concat(types.EncTxPrefix, u64(h))
+	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
+	if err != nil {
+		return
+	}
+	defer it.Close()
+	for ; it.Valid(); it.Next() {
+		var e types.EncTx
+		if json.Unmarshal(it.Value(), &e) == nil {
+			fn(e)
+		}
+	}
+}
+
+// CollectShares returns all decryption shares for a given (decryptHeight, seq).
+func (k Keeper) CollectShares(ctx context.Context, h, seq uint64) []types.EncShare {
+	pfx := concat(types.EncSharePrefix, u64(h), u64(seq))
+	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
+	if err != nil {
+		return nil
+	}
+	defer it.Close()
+	var out []types.EncShare
+	for ; it.Valid(); it.Next() {
+		var s types.EncShare
+		if json.Unmarshal(it.Value(), &s) == nil {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // --- iteration (genesis export + BeginBlock); keys are pre-sorted big-endian ---
 
 func (k Keeper) IterateCommits(ctx context.Context, fn func(types.Commit)) {
@@ -132,6 +205,19 @@ func commitKey(height uint64, sender string, seq uint64) []byte {
 
 func pendingKey(commitHeight uint64, sender string, seq uint64) []byte {
 	return concat(types.PendingPrefix, u64(commitHeight), []byte(sender), u64(seq))
+}
+
+func encTxKey(decryptHeight, seq uint64) []byte {
+	return concat(types.EncTxPrefix, u64(decryptHeight), u64(seq))
+}
+
+func encShareKey(decryptHeight, seq uint64, keyper string) []byte {
+	return concat(types.EncSharePrefix, u64(decryptHeight), u64(seq), []byte(keyper))
+}
+
+func mustJSON(v any) []byte {
+	bz, _ := json.Marshal(v)
+	return bz
 }
 
 func concat(parts ...[]byte) []byte {

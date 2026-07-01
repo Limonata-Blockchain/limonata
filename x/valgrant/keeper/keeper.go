@@ -61,6 +61,28 @@ func (k Keeper) GetParams(ctx context.Context) types.Params {
 	return p
 }
 
+// --- KPI snapshot (latest decentralization metrics) ---
+
+func (k Keeper) SetKPISnapshot(ctx context.Context, s types.KPISnapshot) error {
+	bz, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return k.store(ctx).Set(types.KPISnapshotKey, bz)
+}
+
+func (k Keeper) GetKPISnapshot(ctx context.Context) (types.KPISnapshot, bool) {
+	bz, err := k.store(ctx).Get(types.KPISnapshotKey)
+	if err != nil || bz == nil {
+		return types.KPISnapshot{}, false
+	}
+	var s types.KPISnapshot
+	if json.Unmarshal(bz, &s) != nil {
+		return types.KPISnapshot{}, false
+	}
+	return s, true
+}
+
 // --- grant registry ---
 
 func (k Keeper) SetGrant(ctx context.Context, g types.Grant) error {

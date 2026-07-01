@@ -194,6 +194,7 @@ func initRootCmd(rootCmd *cobra.Command, evmApp *evmd.EVMD) {
 		sdkserver.StatusCommand(),
 		queryCommand(),
 		txCommand(),
+		KeyperCmd(),
 	)
 
 	// add general tx flags to the root command

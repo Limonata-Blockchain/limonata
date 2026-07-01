@@ -23,6 +23,14 @@ service Msg {
 
   // RevealTx reveals the committed transaction body after the reveal delay.
   rpc RevealTx(MsgRevealTx) returns (MsgRevealTxResponse);
+
+  // SubmitEncrypted submits a threshold-encrypted transaction; its body is
+  // unreadable until >= t keyper decryption shares are combined after ordering.
+  rpc SubmitEncrypted(MsgSubmitEncrypted) returns (MsgSubmitEncryptedResponse);
+
+  // SubmitDecryptionShare lets an authorized keyper publish its decryption share
+  // for an encrypted tx; BeginBlock decrypts once >= t shares are present.
+  rpc SubmitDecryptionShare(MsgSubmitDecryptionShare) returns (MsgSubmitDecryptionShareResponse);
 }
 
 // MsgCommitTx records sha256(reveal_tx || salt) at the current block height.
@@ -62,3 +70,36 @@ message MsgRevealTx {
 }
 
 message MsgRevealTxResponse {}
+
+// MsgSubmitEncrypted submits a threshold-encrypted transaction body. Only the
+// ciphertext is stored, ordered by (decrypt_height, seq); nobody can read it until
+// the keypers' shares are combined in BeginBlock.
+message MsgSubmitEncrypted {
+  option (cosmos.msg.v1.signer) = "submitter";
+  option (amino.name) = "cosmos/evm/encmempool/MsgSubmitEncrypted";
+
+  string submitter = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  bytes a = 2;     // ciphertext component r*G (compressed)
+  bytes nonce = 3; // AES-GCM nonce
+  bytes body = 4;  // AES-256-GCM ciphertext
+}
+
+message MsgSubmitEncryptedResponse {
+  uint64 decrypt_height = 1;
+  uint64 seq = 2;
+}
+
+// MsgSubmitDecryptionShare is an authorized keyper's partial decryption (x_i*A)
+// for one encrypted tx.
+message MsgSubmitDecryptionShare {
+  option (cosmos.msg.v1.signer) = "keyper";
+  option (amino.name) = "cosmos/evm/encmempool/MsgSubmitDecryptionShare";
+
+  string keyper = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  uint64 decrypt_height = 2;
+  uint64 seq = 3;
+  uint64 index = 4; // keyper share index (1..n)
+  bytes d = 5;      // compressed x_i*A
+}
+
+message MsgSubmitDecryptionShareResponse {}

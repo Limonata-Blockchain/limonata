@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 
 	errorsmod "cosmossdk.io/errors"
@@ -81,4 +82,72 @@ func (m msgServer) RevealTx(goCtx context.Context, msg *types.MsgRevealTx) (*typ
 		sdk.NewAttribute("seq", strconv.FormatUint(msg.Seq, 10)),
 	))
 	return &types.MsgRevealTxResponse{}, nil
+}
+
+// SubmitEncrypted stores a threshold-encrypted tx (ciphertext only), ordered by
+// (decrypt_height, seq). The body is unreadable until BeginBlock combines >= t
+// keyper shares — that ordering-before-readability is the anti-MEV property.
+func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEncrypted) (*types.MsgSubmitEncryptedResponse, error) {
+	p := m.GetParams(goCtx)
+	if !p.EncEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
+	}
+	if len(msg.A) == 0 || len(msg.Body) == 0 {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing ciphertext (a/body)")
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body)
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_encrypted_submitted",
+		sdk.NewAttribute("submitter", msg.Submitter),
+		sdk.NewAttribute("decrypt_height", strconv.FormatUint(e.DecryptHeight, 10)),
+		sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+		// a_hex is the ciphertext's ephemeral public key r*G. It is PUBLIC (not the
+		// body) and is what each keyper needs to compute its decryption share. Emitting
+		// it lets keyper daemons act on block events without a custom query endpoint.
+		sdk.NewAttribute("a_hex", hex.EncodeToString(msg.A)),
+	))
+	return &types.MsgSubmitEncryptedResponse{DecryptHeight: e.DecryptHeight, Seq: e.Seq}, nil
+}
+
+// SubmitDecryptionShare records an authorized keyper's partial decryption. The
+// signer must be a configured keyper and its index must match its position.
+func (m msgServer) SubmitDecryptionShare(goCtx context.Context, msg *types.MsgSubmitDecryptionShare) (*types.MsgSubmitDecryptionShareResponse, error) {
+	p := m.GetParams(goCtx)
+	if !p.EncEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
+	}
+	idx := keyperIndex(p.Keypers, msg.Keyper)
+	if idx == 0 {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "%s is not an authorized keyper", msg.Keyper)
+	}
+	if msg.Index != idx {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "keyper index mismatch: expected %d, got %d", idx, msg.Index)
+	}
+	if len(msg.D) == 0 {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing decryption share (d)")
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	if err := m.SetEncShare(goCtx, types.EncShare{
+		Keyper: msg.Keyper, DecryptHeight: msg.DecryptHeight, Seq: msg.Seq, Index: msg.Index, D: msg.D,
+	}); err != nil {
+		return nil, err
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_share_submitted",
+		sdk.NewAttribute("keyper", msg.Keyper),
+		sdk.NewAttribute("decrypt_height", strconv.FormatUint(msg.DecryptHeight, 10)),
+		sdk.NewAttribute("seq", strconv.FormatUint(msg.Seq, 10)),
+	))
+	return &types.MsgSubmitDecryptionShareResponse{}, nil
+}
+
+// keyperIndex returns the 1-based position of addr in keypers, or 0 if absent.
+func keyperIndex(keypers []string, addr string) uint64 {
+	for i, k := range keypers {
+		if k == addr {
+			return uint64(i + 1)
+		}
+	}
+	return 0
 }

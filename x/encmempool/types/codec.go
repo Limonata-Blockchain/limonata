@@ -12,6 +12,8 @@ func RegisterInterfaces(registry codectypes.InterfaceRegistry) {
 		(*sdk.Msg)(nil),
 		&MsgCommitTx{},
 		&MsgRevealTx{},
+		&MsgSubmitEncrypted{},
+		&MsgSubmitDecryptionShare{},
 	)
 	msgservice.RegisterMsgServiceDesc(registry, &_Msg_serviceDesc)
 }

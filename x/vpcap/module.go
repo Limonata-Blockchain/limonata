@@ -1,7 +1,6 @@
-package valgrant
+package vpcap
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 
@@ -19,18 +18,20 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
 
-	"github.com/cosmos/evm/x/valgrant/keeper"
-	"github.com/cosmos/evm/x/valgrant/types"
+	"github.com/cosmos/evm/x/vpcap/keeper"
+	"github.com/cosmos/evm/x/vpcap/types"
 )
 
 var (
-	_ module.AppModule        = AppModule{}
-	_ module.AppModuleBasic   = AppModuleBasic{}
-	_ module.HasABCIGenesis   = AppModule{}
-	_ appmodule.AppModule     = AppModule{}
-	_ appmodule.HasEndBlocker = AppModule{}
+	_ module.AppModule      = AppModule{}
+	_ module.AppModuleBasic = AppModule{}
+	_ module.HasABCIGenesis = AppModule{}
+	_ appmodule.AppModule   = AppModule{}
 )
 
+// AppModule for x/vpcap. Genesis-only: the per-validator cap is applied at the
+// APP-LEVEL EndBlocker (app.go), NOT via a module EndBlock returning updates
+// (the module manager forbids a second module returning validator updates).
 type AppModuleBasic struct{}
 
 func (AppModuleBasic) Name() string                                  { return types.ModuleName }
@@ -40,7 +41,6 @@ func (AppModuleBasic) RegisterInterfaces(registry codectypes.InterfaceRegistry) 
 }
 func (AppModuleBasic) ConsensusVersion() uint64 { return types.ConsensusVersion }
 
-// Genesis is plain JSON (no proto); the passed codec.JSONCodec is intentionally unused.
 func (AppModuleBasic) DefaultGenesis(_ codec.JSONCodec) json.RawMessage {
 	bz, _ := json.Marshal(types.DefaultGenesisState())
 	return bz
@@ -64,10 +64,8 @@ type AppModule struct {
 
 func NewAppModule(k keeper.Keeper) AppModule { return AppModule{keeper: k} }
 
-func (AppModule) Name() string { return types.ModuleName }
-func (am AppModule) RegisterServices(cfg module.Configurator) {
-	types.RegisterMsgServer(cfg.MsgServer(), keeper.NewMsgServerImpl(am.keeper))
-}
+func (AppModule) Name() string                          { return types.ModuleName }
+func (am AppModule) RegisterServices(_ module.Configurator) {}
 
 func (am AppModule) InitGenesis(ctx sdk.Context, _ codec.JSONCodec, data json.RawMessage) []abci.ValidatorUpdate {
 	var gs types.GenesisState
@@ -83,18 +81,6 @@ func (am AppModule) InitGenesis(ctx sdk.Context, _ codec.JSONCodec, data json.Ra
 func (am AppModule) ExportGenesis(ctx sdk.Context, _ codec.JSONCodec) json.RawMessage {
 	bz, _ := json.Marshal(am.keeper.ExportGenesis(ctx))
 	return bz
-}
-
-// EndBlock sweeps matured clawbacks (bonded principal that finished unbonding)
-// back into the valgrant pool. MUST be ordered AFTER x/staking so that staking's
-// CompleteUnbonding has already returned the coins to the grantee account.
-func (am AppModule) EndBlock(ctx context.Context) error {
-	if err := am.keeper.SweepMaturedClawbacks(ctx); err != nil {
-		return err
-	}
-	// Record the decentralization KPI snapshot (Nakamoto / foundation-VP / count)
-	// AFTER staking has finalized this block's bonded set. v1: transparency only.
-	return am.keeper.RecordKPISnapshot(ctx)
 }
 
 func (am AppModule) IsAppModule()        {}

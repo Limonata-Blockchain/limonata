@@ -14,6 +14,7 @@ func RegisterInterfaces(registry codectypes.InterfaceRegistry) {
 		&MsgRegisterShowcase{},
 		&MsgRemoveShowcase{},
 		&MsgSetPasskeyEnabled{},
+		&MsgSetAdmin{},
 	)
 	msgservice.RegisterMsgServiceDesc(registry, &_Msg_serviceDesc)
 }

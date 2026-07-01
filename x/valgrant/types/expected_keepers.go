@@ -44,4 +44,7 @@ type StakingKeeper interface {
 	GetDelegatorDelegations(ctx context.Context, delegator sdk.AccAddress, maxRetrieve uint16) ([]stakingtypes.Delegation, error)
 	Undelegate(ctx context.Context, delAddr sdk.AccAddress, valAddr sdk.ValAddress, sharesAmount math.LegacyDec) (time.Time, math.Int, error)
 	CompleteUnbonding(ctx context.Context, delAddr sdk.AccAddress, valAddr sdk.ValAddress) (sdk.Coins, error)
+	// KPI reads (v1 decentralization snapshot, read-only).
+	PowerReduction(ctx context.Context) math.Int
+	GetBondedValidatorsByPower(ctx context.Context) ([]stakingtypes.Validator, error)
 }
