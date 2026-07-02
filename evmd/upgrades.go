@@ -244,27 +244,56 @@ const SecurityCapsUpgradeName = "gassponsor-security-caps-v1"
 const (
 	securityCapsDappPerTxFeeCap    = "1000000000000000000"     // 1 LIMO/tx
 	securityCapsRefillDailyMintCap = "10000000000000000000000" // 10,000 LIMO/day
+
+	// v0.3.0 UNIFORM gasless budget (settled design). On a live chain the gassponsor
+	// Params were written by an OLDER binary WITHOUT these three fields, so at upgrade
+	// time they unmarshal to "" — which the keeper treats as "fall back to the legacy
+	// history-scaled formula" (daily_budget "") / "onboarding disabled" (onboarding_grant "").
+	// The migration below writes these hardened values so an in-place-upgraded chain
+	// converges on the SAME uniform model a fresh-genesis chain runs.
+	securityCapsDailyBudget     = "1000000000000000000" // 1 LIMO/day flat, holders only
+	securityCapsHoldMinimum     = "1000000000000000000" // must hold >= 1 LIMO to earn the daily budget
+	securityCapsOnboardingGrant = "50000000000000000"   // 0.05 LIMO one-shot cold-wallet grant
+
+	// squeeze fee split installed on the live chain by the same handler (20% burn /
+	// 20% gas-pool recycle / 60% distribution). On a live chain the squeeze Params were
+	// written by an OLDER binary as compile-time consts (no governable Params blob yet),
+	// so this migration writes the canonical split so gov can later tune it.
+	securityCapsSqueezeBurnBps  uint32 = 2000 // 20% burned
+	securityCapsSqueezeGrantBps uint32 = 2000 // 20% recycled into the gas pool
 )
 
 // applySecurityCaps is the SHARED, deterministic init body for the gassponsor
 // security-caps upgrade. It reads the existing x/gassponsor Params, installs the
-// hardened DappPerTxFeeCap (1 LIMO/tx) and RefillDailyMintCap (10,000 LIMO/day), and
-// writes them back — preserving every other param. It is fully idempotent: it always
-// writes the same hardened values, so re-running it is a no-op. It NEVER mints or moves
-// user funds. Mirrors the shape of applyValGrantInit / applyEncMempoolInit.
+// hardened DappPerTxFeeCap (1 LIMO/tx) and RefillDailyMintCap (10,000 LIMO/day), AND
+// the v0.3.0 uniform gasless budget (DailyBudget 1 LIMO/day, HoldMinimum 1 LIMO,
+// OnboardingGrant 0.05 LIMO), then writes them back — preserving every other param. It
+// is fully idempotent: it always writes the same hardened values, so re-running it is a
+// no-op. It NEVER mints or moves user funds. Mirrors the shape of applyValGrantInit /
+// applyEncMempoolInit.
 func (app *EVMD) applySecurityCaps(ctx sdk.Context) error {
 	logger := ctx.Logger().With("upgrade", SecurityCapsUpgradeName)
 
 	// Read the existing (live) params. On a live chain these were written by an older
-	// binary WITHOUT the two cap fields, so they unmarshal here as "" (== unlimited).
+	// binary WITHOUT the cap / uniform-budget fields, so they unmarshal here as "" —
+	// which the keeper treats as "unlimited" (caps) / "legacy formula" (daily_budget) /
+	// "onboarding disabled" (onboarding_grant).
 	p := app.GasSponsorKeeper.GetParams(ctx)
 	logger.Info("gassponsor security caps: before",
 		"dapp_per_tx_fee_cap", p.DappPerTxFeeCap,
 		"refill_daily_mint_cap", p.RefillDailyMintCap,
+		"daily_budget", p.DailyBudget,
+		"hold_minimum", p.HoldMinimum,
+		"onboarding_grant", p.OnboardingGrant,
 	)
 
 	p.DappPerTxFeeCap = securityCapsDappPerTxFeeCap
 	p.RefillDailyMintCap = securityCapsRefillDailyMintCap
+	// v0.3.0 uniform gasless budget: switch the live chain onto the flat holders-only
+	// DailyBudget + one-shot OnboardingGrant model (matches the fresh-genesis values).
+	p.DailyBudget = securityCapsDailyBudget
+	p.HoldMinimum = securityCapsHoldMinimum
+	p.OnboardingGrant = securityCapsOnboardingGrant
 	if err := app.GasSponsorKeeper.SetParams(ctx, p); err != nil {
 		return err
 	}
@@ -272,6 +301,39 @@ func (app *EVMD) applySecurityCaps(ctx sdk.Context) error {
 	logger.Info("gassponsor security caps: after",
 		"dapp_per_tx_fee_cap", p.DappPerTxFeeCap,
 		"refill_daily_mint_cap", p.RefillDailyMintCap,
+		"daily_budget", p.DailyBudget,
+		"hold_minimum", p.HoldMinimum,
+		"onboarding_grant", p.OnboardingGrant,
+	)
+	return nil
+}
+
+// applySqueezeSplitParams is the SHARED, deterministic init body that installs the
+// governable x/squeeze fee split on the live chain: BurnBps=2000 (20% burn) /
+// GrantBps=2000 (20% gas-pool recycle) / 60% remainder left in fee_collector for
+// x/distribution. It reads the existing squeeze Params, sets the two fields, and
+// writes them back. Fully idempotent (always writes the same values). It NEVER mints
+// or moves user funds. Called from the SecurityCapsUpgradeName handler alongside
+// applySecurityCaps so a fresh-genesis chain and an in-place-upgraded chain converge
+// on identical split params.
+func (app *EVMD) applySqueezeSplitParams(ctx sdk.Context) error {
+	logger := ctx.Logger().With("upgrade", SecurityCapsUpgradeName)
+
+	sp := app.SqueezeKeeper.GetParams(ctx)
+	logger.Info("squeeze split params: before",
+		"burn_bps", sp.BurnBps,
+		"grant_bps", sp.GrantBps,
+	)
+
+	sp.BurnBps = securityCapsSqueezeBurnBps
+	sp.GrantBps = securityCapsSqueezeGrantBps
+	if err := app.SqueezeKeeper.SetParams(ctx, sp); err != nil {
+		return err
+	}
+
+	logger.Info("squeeze split params: after",
+		"burn_bps", sp.BurnBps,
+		"grant_bps", sp.GrantBps,
 	)
 	return nil
 }
@@ -345,6 +407,9 @@ func (app EVMD) RegisterUpgradeHandlers() {
 				return nil, err
 			}
 			if err := app.applySecurityCaps(sdkCtx); err != nil {
+				return nil, err
+			}
+			if err := app.applySqueezeSplitParams(sdkCtx); err != nil {
 				return nil, err
 			}
 			return newVM, nil

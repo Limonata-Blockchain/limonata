@@ -217,6 +217,7 @@ type EVMD struct {
 	VPCapKeeper     vpcapkeeper.Keeper
 	EncMempoolKeeper encmempoolkeeper.Keeper
 	GasSponsorKeeper gassponsorkeeper.Keeper
+	SqueezeKeeper    squeezekeeper.Keeper
 	SponsorPoolKeeper sponsorpoolkeeper.Keeper
 	NetCapKeeper     netcapkeeper.Keeper
 	EVMMempool      sdkmempool.ExtMempool
@@ -643,7 +644,9 @@ func NewExampleApp(
 		app.SponsorPoolKeeper,
 		authtypes.FeeCollectorName,
 	)
-	squeezeKeeper := squeezekeeper.NewKeeper(
+	// Limonata: keep the squeeze keeper on the app struct so the gassponsor-security-caps
+	// upgrade handler can install the governable BurnBps/GrantBps split on the live chain.
+	app.SqueezeKeeper = squeezekeeper.NewKeeper(
 		runtime.NewKVStoreService(keys[squeezetypes.StoreKey]),
 		app.BankKeeper,
 		authtypes.FeeCollectorName,
@@ -687,7 +690,7 @@ func NewExampleApp(
 		feemarket.NewAppModule(app.FeeMarketKeeper),
 		erc20.NewAppModule(app.Erc20Keeper, app.AccountKeeper),
 		// Limonata Squeeze fee module
-		squeeze.NewAppModule(squeezeKeeper),
+		squeeze.NewAppModule(app.SqueezeKeeper),
 		paymaster.NewAppModule(app.PaymasterKeeper),
 		contest.NewAppModule(app.ContestKeeper),
 		valgrant.NewAppModule(app.ValGrantKeeper),
