@@ -25,11 +25,21 @@ import (
 
 // CheckSenderBalance validates that the tx cost value is positive and that the
 // sender has enough funds to pay for the fees and value of the transaction.
+//
+// When the tx is sponsored (the protocol gas pool pays the fee), the sender is only
+// required to cover the transferred value — the gas*gasFeeCap term is dropped — so a
+// 0-balance sponsored account sending a 0-value tx passes affordability. The
+// sponsorship decision is made once in the ante and passed in.
 func CheckSenderBalance(
 	balance sdkmath.Int,
 	ethTx *ethtypes.Transaction,
+	sponsored bool,
 ) error {
+	// Full cost = value + gas*gasFeeCap (+ blob fee). Sponsored: only the value is owed.
 	cost := ethTx.Cost()
+	if sponsored {
+		cost = ethTx.Value()
+	}
 
 	if cost.Sign() < 0 {
 		return errorsmod.Wrapf(

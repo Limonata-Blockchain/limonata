@@ -225,6 +225,7 @@ func (s *EvmUnitAnteTestSuite) TestVerifyAccountBalance() {
 				statedbAccount,
 				senderKey.Addr,
 				ethTx,
+				false,
 			)
 
 			if tc.expectedError != nil {

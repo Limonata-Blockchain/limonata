@@ -255,6 +255,7 @@ func (s *KeeperTestSuite) TestCheckSenderBalance() {
 			err := keeper.CheckSenderBalance(
 				sdkmath.NewIntFromBigInt(acct.Balance.ToBig()),
 				tx.AsTransaction(),
+				false,
 			)
 
 			if tc.expectPass {

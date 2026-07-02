@@ -182,6 +182,39 @@ func (md MonoDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, ne
 	from := ethMsg.GetFrom()
 	fromAddr := common.BytesToAddress(from)
 
+	// 5b. gas fee computation (moved ahead of the balance check).
+	// VerifyFee also enforces gasFeeCap>=baseFee and, during CheckTx, the intrinsic-gas
+	// floor; these checks still run for sponsored txs because we never skip VerifyFee.
+	msgFees, err := evmkeeper.VerifyFee(
+		ethTx,
+		evmDenom,
+		decUtils.BaseFee,
+		decUtils.Rules.IsHomestead,
+		decUtils.Rules.IsIstanbul,
+		decUtils.Rules.IsShanghai,
+		ctx.IsCheckTx(),
+	)
+	if err != nil {
+		return ctx, err
+	}
+
+	// 5c. Gas sponsorship: decide ONCE — BEFORE the affordability check — whether the
+	// protocol gas pool pays this tx's fee (approved dApp / sponsorpool / per-account
+	// baseline / onboarding). This must be known when we verify the sender balance so a
+	// sponsored 0-balance account is not rejected on affordability.
+	//
+	// IsSponsored reads only consensus state and DEBITS the baseline/onboarding day
+	// counters at most once, so it MUST be called exactly once per tx. We compute it here
+	// and cache the result two ways: (a) SetTxSponsored persists it in the per-tx object
+	// store for the unused-gas refund (RefundGas), and (b) the local `sponsored` variable
+	// is reused below for both VerifyAccountBalance and ConsumeFeesAndEmitEvent. IsSponsored
+	// is never called again, so the allowance is debited exactly once (no double-count).
+	sponsored := false
+	if md.sponsorKeeper != nil {
+		sponsored, _ = md.sponsorKeeper.IsSponsored(ctx, from, ethTx.To(), msgFees)
+	}
+	md.evmKeeper.SetTxSponsored(ctx, sponsored)
+
 	// 6. account balance verification
 	// We get the account with the balance from the EVM keeper because it is
 	// using a wrapper of the bank keeper as a dependency to scale all
@@ -194,6 +227,7 @@ func (md MonoDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, ne
 		account,
 		fromAddr,
 		ethTx,
+		sponsored,
 	); err != nil {
 		return ctx, err
 	}
@@ -211,29 +245,8 @@ func (md MonoDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, ne
 		return ctx, err
 	}
 
-	// 8. gas consumption
-	msgFees, err := evmkeeper.VerifyFee(
-		ethTx,
-		evmDenom,
-		decUtils.BaseFee,
-		decUtils.Rules.IsHomestead,
-		decUtils.Rules.IsIstanbul,
-		decUtils.Rules.IsShanghai,
-		ctx.IsCheckTx(),
-	)
-	if err != nil {
-		return ctx, err
-	}
-
-	// Gas sponsorship: decide ONCE whether the protocol gas pool pays this tx's fee
-	// (approved dApp or per-account baseline), persist it in the per-tx object store so
-	// the deduction here and the unused-gas refund (RefundGas) act on the same decision.
-	sponsored := false
-	if md.sponsorKeeper != nil {
-		sponsored, _ = md.sponsorKeeper.IsSponsored(ctx, from, ethTx.To(), msgFees)
-	}
-	md.evmKeeper.SetTxSponsored(ctx, sponsored)
-
+	// 8. gas consumption — deduct the fee using the sponsorship decision cached in 5c
+	// (reused, never recomputed, so the sponsored allowance is debited exactly once).
 	err = ConsumeFeesAndEmitEvent(
 		ctx,
 		md.evmKeeper,
