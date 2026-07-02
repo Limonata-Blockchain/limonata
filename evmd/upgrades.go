@@ -219,6 +219,63 @@ func (app *EVMD) applyEncMempoolInit(ctx sdk.Context, act encActivation, configu
 	return nil
 }
 
+// --- Limonata: gassponsor security caps in-place upgrade (v0.3.0) ---
+//
+// SecurityCapsUpgradeName is the LATER Limonata gov upgrade that HARDENS x/gassponsor
+// on the LIVE chain by installing the two anti-drain caps the re-genesis proof baked
+// into genesis:
+//   - Params.DappPerTxFeeCap    = 1 LIMO/tx        (bounds the unlimited approved-dApp path)
+//   - Params.RefillDailyMintCap = 10,000 LIMO/day  (global daily mint circuit breaker)
+//
+// CRITICAL: on a live chain the gassponsor Params were written by an OLDER binary that
+// had NEITHER field, so at upgrade time they unmarshal to "" — which keeper.withinDappCap
+// and the abci refill both treat as UNLIMITED. A plain binary swap would therefore leave
+// the caps OFF. This upgrade's handler runs a deterministic param migration
+// (applySecurityCaps) that reads the existing params, sets the two cap fields to the
+// hardened values, and writes them back. NO new store keys are added: the caps live in
+// x/gassponsor Params (0x01) and the daily-mint counter under MintedTodayPrefix (0x03),
+// BOTH in the EXISTING gassponsor store — so NO StoreUpgrades/StoreLoader is needed.
+// NEVER mints or moves user funds.
+const SecurityCapsUpgradeName = "gassponsor-security-caps-v1"
+
+// Hardened live cap values installed by the SecurityCapsUpgradeName migration. They
+// match the re-genesis genesis-script values so fresh-genesis and in-place-upgrade
+// chains converge on identical hardened params.
+const (
+	securityCapsDappPerTxFeeCap    = "1000000000000000000"     // 1 LIMO/tx
+	securityCapsRefillDailyMintCap = "10000000000000000000000" // 10,000 LIMO/day
+)
+
+// applySecurityCaps is the SHARED, deterministic init body for the gassponsor
+// security-caps upgrade. It reads the existing x/gassponsor Params, installs the
+// hardened DappPerTxFeeCap (1 LIMO/tx) and RefillDailyMintCap (10,000 LIMO/day), and
+// writes them back — preserving every other param. It is fully idempotent: it always
+// writes the same hardened values, so re-running it is a no-op. It NEVER mints or moves
+// user funds. Mirrors the shape of applyValGrantInit / applyEncMempoolInit.
+func (app *EVMD) applySecurityCaps(ctx sdk.Context) error {
+	logger := ctx.Logger().With("upgrade", SecurityCapsUpgradeName)
+
+	// Read the existing (live) params. On a live chain these were written by an older
+	// binary WITHOUT the two cap fields, so they unmarshal here as "" (== unlimited).
+	p := app.GasSponsorKeeper.GetParams(ctx)
+	logger.Info("gassponsor security caps: before",
+		"dapp_per_tx_fee_cap", p.DappPerTxFeeCap,
+		"refill_daily_mint_cap", p.RefillDailyMintCap,
+	)
+
+	p.DappPerTxFeeCap = securityCapsDappPerTxFeeCap
+	p.RefillDailyMintCap = securityCapsRefillDailyMintCap
+	if err := app.GasSponsorKeeper.SetParams(ctx, p); err != nil {
+		return err
+	}
+
+	logger.Info("gassponsor security caps: after",
+		"dapp_per_tx_fee_cap", p.DappPerTxFeeCap,
+		"refill_daily_mint_cap", p.RefillDailyMintCap,
+	)
+	return nil
+}
+
 func (app EVMD) RegisterUpgradeHandlers() {
 	app.UpgradeKeeper.SetUpgradeHandler(
 		UpgradeName,
@@ -267,6 +324,27 @@ func (app EVMD) RegisterUpgradeHandlers() {
 			}
 			act, configured := bakedEncActivation()
 			if err := app.applyEncMempoolInit(sdkCtx, act, configured); err != nil {
+				return nil, err
+			}
+			return newVM, nil
+		},
+	)
+
+	// Limonata: gassponsor-security-caps GOV upgrade handler (v0.3.0). It adds NO new
+	// modules or stores — it only runs module migrations, then installs the hardened
+	// gassponsor caps via applySecurityCaps (the LIVE params were written without the
+	// new cap fields, so they unmarshal to "" == unlimited; this migration turns the
+	// caps ON). Because the caps + daily-mint counter both live in the EXISTING
+	// gassponsor store, NO StoreUpgrades/StoreLoader is wired below for this name.
+	app.UpgradeKeeper.SetUpgradeHandler(
+		SecurityCapsUpgradeName,
+		func(ctx context.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+			sdkCtx := sdk.UnwrapSDKContext(ctx)
+			newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), fromVM)
+			if err != nil {
+				return nil, err
+			}
+			if err := app.applySecurityCaps(sdkCtx); err != nil {
 				return nil, err
 			}
 			return newVM, nil
