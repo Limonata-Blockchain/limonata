@@ -28,6 +28,19 @@ type Params struct {
 	// min(BaselineDaily, ColdStartDaily + bonus), so HOLDING LIMO (skin-in-the-game) is
 	// what unlocks more sponsored gas and bounds sybil minting. Empty/"0" -> 1.
 	BalanceDivisor string `json:"balance_divisor"`
+	// DappPerTxFeeCap bounds the per-tx fee the UNLIMITED approved-dApp path will sponsor
+	// (aLIMO, math.Int as string). If a tx's fee exceeds this cap, the dApp path is skipped
+	// and the tx falls through to sponsorpool/baseline (as if the dApp were not approved).
+	// This closes the pool-drain hole: without it an attacker holding B LIMO could set
+	// gasFeeCap so gas*feeCap ≈ B and make the pool pay ~B per tx with no limit.
+	// Empty/"0"/non-positive -> unlimited (no cap; legacy behaviour, for genesis back-compat).
+	DappPerTxFeeCap string `json:"dapp_per_tx_fee_cap"`
+	// RefillDailyMintCap bounds the TOTAL aLIMO the BeginBlock refill may mint per UTC day
+	// (aLIMO, math.Int as string). This is the global inflation circuit breaker: even a novel
+	// exploit that drains the pool cannot mint more than this per day. Once the day's minting
+	// reaches the cap the refill stops (emitting gassponsor_refill_capped) until the next UTC
+	// day. Empty/"0" -> unlimited (no cap; legacy behaviour, for genesis back-compat).
+	RefillDailyMintCap string `json:"refill_daily_mint_cap"`
 }
 
 // GenesisState is the x/gassponsor genesis (plain JSON, no proto).
@@ -37,12 +50,14 @@ type GenesisState struct {
 
 func DefaultParams() Params {
 	return Params{
-		Enabled:        true,
-		BaselineDaily:  "1000000000000000000",         // 1 LIMO/day max allowance per account (cap)
-		RefillEnabled:  true,
-		MinPoolBalance: "200000000000000000000000000", // 200,000,000 LIMO
-		ColdStartDaily: "100000000000000000",          // 0.1 LIMO/day flat cold-start for every account
-		BalanceDivisor: "1",                            // bonus = held LIMO / 1 (1:1), capped at BaselineDaily
+		Enabled:            true,
+		BaselineDaily:      "1000000000000000000",         // 1 LIMO/day max allowance per account (cap)
+		RefillEnabled:      true,
+		MinPoolBalance:     "200000000000000000000000000", // 200,000,000 LIMO
+		ColdStartDaily:     "100000000000000000",          // 0.1 LIMO/day flat cold-start for every account
+		BalanceDivisor:     "1",                            // bonus = held LIMO / 1 (1:1), capped at BaselineDaily
+		DappPerTxFeeCap:    "1000000000000000000",          // 1 LIMO/tx cap on the approved-dApp path
+		RefillDailyMintCap: "0",                            // 0 = unlimited daily mint (hardened value set by genesis)
 	}
 }
 
@@ -63,6 +78,19 @@ func (gs GenesisState) Validate() error {
 	if gs.Params.BalanceDivisor != "" {
 		if d, ok := math.NewIntFromString(gs.Params.BalanceDivisor); !ok || !d.IsPositive() {
 			return fmt.Errorf("invalid balance_divisor %q (must be a positive integer)", gs.Params.BalanceDivisor)
+		}
+	}
+	// New fields are OPTIONAL for back-compat: empty ("") means "unlimited" so pre-existing
+	// genesis files (written before these fields existed) stay valid. When present they must
+	// parse as a non-negative Int.
+	if gs.Params.DappPerTxFeeCap != "" {
+		if c, ok := math.NewIntFromString(gs.Params.DappPerTxFeeCap); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid dapp_per_tx_fee_cap %q (must be a non-negative integer)", gs.Params.DappPerTxFeeCap)
+		}
+	}
+	if gs.Params.RefillDailyMintCap != "" {
+		if c, ok := math.NewIntFromString(gs.Params.RefillDailyMintCap); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid refill_daily_mint_cap %q (must be a non-negative integer)", gs.Params.RefillDailyMintCap)
 		}
 	}
 	return nil

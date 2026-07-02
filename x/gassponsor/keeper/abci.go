@@ -29,7 +29,34 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 		return nil
 	}
 	deficit := target.Sub(bal)
-	coins := sdk.NewCoins(sdk.NewCoin(types.FeeDenom, deficit))
+
+	// Global inflation circuit breaker: never mint more than RefillDailyMintCap aLIMO per UTC
+	// day. Even a novel exploit that drains the pool cannot inflate supply past this per day.
+	// Empty / "0" / non-positive cap => unlimited (legacy behaviour). day = unix/86400 mirrors
+	// the per-account allowance bucket, so the counter self-resets at the day rollover.
+	mintAmt := deficit
+	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+	capped := false
+	if cap, ok := math.NewIntFromString(p.RefillDailyMintCap); ok && cap.IsPositive() {
+		mintedToday := k.mintedToday(ctx, day)
+		remaining := cap.Sub(mintedToday)
+		if !remaining.IsPositive() {
+			// Already at/over the day's cap: mint nothing, signal the breaker tripped.
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"gassponsor_refill_capped",
+				sdk.NewAttribute("deficit", deficit.String()),
+				sdk.NewAttribute("minted_today", mintedToday.String()),
+				sdk.NewAttribute("daily_cap", cap.String()),
+			))
+			return nil
+		}
+		if mintAmt.GT(remaining) {
+			mintAmt = remaining
+			capped = true
+		}
+	}
+
+	coins := sdk.NewCoins(sdk.NewCoin(types.FeeDenom, mintAmt))
 	// gassponsor has Minter permission; mint to itself then move into the pool.
 	if err := k.bank.MintCoins(ctx, types.ModuleName, coins); err != nil {
 		return err
@@ -37,9 +64,19 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 	if err := k.bank.SendCoinsFromModuleToModule(ctx, types.ModuleName, types.GasPoolName, coins); err != nil {
 		return err
 	}
+	k.setMintedToday(ctx, day, k.mintedToday(ctx, day).Add(mintAmt))
 	ctx.EventManager().EmitEvent(sdk.NewEvent(
 		"gassponsor_refill",
-		sdk.NewAttribute("minted", deficit.String()),
+		sdk.NewAttribute("minted", mintAmt.String()),
 	))
+	if capped {
+		// Minted only a partial deficit because the day's cap was hit this block.
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"gassponsor_refill_capped",
+			sdk.NewAttribute("deficit", deficit.String()),
+			sdk.NewAttribute("minted", mintAmt.String()),
+			sdk.NewAttribute("daily_cap", p.RefillDailyMintCap),
+		))
+	}
 	return nil
 }

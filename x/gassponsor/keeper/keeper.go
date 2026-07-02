@@ -75,10 +75,16 @@ func (k Keeper) IsSponsored(ctx sdk.Context, sender sdk.AccAddress, to *common.A
 		return false, false
 	}
 
-	// 1. Approved dApp -> unlimited sponsorship.
+	// 1. Approved dApp -> sponsorship, bounded per-tx by DappPerTxFeeCap. If the fee exceeds
+	//    the cap, DO NOT sponsor via the dApp path — fall through to sponsorpool/baseline as
+	//    if the dApp were not approved. This closes the pool-drain hole (an attacker holding
+	//    B LIMO setting gasFeeCap so gas*feeCap ≈ B and draining ~B per tx).
 	if to != nil {
 		if app, ok := k.contest.GetShowcase(ctx, strings.ToLower(to.Hex())); ok && app.Approved && (app.VM == "" || app.VM == "evm") {
-			return true, true
+			if k.withinDappCap(p, amt) {
+				return true, true
+			}
+			// fee > cap: fall through to the bounded paths below.
 		}
 	}
 
@@ -133,6 +139,18 @@ func (k Keeper) effectiveAllowance(ctx sdk.Context, p types.Params, sender sdk.A
 	return allow
 }
 
+// withinDappCap reports whether a fee amount is within the approved-dApp per-tx cap.
+// An empty / "0" / non-positive / unparseable cap means "unlimited" (legacy behaviour,
+// so genesis files written before the field existed keep working); any positive cap is
+// enforced as fee <= cap.
+func (k Keeper) withinDappCap(p types.Params, amt math.Int) bool {
+	cap, ok := math.NewIntFromString(p.DappPerTxFeeCap)
+	if !ok || !cap.IsPositive() {
+		return true // unlimited
+	}
+	return amt.LTE(cap)
+}
+
 // --- per-account daily allowance ---
 
 func allowanceKey(day uint64, sender sdk.AccAddress) []byte {
@@ -157,6 +175,39 @@ func (k Keeper) allowanceUsed(ctx context.Context, day uint64, sender sdk.AccAdd
 
 func (k Keeper) setAllowanceUsed(ctx context.Context, day uint64, sender sdk.AccAddress, v math.Int) {
 	_ = k.store(ctx).Set(allowanceKey(day, sender), []byte(v.String()))
+}
+
+// --- daily refill mint counter (global inflation circuit breaker) ---
+
+func mintedTodayKey(day uint64) []byte {
+	out := append([]byte{}, types.MintedTodayPrefix...)
+	var d [8]byte
+	binary.BigEndian.PutUint64(d[:], day)
+	return append(out, d[:]...)
+}
+
+// mintedToday returns the cumulative aLIMO the refill has minted during the given UTC day.
+// A new day has no key, so it reads back zero — the counter resets automatically at rollover.
+func (k Keeper) mintedToday(ctx context.Context, day uint64) math.Int {
+	bz, _ := k.store(ctx).Get(mintedTodayKey(day))
+	if bz == nil {
+		return math.ZeroInt()
+	}
+	v, ok := math.NewIntFromString(string(bz))
+	if !ok {
+		return math.ZeroInt()
+	}
+	return v
+}
+
+func (k Keeper) setMintedToday(ctx context.Context, day uint64, v math.Int) {
+	_ = k.store(ctx).Set(mintedTodayKey(day), []byte(v.String()))
+}
+
+// MintedToday exposes the current UTC day's cumulative refill mint (query/telemetry/tests).
+func (k Keeper) MintedToday(ctx sdk.Context) math.Int {
+	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+	return k.mintedToday(ctx, day)
 }
 
 // AllowanceUsed exposes today's used baseline for an address (query/telemetry).

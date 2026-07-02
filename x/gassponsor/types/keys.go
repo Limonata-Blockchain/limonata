@@ -21,6 +21,7 @@ const (
 
 // Store layout (single-byte key prefixes).
 var (
-	ParamsKey       = []byte{0x01} // -> JSON Params
-	AllowancePrefix = []byte{0x02} // 0x02 | day(8) | sender -> used aLIMO (math.Int as decimal string)
+	ParamsKey         = []byte{0x01} // -> JSON Params
+	AllowancePrefix   = []byte{0x02} // 0x02 | day(8) | sender -> used aLIMO (math.Int as decimal string)
+	MintedTodayPrefix = []byte{0x03} // 0x03 | day(8) -> cumulative refill-minted aLIMO today (math.Int as decimal string)
 )
