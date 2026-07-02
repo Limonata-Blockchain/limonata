@@ -10,10 +10,11 @@ import (
 )
 
 // BeginBlock runs immediately BEFORE x/distribution. It reads the materialized
-// fee_collector balance for FeeDenom and splits it:
-//   - BurnBps  (40%) is burned (the only burn on the chain),
-//   - GrantBps (10%) is recycled into the gas pool (gasless loop),
-//   - the remainder (~50% validator slice + integer rounding dust) is LEFT in
+// fee_collector balance for FeeDenom and splits it using the GOVERNABLE params
+// (params.BurnBps / params.GrantBps; default 20% / 20%):
+//   - BurnBps  is burned (the only burn on the chain),
+//   - GrantBps is recycled into the gas pool (gasless loop),
+//   - the remainder (validator slice + integer rounding dust) is LEFT in
 //     fee_collector so x/distribution allocates it normally (PoS correctness).
 // Conservation holds every block: burn + grant + remainder == fee.
 func (k Keeper) BeginBlock(ctx sdk.Context) error {
@@ -23,9 +24,12 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 		return nil
 	}
 
+	// Governable split (Validate guarantees burn+grant <= BpsDenom, so the remainder
+	// left for x/distribution is always non-negative).
+	p := k.GetParams(ctx)
 	bpsDenom := math.NewInt(types.BpsDenom)
-	burnAmt := amt.Mul(math.NewInt(types.BurnBps)).Quo(bpsDenom)
-	grantAmt := amt.Mul(math.NewInt(types.GrantBps)).Quo(bpsDenom)
+	burnAmt := amt.Mul(math.NewIntFromUint64(uint64(p.BurnBps))).Quo(bpsDenom)
+	grantAmt := amt.Mul(math.NewIntFromUint64(uint64(p.GrantBps))).Quo(bpsDenom)
 	moved := burnAmt.Add(grantAmt)
 	if !moved.IsPositive() {
 		return nil

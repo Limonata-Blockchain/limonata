@@ -41,6 +41,30 @@ type Params struct {
 	// reaches the cap the refill stops (emitting gassponsor_refill_capped) until the next UTC
 	// day. Empty/"0" -> unlimited (no cap; legacy behaviour, for genesis back-compat).
 	RefillDailyMintCap string `json:"refill_daily_mint_cap"`
+
+	// --- v0.3.0 UNIFORM daily budget (settled gasless design) ---
+
+	// DailyBudget is the FLAT per-account daily free-gas allowance (aLIMO, math.Int as
+	// string) granted to every account that holds at least HoldMinimum LIMO — users and
+	// app/contract accounts alike, identical for everyone. It REPLACES the old
+	// history-scaled formula min(BaselineDaily, ColdStartDaily + held/BalanceDivisor).
+	// Empty/"0"/unparseable -> the module FALLS BACK to that legacy formula (using the
+	// BaselineDaily/ColdStartDaily/BalanceDivisor fields above), so genesis files written
+	// before this field existed (e.g. the live chain) keep their exact prior behaviour.
+	DailyBudget string `json:"daily_budget"`
+	// HoldMinimum is the minimum aLIMO an account must hold to be eligible for DailyBudget
+	// (aLIMO, math.Int as string). held >= HoldMinimum -> allowance = DailyBudget; else 0
+	// (except the one-shot onboarding grant below). This is anti-farm #1: a farmer wanting
+	// N maxed accounts must immobilize HoldMinimum across all N. Empty/"0" -> 0 (any holder,
+	// including dust, is eligible). Only consulted when DailyBudget is set (uniform mode).
+	HoldMinimum string `json:"hold_minimum"`
+	// OnboardingGrant is the one-shot LIFETIME free-gas budget (aLIMO, math.Int as string)
+	// a 0-balance never-seen account may draw down (tracked under OnboardingPrefix 0x05) so
+	// its very first tx works with no faucet. After it is exhausted the account must hold
+	// LIMO to earn DailyBudget. Bounded, and (being sponsored) its mint is naturally
+	// counted against RefillDailyMintCap via the pool-drain -> refill loop.
+	// Empty/"0" -> onboarding disabled (no grant).
+	OnboardingGrant string `json:"onboarding_grant"`
 }
 
 // GenesisState is the x/gassponsor genesis (plain JSON, no proto).
@@ -51,13 +75,19 @@ type GenesisState struct {
 func DefaultParams() Params {
 	return Params{
 		Enabled:            true,
-		BaselineDaily:      "1000000000000000000",         // 1 LIMO/day max allowance per account (cap)
+		BaselineDaily:      "1000000000000000000",         // legacy: 1 LIMO/day max allowance per account (cap)
 		RefillEnabled:      true,
 		MinPoolBalance:     "200000000000000000000000000", // 200,000,000 LIMO
-		ColdStartDaily:     "100000000000000000",          // 0.1 LIMO/day flat cold-start for every account
-		BalanceDivisor:     "1",                            // bonus = held LIMO / 1 (1:1), capped at BaselineDaily
+		ColdStartDaily:     "100000000000000000",          // legacy: 0.1 LIMO/day flat cold-start
+		BalanceDivisor:     "1",                            // legacy: bonus = held LIMO / 1 (1:1), capped at BaselineDaily
 		DappPerTxFeeCap:    "1000000000000000000",          // 1 LIMO/tx cap on the approved-dApp path
 		RefillDailyMintCap: "0",                            // 0 = unlimited daily mint (hardened value set by genesis)
+		// v0.3.0 uniform budget (settled design). Present in DefaultParams so a FRESH
+		// genesis runs the uniform model; an OLD genesis blob (no daily_budget) unmarshals
+		// these as "" and the keeper falls back to the legacy formula above.
+		DailyBudget:     "1000000000000000000", // 1 LIMO/day flat, holders only
+		HoldMinimum:     "1000000000000000000", // must hold >= 1 LIMO to earn the daily budget
+		OnboardingGrant: "50000000000000000",   // 0.05 LIMO one-shot for a cold 0-balance wallet
 	}
 }
 
@@ -91,6 +121,23 @@ func (gs GenesisState) Validate() error {
 	if gs.Params.RefillDailyMintCap != "" {
 		if c, ok := math.NewIntFromString(gs.Params.RefillDailyMintCap); !ok || c.IsNegative() {
 			return fmt.Errorf("invalid refill_daily_mint_cap %q (must be a non-negative integer)", gs.Params.RefillDailyMintCap)
+		}
+	}
+	// v0.3.0 uniform-budget fields are OPTIONAL for back-compat (empty = fall back to the
+	// legacy formula / disabled). When present they must parse as a non-negative Int.
+	if gs.Params.DailyBudget != "" {
+		if c, ok := math.NewIntFromString(gs.Params.DailyBudget); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid daily_budget %q (must be a non-negative integer)", gs.Params.DailyBudget)
+		}
+	}
+	if gs.Params.HoldMinimum != "" {
+		if c, ok := math.NewIntFromString(gs.Params.HoldMinimum); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid hold_minimum %q (must be a non-negative integer)", gs.Params.HoldMinimum)
+		}
+	}
+	if gs.Params.OnboardingGrant != "" {
+		if c, ok := math.NewIntFromString(gs.Params.OnboardingGrant); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid onboarding_grant %q (must be a non-negative integer)", gs.Params.OnboardingGrant)
 		}
 	}
 	return nil

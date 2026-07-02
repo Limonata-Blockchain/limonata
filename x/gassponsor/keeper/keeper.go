@@ -10,6 +10,7 @@ import (
 	"cosmossdk.io/math"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -59,12 +60,17 @@ func (k Keeper) GetParams(ctx context.Context) types.Params {
 // DeliverTx and every node agree. The result is carried to the refund via the EVM
 // object store; it is never recomputed.
 //
-//   - approved-dApp path (unlimited): the target is an admin-approved x/contest app.
-//   - baseline path (capped): the sender is within its per-account daily allowance.
-//     This path DEBITS the allowance counter, so IsSponsored must be called exactly
-//     once per tx (it is, from the ante).
+// Fall-through order (each sponsored path emits a gassponsor_sponsored event with the
+// path taken; observability is non-consensus and does not affect the app hash):
 //
-// Returns (sponsored, viaApprovedApp).
+//  1. approved-dApp  (viaApp=true, capped per-tx by DappPerTxFeeCap)
+//  2. sponsorpool escrow (viaApp=true, dev-funded, non-inflationary)
+//  3. baseline uniform daily budget (viaApp=false, holders only, DEBITS the day counter)
+//  4. one-shot onboarding grant (viaApp=false, cold 0-balance wallet, DEBITS the 0x05 counter)
+//  5. user-paid (not sponsored)
+//
+// Because paths 3 and 4 debit persistent counters, IsSponsored MUST be called exactly
+// once per tx (it is, from the ante). Returns (sponsored, viaApprovedApp).
 func (k Keeper) IsSponsored(ctx sdk.Context, sender sdk.AccAddress, to *common.Address, fees sdk.Coins) (bool, bool) {
 	p := k.GetParams(ctx)
 	if !p.Enabled {
@@ -82,43 +88,77 @@ func (k Keeper) IsSponsored(ctx sdk.Context, sender sdk.AccAddress, to *common.A
 	if to != nil {
 		if app, ok := k.contest.GetShowcase(ctx, strings.ToLower(to.Hex())); ok && app.Approved && (app.VM == "" || app.VM == "evm") {
 			if k.withinDappCap(p, amt) {
+				k.emitSponsored(ctx, "dapp", sender, to, amt, k.dappRemaining(p, amt))
 				return true, true
 			}
 			// fee > cap: fall through to the bounded paths below.
 		}
 	}
 
-	// 1.5 Per-contract developer escrow (x/sponsorpool): dev-funded, non-inflationary.
+	// 2. Per-contract developer escrow (x/sponsorpool): dev-funded, non-inflationary.
 	// Reserve debits the escrow accounting; the gas pool pays the fee via the normal
 	// sponsored path (the deposit keeps the pool above its mint target, so no extra mint).
 	// (true, true) skips the per-account baseline counter and routes refunds to the pool.
 	if to != nil && k.pool != nil && k.pool.Reserve(ctx, strings.ToLower(to.Hex()), amt) {
+		k.emitSponsored(ctx, "escrow", sender, to, amt, math.NewInt(-1))
 		return true, true
 	}
 
-	// 2. Per-account daily allowance (history-scaled: cold-start + balance bonus, capped
-	//    at BaselineDaily). Bounded, and debited here.
+	// 3. Per-account UNIFORM daily budget (holders only), debited here. See effectiveAllowance.
 	allow := k.effectiveAllowance(ctx, p, sender)
-	if !allow.IsPositive() {
-		return false, false
+	if allow.IsPositive() {
+		day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+		used := k.allowanceUsed(ctx, day, sender)
+		if used.Add(amt).LTE(allow) {
+			newUsed := used.Add(amt)
+			k.setAllowanceUsed(ctx, day, sender, newUsed)
+			k.emitSponsored(ctx, "baseline", sender, to, amt, allow.Sub(newUsed))
+			return true, false
+		}
 	}
-	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
-	used := k.allowanceUsed(ctx, day, sender)
-	if used.Add(amt).LTE(allow) {
-		k.setAllowanceUsed(ctx, day, sender, used.Add(amt))
+
+	// 4. One-shot ONBOARDING grant: a cold 0-balance never-seen account gets a bounded
+	//    lifetime budget (OnboardingGrant) so its first tx works with no faucet. After it is
+	//    exhausted the account must hold LIMO to earn the daily budget.
+	if k.tryOnboarding(ctx, p, sender, to, amt) {
 		return true, false
 	}
+
+	// 5. User-paid.
 	return false, false
 }
 
-// effectiveAllowance is an account's history-scaled daily free-gas cap:
+// effectiveAllowance is an account's daily free-gas budget.
+//
+// UNIFORM mode (v0.3.0, when DailyBudget is set): every account that holds at least
+// HoldMinimum LIMO gets the SAME flat DailyBudget — users and apps alike; everyone else
+// gets 0 (cold 0-balance wallets are handled by the separate onboarding path). Holding is
+// the anti-farm gate: maxing N accounts costs N * HoldMinimum of immobilized capital.
+//
+// LEGACY fallback (when DailyBudget is empty/0, e.g. a genesis written before the field
+// existed): the old history-scaled formula
 //
 //	allowance = min(BaselineDaily, ColdStartDaily + heldLIMO / BalanceDivisor)
 //
-// Every account gets the flat ColdStartDaily so a brand-new (dust) account can start;
-// holding LIMO (skin-in-the-game) adds a bonus up to the BaselineDaily cap. This bounds
-// sybil minting: more sponsored gas requires holding more real LIMO per account.
+// so pre-v0.3.0 chains keep their exact prior behaviour until genesis/gov sets DailyBudget.
 func (k Keeper) effectiveAllowance(ctx sdk.Context, p types.Params, sender sdk.AccAddress) math.Int {
+	held := k.bank.GetAllBalances(ctx, sender).AmountOf(types.FeeDenom)
+
+	// Uniform mode.
+	if budget, ok := math.NewIntFromString(p.DailyBudget); ok && budget.IsPositive() {
+		minHold := math.ZeroInt()
+		if m, ok := math.NewIntFromString(p.HoldMinimum); ok && m.IsPositive() {
+			minHold = m
+		}
+		// Require a POSITIVE hold >= minHold: a truly 0-balance account earns no daily
+		// budget (it onboards instead), even if HoldMinimum is misconfigured to 0.
+		if held.IsPositive() && held.GTE(minHold) {
+			return budget
+		}
+		return math.ZeroInt()
+	}
+
+	// Legacy history-scaled fallback.
 	baseline, ok := math.NewIntFromString(p.BaselineDaily)
 	if !ok || !baseline.IsPositive() {
 		return math.ZeroInt()
@@ -131,12 +171,66 @@ func (k Keeper) effectiveAllowance(ctx sdk.Context, p types.Params, sender sdk.A
 	if !ok || !div.IsPositive() {
 		div = math.OneInt()
 	}
-	held := k.bank.GetAllBalances(ctx, sender).AmountOf(types.FeeDenom)
 	allow := cold.Add(held.Quo(div))
 	if allow.GT(baseline) {
 		allow = baseline
 	}
 	return allow
+}
+
+// tryOnboarding grants a bounded one-shot LIFETIME free-gas budget (OnboardingGrant) to a
+// cold 0-balance never-seen account, tracked under OnboardingPrefix (0x05). It returns true
+// (and debits the counter + emits the event) only when: onboarding is enabled
+// (OnboardingGrant > 0), the account currently holds 0 aLIMO, and this tx's fee keeps the
+// account's cumulative onboarding draw within the grant. Being a sponsored path, the mint it
+// causes is naturally bounded by RefillDailyMintCap through the pool-drain -> refill loop.
+func (k Keeper) tryOnboarding(ctx sdk.Context, p types.Params, sender sdk.AccAddress, to *common.Address, amt math.Int) bool {
+	grant, ok := math.NewIntFromString(p.OnboardingGrant)
+	if !ok || !grant.IsPositive() {
+		return false // onboarding disabled
+	}
+	// Only a truly cold (0-balance) wallet onboards; holders earn the daily budget instead.
+	held := k.bank.GetAllBalances(ctx, sender).AmountOf(types.FeeDenom)
+	if !held.IsZero() {
+		return false
+	}
+	used := k.onboardingUsed(ctx, sender)
+	newUsed := used.Add(amt)
+	if newUsed.GT(grant) {
+		return false // would exceed the lifetime onboarding budget
+	}
+	k.setOnboardingUsed(ctx, sender, newUsed)
+	k.emitSponsored(ctx, "onboarding", sender, to, amt, grant.Sub(newUsed))
+	return true
+}
+
+// dappRemaining reports the per-tx headroom left under the approved-dApp cap for the
+// gassponsor_sponsored event. Returns -1 when the cap is unlimited (empty/0/non-positive).
+func (k Keeper) dappRemaining(p types.Params, amt math.Int) math.Int {
+	c, ok := math.NewIntFromString(p.DappPerTxFeeCap)
+	if !ok || !c.IsPositive() {
+		return math.NewInt(-1)
+	}
+	return c.Sub(amt)
+}
+
+// emitSponsored emits the per-tx gassponsor_sponsored observability event. Events do not
+// affect the app hash, so this is safe to ship independently of the consensus paths.
+// remaining_allowance is -1 for paths without a running per-account budget (escrow, or an
+// unlimited dApp cap).
+func (k Keeper) emitSponsored(ctx sdk.Context, path string, sender sdk.AccAddress, to *common.Address, amount, remaining math.Int) {
+	dapp := ""
+	if to != nil {
+		dapp = strings.ToLower(to.Hex())
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"gassponsor_sponsored",
+		sdk.NewAttribute("path", path),
+		sdk.NewAttribute("amount", amount.String()),
+		sdk.NewAttribute("account", sender.String()),
+		sdk.NewAttribute("dapp", dapp),
+		sdk.NewAttribute("remaining_allowance", remaining.String()),
+	))
 }
 
 // withinDappCap reports whether a fee amount is within the approved-dApp per-tx cap.
@@ -216,8 +310,43 @@ func (k Keeper) AllowanceUsed(ctx sdk.Context, sender sdk.AccAddress) math.Int {
 	return k.allowanceUsed(ctx, day, sender)
 }
 
-// EffectiveAllowance exposes an account's current history-scaled daily allowance cap
-// (query/telemetry/tests).
+// EffectiveAllowance exposes an account's current daily free-gas budget (uniform budget
+// in v0.3.0, or the legacy history-scaled cap when DailyBudget is unset) (query/telemetry/tests).
 func (k Keeper) EffectiveAllowance(ctx sdk.Context, sender sdk.AccAddress) math.Int {
 	return k.effectiveAllowance(ctx, k.GetParams(ctx), sender)
+}
+
+// --- one-shot onboarding grant counter (lifetime, per account) ---
+
+func onboardingKey(sender sdk.AccAddress) []byte {
+	out := append([]byte{}, types.OnboardingPrefix...)
+	return append(out, sender.Bytes()...)
+}
+
+func (k Keeper) onboardingUsed(ctx context.Context, sender sdk.AccAddress) math.Int {
+	bz, _ := k.store(ctx).Get(onboardingKey(sender))
+	if bz == nil {
+		return math.ZeroInt()
+	}
+	v, ok := math.NewIntFromString(string(bz))
+	if !ok {
+		return math.ZeroInt()
+	}
+	return v
+}
+
+func (k Keeper) setOnboardingUsed(ctx context.Context, sender sdk.AccAddress, v math.Int) {
+	_ = k.store(ctx).Set(onboardingKey(sender), []byte(v.String()))
+}
+
+// OnboardingUsed exposes an account's cumulative lifetime onboarding-grant draw (query/telemetry).
+func (k Keeper) OnboardingUsed(ctx sdk.Context, sender sdk.AccAddress) math.Int {
+	return k.onboardingUsed(ctx, sender)
+}
+
+// PoolBalance exposes the current aLIMO balance of the shared paymaster gas pool that pays
+// sponsored fees (query/telemetry).
+func (k Keeper) PoolBalance(ctx sdk.Context) math.Int {
+	poolAddr := authtypes.NewModuleAddress(types.GasPoolName)
+	return k.bank.GetAllBalances(ctx, poolAddr).AmountOf(types.FeeDenom)
 }

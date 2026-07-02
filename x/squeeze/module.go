@@ -3,10 +3,13 @@ package squeeze
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/gorilla/mux"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"github.com/spf13/cobra"
+
+	abci "github.com/cometbft/cometbft/abci/types"
 
 	"cosmossdk.io/core/appmodule"
 
@@ -24,6 +27,7 @@ import (
 var (
 	_ module.AppModule          = AppModule{}
 	_ module.AppModuleBasic     = AppModuleBasic{}
+	_ module.HasABCIGenesis     = AppModule{}
 	_ appmodule.AppModule       = AppModule{}
 	_ appmodule.HasBeginBlocker = AppModule{}
 )
@@ -36,9 +40,16 @@ func (AppModuleBasic) RegisterLegacyAminoCodec(_ *codec.LegacyAmino)     {}
 func (AppModuleBasic) RegisterInterfaces(_ codectypes.InterfaceRegistry) {}
 func (AppModuleBasic) ConsensusVersion() uint64                          { return types.ConsensusVersion }
 
-func (AppModuleBasic) DefaultGenesis(_ codec.JSONCodec) json.RawMessage { return json.RawMessage("{}") }
-func (AppModuleBasic) ValidateGenesis(_ codec.JSONCodec, _ client.TxEncodingConfig, _ json.RawMessage) error {
-	return nil
+func (AppModuleBasic) DefaultGenesis(_ codec.JSONCodec) json.RawMessage {
+	bz, _ := json.Marshal(types.DefaultGenesisState())
+	return bz
+}
+func (AppModuleBasic) ValidateGenesis(_ codec.JSONCodec, _ client.TxEncodingConfig, bz json.RawMessage) error {
+	var gs types.GenesisState
+	if err := json.Unmarshal(bz, &gs); err != nil {
+		return fmt.Errorf("failed to unmarshal %s genesis: %w", types.ModuleName, err)
+	}
+	return gs.Validate()
 }
 func (AppModuleBasic) RegisterRESTRoutes(_ client.Context, _ *mux.Router)              {}
 func (AppModuleBasic) RegisterGRPCGatewayRoutes(_ client.Context, _ *runtime.ServeMux) {}
@@ -55,10 +66,28 @@ func NewAppModule(k keeper.Keeper) AppModule {
 	return AppModule{keeper: k}
 }
 
-func (AppModule) Name() string                          { return types.ModuleName }
+func (AppModule) Name() string                             { return types.ModuleName }
 func (am AppModule) RegisterServices(_ module.Configurator) {}
 
-// BeginBlock performs the 50/40/10 fee split before x/distribution.
+// InitGenesis writes the governable fee-split params. HasABCIGenesis (returns validator
+// updates) mirrors the other Limonata modules; the update slice is always empty.
+func (am AppModule) InitGenesis(ctx sdk.Context, _ codec.JSONCodec, data json.RawMessage) []abci.ValidatorUpdate {
+	var gs types.GenesisState
+	if err := json.Unmarshal(data, &gs); err != nil {
+		panic(err)
+	}
+	if err := am.keeper.InitGenesis(ctx, gs); err != nil {
+		panic(err)
+	}
+	return []abci.ValidatorUpdate{}
+}
+
+func (am AppModule) ExportGenesis(ctx sdk.Context, _ codec.JSONCodec) json.RawMessage {
+	bz, _ := json.Marshal(am.keeper.ExportGenesis(ctx))
+	return bz
+}
+
+// BeginBlock performs the governable burn/grant/validator fee split before x/distribution.
 func (am AppModule) BeginBlock(ctx context.Context) error {
 	return am.keeper.BeginBlock(sdk.UnwrapSDKContext(ctx))
 }

@@ -61,7 +61,21 @@ type AppModule struct {
 
 func NewAppModule(k keeper.Keeper) AppModule { return AppModule{keeper: k} }
 
-func (AppModule) Name() string                            { return types.ModuleName }
+func (AppModule) Name() string { return types.ModuleName }
+
+// RegisterServices would register the read-only gRPC Query service (Params, MintedToday,
+// EffectiveAllowance, AllowanceUsed, PoolBalance). x/gassponsor is a plain-JSON module with
+// NO generated proto (no .pb.go, unlike x/contest), and this build environment has neither
+// buf nor protoc, so a gRPC ServiceDesc cannot be generated or hand-registered here. The
+// modern SDK also dropped the legacy amino querier, so there is no proto-free query route to
+// hook into module.Configurator either.
+//
+// The full read surface is therefore exposed as in-process keeper methods
+// (keeper.GetParams / MintedToday / EffectiveAllowance / AllowanceUsed / OnboardingUsed /
+// PoolBalance), which are callable from upgrade handlers, tests, and precompiles today. A
+// full gRPC/REST Query service is a mechanical follow-up once proto regen (buf/protoc) is
+// available: add proto/cosmos/evm/gassponsor/v1/query.proto, regenerate, then register the
+// generated QueryServer here.
 func (am AppModule) RegisterServices(_ module.Configurator) {}
 
 func (am AppModule) InitGenesis(ctx sdk.Context, _ codec.JSONCodec, data json.RawMessage) []abci.ValidatorUpdate {

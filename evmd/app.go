@@ -278,6 +278,7 @@ func NewExampleApp(
 		vpcaptypes.StoreKey,
 		encmempooltypes.StoreKey,
 		gassponsortypes.StoreKey,
+		squeezetypes.StoreKey,
 		sponsorpooltypes.StoreKey,
 		netcaptypes.StoreKey,
 		// ibc keys
@@ -642,7 +643,11 @@ func NewExampleApp(
 		app.SponsorPoolKeeper,
 		authtypes.FeeCollectorName,
 	)
-	squeezeKeeper := squeezekeeper.NewKeeper(app.BankKeeper, authtypes.FeeCollectorName)
+	squeezeKeeper := squeezekeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[squeezetypes.StoreKey]),
+		app.BankKeeper,
+		authtypes.FeeCollectorName,
+	)
 
 	// Limonata net-seller cap: rate-limit how fast restricted (team/foundation) addrs may
 	// send out, to bound dumping pre-decentralization (pairs with vesting). Two enforcement
@@ -802,6 +807,7 @@ func NewExampleApp(
 		vpcaptypes.ModuleName,
 		encmempooltypes.ModuleName,
 		gassponsortypes.ModuleName,
+		squeezetypes.ModuleName,
 		sponsorpooltypes.ModuleName,
 		netcaptypes.ModuleName,
 	}
