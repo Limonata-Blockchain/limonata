@@ -103,6 +103,15 @@ type Config struct {
 	// EnableTxTracker controls whether the mempool records per-tx lifecycle
 	// telemetry (queued/pending/included latencies). Defaults to false.
 	EnableTxTracker bool
+
+	// IsGasSponsored is an optional, read-only heuristic reporting whether a tx's
+	// fee is expected to be paid by a protocol gas-sponsorship mechanism instead
+	// of the sender's own balance. When set, it relaxes the legacypool's
+	// admission/replacement balance checks accordingly. This is an anti-spam
+	// heuristic only -- the ante handler remains the sole authoritative,
+	// stateful sponsorship decision maker at execution time. Nil preserves the
+	// original balance-only admission behavior.
+	IsGasSponsored func(common.Address, *ethtypes.Transaction) bool
 }
 
 // Mempool is an application side mempool implementation that operates
@@ -178,13 +187,17 @@ func NewMempool(
 	if config.EnableTxTracker {
 		txTracker = txtracker.New()
 	}
+	legacyPoolOpts := []legacypool.Option{legacypool.WithRecheck(evmRechecker)}
+	if config.IsGasSponsored != nil {
+		legacyPoolOpts = append(legacyPoolOpts, legacypool.WithGasSponsorPredicate(config.IsGasSponsored))
+	}
 	legacyPool := legacypool.New(
 		legacyConfig,
 		logger,
 		blockchain,
 		reapList,
 		txTracker,
-		legacypool.WithRecheck(evmRechecker),
+		legacyPoolOpts...,
 	)
 
 	reservationTracker := reserver.NewReservationTracker()

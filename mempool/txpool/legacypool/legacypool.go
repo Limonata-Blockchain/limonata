@@ -476,6 +476,11 @@ type LegacyPool struct {
 
 	reapList *reaplist.ReapList // Queue of txs to be reaped by comet and gossiped
 	tracker  txtracker.Tracker  // Track tx lifecycle events for metrics
+
+	// isGasSponsored is an optional, read-only heuristic used only to relax the
+	// mempool admission balance check for txs a protocol gas-sponsorship
+	// mechanism is expected to pay for. See txpool.ValidationOptionsWithState.IsGasSponsored.
+	isGasSponsored func(common.Address, *types.Transaction) bool
 }
 
 type txpoolResetRequest struct {
@@ -489,6 +494,18 @@ type Option func(pool *LegacyPool)
 func WithRecheck(rechecker Rechecker) Option {
 	return func(pool *LegacyPool) {
 		pool.rechecker = rechecker
+	}
+}
+
+// WithGasSponsorPredicate installs a read-only heuristic used to relax the pool's
+// admission balance check for transactions that a protocol gas-sponsorship
+// mechanism is expected to pay the fee for (e.g. a 0-balance onboarding grant).
+// This does not change consensus behavior: it only affects whether a tx is
+// admitted to/kept in this local mempool. The ante handler remains the sole,
+// authoritative, stateful sponsorship decision maker at execution time.
+func WithGasSponsorPredicate(fn func(common.Address, *types.Transaction) bool) Option {
+	return func(pool *LegacyPool) {
+		pool.isGasSponsored = fn
 	}
 }
 
@@ -912,6 +929,7 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction) error {
 			}
 			return nil
 		},
+		IsGasSponsored: pool.isGasSponsored,
 	}
 	if err := txpool.ValidateTransactionWithState(tx, pool.signer, opts); err != nil {
 		return err

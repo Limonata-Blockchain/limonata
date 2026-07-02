@@ -1,9 +1,17 @@
 package evmd
 
 import (
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
+
 	evmmempool "github.com/cosmos/evm/mempool"
 	"github.com/cosmos/evm/server"
+	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
+
+	sdkmath "cosmossdk.io/math"
 
 	"cosmossdk.io/log/v2"
 
@@ -37,6 +45,13 @@ func (app *EVMD) configureEVMMempool(appOpts servertypes.AppOptions, logger log.
 	if err := server.ValidateReapBounds(appOpts, mpConfig.BlockGasLimit); err != nil {
 		return err
 	}
+
+	// Relax mempool admission for txs a protocol gas-sponsorship mechanism (x/gassponsor)
+	// is expected to pay for -- most importantly a brand-new 0-balance account's first
+	// (onboarding-grant) tx, whose only cost is gas it does not itself hold. Without this,
+	// legacypool's plain State.GetBalance(from) < tx.Cost() check rejects the tx before the
+	// ante handler ever gets a chance to apply the real sponsorship decision.
+	mpConfig.IsGasSponsored = app.isGasSponsoredHeuristic
 
 	// create mempool
 	mempool := evmmempool.NewMempool(
@@ -77,4 +92,70 @@ func (app *EVMD) configureEVMMempool(appOpts servertypes.AppOptions, logger log.
 	})
 
 	return nil
+}
+
+// isGasSponsoredHeuristic is a READ-ONLY, best-effort approximation of
+// x/gassponsor.Keeper.IsSponsored, used only to decide whether the EVM mempool
+// should admit/keep a tx whose sender can't otherwise afford it. It is
+// deliberately NOT the real decision:
+//
+//   - IsSponsored is stateful and DEBITS the baseline/onboarding day counters
+//     exactly once per tx (from the ante, at execution time); calling it here
+//     would double-count or mis-count against a query-context snapshot that
+//     never commits.
+//   - This heuristic only ever widens admission, never consensus outcomes: if
+//     it says "sponsored" and the ante later disagrees, the tx fails/gets
+//     evicted like any other tx invalidated between admission and execution.
+//
+// It mirrors IsSponsored's fall-through order using only side-effect-free
+// keeper reads (GetParams / GetShowcase / GetAllBalances / EffectiveAllowance /
+// AllowanceUsed / OnboardingUsed).
+func (app *EVMD) isGasSponsoredHeuristic(from common.Address, tx *ethtypes.Transaction) bool {
+	// Sponsorship only ever covers the fee leg, never the value leg: a tx that
+	// moves value must still be affordable out of the sender's own balance.
+	if tx.Value().Sign() != 0 {
+		return false
+	}
+
+	ctx, err := app.CreateQueryContext(0, false)
+	if err != nil {
+		return false
+	}
+
+	p := app.GasSponsorKeeper.GetParams(ctx)
+	if !p.Enabled {
+		return false
+	}
+
+	sender := sdk.AccAddress(from.Bytes())
+
+	// 1. Approved dApp destination: the approved-dApp path sponsors regardless
+	// of sender balance (bounded per-tx by DappPerTxFeeCap at execution time).
+	if to := tx.To(); to != nil {
+		if showcase, ok := app.ContestKeeper.GetShowcase(ctx, strings.ToLower(to.Hex())); ok &&
+			showcase.Approved && (showcase.VM == "" || showcase.VM == "evm") {
+			return true
+		}
+	}
+
+	held := app.BankKeeper.GetAllBalances(ctx, sender).AmountOf(gassponsortypes.FeeDenom)
+	if held.IsZero() {
+		// 2. Cold (0-balance) wallet: only the one-shot onboarding grant can pay
+		// this. Check remaining lifetime budget without debiting it.
+		grant, ok := sdkmath.NewIntFromString(p.OnboardingGrant)
+		if !ok || !grant.IsPositive() {
+			return false
+		}
+		used := app.GasSponsorKeeper.OnboardingUsed(ctx, sender)
+		return used.LT(grant)
+	}
+
+	// 3. Holder: sponsored only while today's per-account baseline allowance
+	// still has headroom.
+	allow := app.GasSponsorKeeper.EffectiveAllowance(ctx, sender)
+	if !allow.IsPositive() {
+		return false
+	}
+	used := app.GasSponsorKeeper.AllowanceUsed(ctx, sender)
+	return used.LT(allow)
 }

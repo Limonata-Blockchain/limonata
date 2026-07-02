@@ -206,6 +206,17 @@ type ValidationOptionsWithState struct {
 	// ExistingCost is a mandatory callback to retrieve an already pooled
 	// transaction's cost with the given nonce to check for overdrafts.
 	ExistingCost func(addr common.Address, nonce uint64) *big.Int
+
+	// IsGasSponsored is an optional callback that reports whether a tx's fee is
+	// expected to be paid by a protocol gas-sponsorship mechanism instead of the
+	// sender's own balance (see e.g. cosmos-evm's x/gassponsor). This is a mempool
+	// admission HEURISTIC ONLY, not a consensus decision: the real, stateful,
+	// counter-debiting sponsorship decision is made exactly once by the ante
+	// handler at execution time. If this callback says a tx is sponsored but the
+	// ante later disagrees, the tx simply fails at execution (or recheck evicts
+	// it) -- the same outcome as any other tx that becomes invalid after
+	// admission. Leaving this nil preserves the original balance-only behavior.
+	IsGasSponsored func(addr common.Address, tx *types.Transaction) bool
 }
 
 // ValidateTransactionWithState is a helper method to check whether a transaction
@@ -236,6 +247,13 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 		balance = opts.State.GetBalance(from).ToBig()
 		cost    = tx.Cost()
 	)
+	if opts.IsGasSponsored != nil && opts.IsGasSponsored(from, tx) {
+		// The fee leg of this tx is expected to be paid by the gas-sponsorship
+		// pool, not the sender, so admission should only require the sender to
+		// cover the value leg (0 for the common sponsored-onboarding case). The
+		// ante handler re-derives and enforces the real cost at execution time.
+		cost = new(big.Int).Set(tx.Value())
+	}
 	if balance.Cmp(cost) < 0 {
 		return fmt.Errorf("%w: balance %v, tx cost %v, overshot %v", core.ErrInsufficientFunds, balance, cost, new(big.Int).Sub(cost, balance))
 	}
