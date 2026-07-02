@@ -27,7 +27,7 @@ On most chains you pay gas and must hold the native coin just to move. On Limona
 
 > **Grab a little test LIMO from the faucet once. After that, everything you do is gasless and your balance never drops.** That small balance is a one-time proof-of-funds; it is never actually spent on sponsored gas.
 
-Every account gets a protocol-paid daily gas allowance that is **history-scaled**: a small flat cold-start (0.1 LIMO/day) for any account, plus a bonus that grows with the LIMO you hold, up to a 10 LIMO/day cap. At the near-zero fees on the testnet, even the cold-start covers an effectively unlimited number of ordinary transactions. Tying the bonus to held LIMO is what bounds sybil farming of the free gas. **Developers can also fund gas for their own contract** (see `x/sponsorpool` below): deposit LIMO earmarked for a contract and its users transact free, paid from your deposit, until it runs dry.
+Every account that holds a little LIMO gets the **same flat protocol-paid daily gas allowance: 1 LIMO/day of free gas** — the same for ordinary users and for apps. At the near-zero fees on the testnet, that covers an effectively unlimited number of ordinary transactions. A brand-new zero-balance wallet also gets a **one-shot onboarding grant** (a tiny 0.05 LIMO of lifetime free gas) so its very first transactions work with no faucet at all. Two things keep this from being farmed: you must **hold** a minimum of LIMO to earn the daily budget (so spinning up throwaway wallets costs real, locked-up capital per wallet), and a **hard daily mint cap** ceilings the total new LIMO the subsidy can ever create in a day. Beyond the free daily budget, you self-fund — and **apps can fund gas for their own contract** from a developer deposit (see `x/sponsorpool` below): earmark LIMO for a contract and its users transact free, paid from your deposit, until it runs dry.
 
 **Be precise about "free":** free for the user means *the user does not pay; the protocol absorbs the cost.* Gasless never means nobody pays. How that subsidy is funded, and what it means for the coin supply, is covered in the [mainnet plan](/how-it-works/mainnet).
 
@@ -50,9 +50,9 @@ These are live on the testnet today:
 
 | Module | What it does |
 |---|---|
-| `x/gassponsor` | The protocol pays EVM gas from an on-chain self-refilling pool: a history-scaled per-account daily allowance (a 0.1 LIMO/day cold-start + a bonus that grows with held LIMO, capped at 10 LIMO/day). |
+| `x/gassponsor` | The protocol pays EVM gas from an on-chain self-refilling pool: a flat 1 LIMO/day free-gas budget for every account that holds a minimum of LIMO (users and apps alike), plus a one-shot 0.05 LIMO onboarding grant for a fresh zero-balance wallet. Anti-farm: the hold requirement makes each wallet cost locked capital, and a hard daily mint cap ceilings total new supply. |
 | `x/sponsorpool` (precompile `0x901`) | Developer-funded gas: a dev deposits LIMO earmarked for their contract (`deposit(address,uint256)`); transactions to that contract are sponsored from the deposit until it runs dry. Permissionless, withdrawable, and non-inflationary (the dev funds it, not new mint). |
-| `x/squeeze` | Every block, splits collected fees: 40% burned, 10% recycled into the gas pool, ~50% to validators. |
+| `x/squeeze` | Every block, splits collected fees (governable params): 20% burned, 20% recycled into the gas pool, 60% to validators as compensation for operating a node. |
 | `x/paymaster` | The same gasless idea for Cosmos-SDK transactions (one active sponsorship policy). |
 | `x/encmempool` | Commit-reveal ordering today; a **threshold-encrypted (anti-MEV) mempool** - submit transactions encrypted, order fixed before anyone can read them, decrypted only when ≥2 of 3 keypers cooperate - activates at block 766558 via a governance upgrade. [Guide](/how-it-works/encrypted-mempool). |
 | `x/contest` | An on-chain ecosystem leaderboard. |

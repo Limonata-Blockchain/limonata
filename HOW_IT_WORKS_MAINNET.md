@@ -47,10 +47,10 @@ Think of it in **three groups**:
 Free gas isn't actually free - **a pool pays for it.** When the network covers your transaction, the cost comes out of the **200M Gas Pool**, and the pool refills itself by **minting a little new LIMO**.
 
 So two honest points:
-- "Gasless" is a **subsidy**, and it adds **mild inflation** over time. The supply is **not hard-capped**.
-- The thing that keeps inflation in check is a **limit on how much free gas each account gets** - lots for long-lived real accounts, ~0 for fresh throwaway accounts - so it can't be farmed by spinning up wallets. **(BUILT.)**
+- "Gasless" is a **subsidy**, and it adds **mild inflation** over time. The supply is **not hard-capped**. (It is *not* zero-inflation.)
+- The model is a **uniform free-gas budget**: every account that holds a little LIMO gets the same flat allowance (**1 LIMO/day**), users and apps alike, plus a **one-shot onboarding grant** for a brand-new wallet. Two things keep it from being farmed: you must **hold** a minimum of LIMO to earn the budget (so each throwaway wallet costs real, locked-up capital), and a **hard daily mint cap** ceilings the total new LIMO the subsidy can create in a day — bounding worst-case inflation regardless of how many wallets exist. Beyond the free budget, apps **self-fund** their users' gas from a developer deposit (`x/sponsorpool`), which is non-inflationary (deposited LIMO, not new mint). **(BUILT.)**
 
-Staking inflation is **off** by default; the only minting is the gas-pool refill. The full math is in [`ECONOMICS.md`](ECONOMICS.md).
+When the network covers a fee, the split is **20% burned / 20% recycled to the gas pool / 60% to validators**, so under the pool-refill loop a sponsored fee nets roughly **+0.6x** its value in new supply, while a self-funded fee **burns** and nets **-0.2x** (deflationary). Staking inflation is **off** by default; the only minting is the gas-pool refill, and it is capped. The full math is in [`ECONOMICS.md`](ECONOMICS.md).
 
 ---
 
@@ -70,7 +70,7 @@ The chain is honest that it is **team-operated today**. But the mechanisms that 
 The model is **apply, don't buy.** There's no token sale - you don't purchase a validator stake, you **apply** for one.
 
 - An approved operator gets a **locked grant**: stake you can use to secure the network, but can **never sell**, and that can be clawed back. You never buy or hold LIMO to take part.
-- You earn a **share of network fees + your commission** - pay for operating a node, not a return on a purchase. *(Honest caveat: today fees are ~0 and staking inflation is off, so rewards are effectively zero; they only become real with fee volume or a future schedule.)*
+- You earn a **share of network fees** (validators collectively receive **60% of real fees** under the split) **+ your commission** - this is **compensation for operating a node**, not yield, an APR, or a return on a purchase. *(Honest caveat: today fees are ~0 and staking inflation is off, so this compensation is effectively zero; it only becomes real with fee volume.)*
 - As new operators self-fund their own stake later, the leftover bootstrap pool is **burned** - never returned to the team.
 
 **How the ~16 genesis operators are chosen:** by **application and vetting** - a proven track record, solid infrastructure (uptime, monitoring), and diversity (no single country or cloud dominates). Permissioned at genesis, opening up as the set grows. The foundation runs one or two; the rest are independent.
@@ -96,7 +96,9 @@ The **grant always comes first** - it funds the account you validate from.
 | Governance can rotate/revoke admin roles | **BUILT** |
 | Locked validator grants (`x/valgrant`, `0x900`) | **LIVE** - a real external operator already validates on a grant |
 | Self-funded gas sponsorship (`x/sponsorpool`, `0x901`) | **LIVE** |
-| History-scaled (anti-sybil) gas allowance | **LIVE** |
+| Uniform free-gas budget + hold-requirement + hard daily mint cap (anti-sybil) | **LIVE** |
+| One-shot onboarding grant (faucet-free first tx) | **LIVE** |
+| Developer self-funded gas escrow (`x/sponsorpool`) | **LIVE** |
 | Mainnet genesis (real key custody, governed reserve, vesting) | **PLANNED** |
 | Encrypted mempool / real anti-MEV | **BUILT** - threshold-encrypted mempool (2-of-3 keypers), proven end-to-end + full gov-upgrade dry-run; deploying to **testnet** at block 766558 (upgrade `encmempool-threshold-vpcap-v1`). [Guide](/how-it-works/encrypted-mempool). |
 

@@ -4,15 +4,21 @@
 >
 > Companion: `HOW_IT_WORKS.md` (mechanics and the LIVE/ROADMAP module map). This file is the quantitative economic model only.
 
-LIMO is a pure network-utility coin (gas and staking only): no yield, dividend, profit-share, governance vote, or equity. Nothing here changes that. This document quantifies one specific cost: the newly minted LIMO that funds "free gas," and why that quantity is, by construction, the chain's sybil-attack surface. Validate any token-characterization or disclosure conclusions with counsel.
+LIMO is a pure network-utility coin (gas and staking only): no yield, dividend, profit-share, governance vote, or equity. Nothing here changes that. This document quantifies one specific cost: the newly minted LIMO that funds "free gas," and how that quantity is bounded. Validate any token-characterization or disclosure conclusions with counsel.
 
 ---
 
 ## 1. The single core claim
 
-The chain pays users' gas from a 200,000,000 LIMO pool that is re-minted to target every block. Sponsoring gas therefore mints LIMO. The amount minted is capped only by how much sponsored gas is consumed, and sponsored gas is capped only by (number of accounts) x (per-account daily baseline). Because accounts are effectively free to create, the result is:
+The chain pays users' gas from a 200,000,000 LIMO pool that is re-minted to target every block. Sponsoring gas therefore mints LIMO. Historically the amount minted was bounded only by (number of accounts) x (per-account daily allowance), and because accounts are free to create, inflation and the sybil surface were the same unbounded quantity.
 
-> **Steady-state inflation and the sybil-attack surface are the same quantity.** There is no separate inflation parameter in the code; inflation is a direct linear function of how many accounts draw sponsored gas, and today nothing in the binary bounds that count.
+That is no longer true. Two LIVE mechanisms now bound the mint on two independent axes:
+
+> **1. A per-account hold requirement (`HoldMinimum`).** Only accounts holding at least `HoldMinimum` LIMO earn the daily free-gas budget. To farm N maxed accounts you must immobilize `N x HoldMinimum` of real capital. Sybil now has a per-account capital cost, not a ~0 cost.
+>
+> **2. A hard daily mint cap (`RefillDailyMintCap`).** The pool-refill mint is ceilinged per UTC day. Once the day's minted total hits the cap, no further sponsored gas mints new supply that day — worst-case inflation is bounded **independent of N**.
+
+The subsidy is still mildly inflationary and the supply is **not hard-capped** — do not read this as zero inflation. But steady-state inflation is now bounded by an explicit, governable ceiling rather than by the open account count.
 
 ---
 
@@ -22,25 +28,25 @@ The chain pays users' gas from a 200,000,000 LIMO pool that is re-minted to targ
 |---|---|---|
 | A1 | Total supply baseline = 1,000,000,000 LIMO (1e27 aLIMO) | Live genesis; x/mint inflation = 0, max_supply = 0 (uncapped) |
 | A2 | Gas-pool target = floor = MinPoolBalance = 200,000,000 LIMO | One param is both floor and top-up target |
-| A3 | Squeeze split: 40% burn (only burn on chain) / 10% pool recycle / ~50% validators | `x/squeeze` (BurnBps=4000, GrantBps=1000) |
-| A4 | Refill mints deficit-to-target each block; never removes excess (asymmetric) | `x/gassponsor` early-return when bal >= target |
-| A5 | Per-account baseline = 10 LIMO/day (live); source default = 1 LIMO/day | Live genesis baseline_daily=1e19 |
-| A6 | Baseline keyed only by (UTC-day, sender address); no account-age or history weighting | `x/gassponsor` keeper; no scaling field exists |
-| A7 | Account creation cost = 0; the required balance is a reusable dust float, never debited when sponsored | Lazy ante creation; affordability gate is proof-of-funds only |
-| A8 | The daily counter debits on gas-LIMIT * price, but only gas-USED * price actually nets into fee_collector and is minted/burned. Scenarios assume gas-used ~ gas-limit (worst case); with unused gas, realized mint is below 0.5 * baseline | `x/vm` VerifyFee uses ethTx.Gas(); refund returns unused gas to the pool |
+| A3 | Squeeze split: 20% burn (only burn on chain) / 20% pool recycle / 60% validators | `x/squeeze` (BurnBps=2000, GrantBps=2000; remainder 60% left for distribution). Governable params. |
+| A4 | Refill mints deficit-to-target each block, but never past `RefillDailyMintCap` for the UTC day, and never removes excess (asymmetric) | `x/gassponsor` early-return when bal >= target; per-day mint accumulator vs cap |
+| A5 | Per-account allowance = FLAT `DailyBudget` = 1 LIMO/day, granted only to accounts holding >= `HoldMinimum` (1 LIMO) — users and apps alike (uniform mode) | Live genesis; replaces the prior history-scaled formula |
+| A6 | Allowance keyed on (UTC-day, sender address); eligibility gated on current held balance vs `HoldMinimum` | `x/gassponsor` keeper (`effectiveAllowance`) |
+| A7 | A cold 0-balance never-seen account gets a one-shot LIFETIME `OnboardingGrant` (0.05 LIMO) so its first tx works with no faucet; once exhausted it must hold >= `HoldMinimum` to earn `DailyBudget` | `x/gassponsor` `tryOnboarding` (0x05 counter) |
+| A8 | The daily counter debits on gas-LIMIT * price, but only gas-USED * price actually nets into fee_collector and is minted/burned. Scenarios assume gas-used ~ gas-limit (worst case); with unused gas, realized mint is below 0.6 * budget | `x/vm` VerifyFee uses ethTx.Gas(); refund returns unused gas to the pool |
 | A9 | Live base fee truncates to 0; sponsorship engages only on a positive fee | Live feemarket params; keeper requires amt > 0 |
 
 ---
 
 ## 3. Per-fee supply deltas (derivation)
 
-Trace one effective fee `X` (the post-refund amount that actually nets into `fee_collector`, identical in form for both paths) through the block pipeline. Squeeze runs before gassponsor, both before distribution.
+Trace one effective fee `X` (the post-refund amount that actually nets into `fee_collector`, identical in form for both paths) through the block pipeline. Squeeze runs before gassponsor, both before distribution. Under the 20/20/60 split: burn = 0.2X, pool recycle = 0.2X, validators = 0.6X.
 
-**Sponsored fee.** The pool pays X into `fee_collector` (a transfer, supply unchanged; pool sits at T - X). Next block squeeze burns 0.4X (supply -0.4X) and recycles 0.1X to the pool (pool now T - 0.9X). Gassponsor sees the pool below target and mints the 0.9X deficit (supply +0.9X), restoring T. Net = -0.4X + 0.9X = **+0.5X**.
+**Sponsored fee.** The pool pays X into `fee_collector` (a transfer, supply unchanged; pool sits at T - X). Next block squeeze burns 0.2X (supply -0.2X), recycles 0.2X to the pool (pool now T - 0.8X), and leaves 0.6X for validators. Gassponsor sees the pool below target and mints the 0.8X deficit (supply +0.8X), restoring T. Net = -0.2X + 0.8X = **+0.6X**. (Gross mint 0.8X, burn 0.2X, net +0.6X.)
 
-This +0.5X is an **UPPER BOUND**, valid only when the pool is exactly at target with no carried excess. The refill never removes excess above target (A4), so recycled grants from user-paid fees accumulate as a permanent buffer. In mixed traffic that buffer absorbs later sponsored deficits, so those sponsored fees mint less than 0.9X (down to zero), and the realized sponsored coefficient falls from +0.5 toward -0.4.
+This +0.6X is an **UPPER BOUND**, valid only when (a) the pool is exactly at target with no carried excess and (b) the day's `RefillDailyMintCap` has not been reached. The refill never removes excess above target (A4), so recycled grants from user-paid fees accumulate as a permanent buffer that absorbs later sponsored deficits; when the cap binds, the deficit is not minted at all. Both push the realized sponsored coefficient below +0.6, down toward -0.2.
 
-**User-paid fee.** The user moves pre-existing balance X into `fee_collector` (transfer, no mint). Next block squeeze burns 0.4X (supply -0.4X) and recycles 0.1X (pre-existing supply relocated, neutral). The 0.1X pushes the pool to T + 0.1X >= target, so gassponsor mints nothing. Net = **-0.4X** (exact). The 40% squeeze burn is the only burn on chain.
+**User-paid / self-funded fee.** The user (or a developer's `x/sponsorpool` escrow deposit) moves pre-existing balance X into `fee_collector` (transfer, no mint). Next block squeeze burns 0.2X (supply -0.2X), recycles 0.2X (pre-existing supply relocated, neutral), leaves 0.6X for validators. The 0.2X pushes the pool to T + 0.2X >= target, so gassponsor mints nothing. Net = **-0.2X** (exact). The 20% squeeze burn is the only burn on chain. (Developer-escrow-funded contract gas is therefore non-inflationary: it is deposited supply, not new mint.)
 
 ---
 
@@ -49,13 +55,13 @@ This +0.5X is an **UPPER BOUND**, valid only when the pool is exactly at target 
 Let `F` = total annual gas fees (LIMO, effective post-refund value into `fee_collector`) and `s` = sponsored fraction, s in [0,1].
 
 ```
-net_supply_change (annual) = 0.5*(s*F) - 0.4*((1-s)*F) = F * (0.9*s - 0.4)
-annual inflation r = net_supply_change / 1e9 = F * (0.9*s - 0.4) / 1e9
+net_supply_change (annual) = 0.6*(s*F) - 0.2*((1-s)*F) = F * (0.8*s - 0.2)
+annual inflation r = net_supply_change / 1e9 = F * (0.8*s - 0.2) / 1e9
 ```
 
-- **Break-even:** set `0.9*s - 0.4 = 0` -> `s* = 4/9 ~ 44.4%`. Above 44.4% sponsored, net inflationary (at the upper bound); below it, the burn dominates and it is net deflationary. Because the realized sponsored coefficient drops below 0.5 once an excess buffer builds, **4/9 is a lower bound on the true break-even**; the real break-even fraction is somewhat higher in mixed traffic.
-- **Design case `s -> 1`:** `r ~ 0.5 * F / 1e9` (sponsored coefficient 0.5, upper bound).
-- **Validity caveat:** the aggregate formula holds while the pool is kept at target with no carried excess. Once excess builds, true net inflation is lower than this upper bound.
+- **Break-even:** set `0.8*s - 0.2 = 0` -> `s* = 1/4 = 25%`. Above 25% sponsored, net inflationary (at the upper bound); below it, the burn dominates and it is net deflationary. Because the realized sponsored coefficient drops below 0.6 once an excess buffer builds or the daily mint cap binds, **25% is a lower bound on the true break-even**; the real break-even fraction is somewhat higher in mixed traffic.
+- **Design case `s -> 1`:** `r ~ 0.6 * F / 1e9` (sponsored coefficient 0.6, upper bound), **and additionally ceilinged by `RefillDailyMintCap`**: annual mint <= `365 * RefillDailyMintCap` regardless of F or account count.
+- **Validity caveat:** the aggregate formula holds while the pool is kept at target with no carried excess and below the daily mint cap. Once excess builds or the cap binds, true net inflation is lower than this upper bound.
 
 ### A note on the denominator (important)
 
@@ -65,80 +71,86 @@ annual inflation r = net_supply_change / 1e9 = F * (0.9*s - 0.4) / 1e9
 
 ## 5. Scenario table
 
-All rows assume `s ~ 1` (sponsored path), so net mint = `0.5 * F`. Maxed (sybil) rows compute F directly from the live baseline: `F = accounts x 10 LIMO/day x 365`. Per A8, all rows are upper bounds (they assume gas-used ~ gas-limit; unused gas is refunded to the pool and lowers realized mint).
+All rows assume `s ~ 1` (sponsored path), so net mint = `0.6 * F`. Maxed rows compute F directly from the live uniform budget: `F = accounts x 1 LIMO/day x 365`. Per A8, all rows are upper bounds (they assume gas-used ~ gas-limit; unused gas is refunded to the pool and lowers realized mint). Every maxed account must hold >= `HoldMinimum` (1 LIMO), so the maxed rows also state the capital an attacker must immobilize; and every row is additionally ceilinged by `RefillDailyMintCap` (A4), not shown.
 
-| Scenario | Accounts | Sponsored gas/acct/day | Annual sponsored gas F | Net mint (LIMO) | Inflation vs total supply |
-|---|---:|---:|---:|---:|---:|
-| Organic-light | 10,000 | 0.1 LIMO | 365,000 | +182,500 | +0.018% |
-| Organic-heavy | 100,000 | 1 LIMO | 36,500,000 | +18,250,000 | +1.83% |
-| Sybil-baseline-maxed | 100,000 | 10 LIMO (full baseline) | 365,000,000 | +182,500,000 | +18.25% |
-| Sybil-at-scale | 1,000,000 | 10 LIMO (full baseline) | 3,650,000,000 | +1,825,000,000 | +182.5% (supply grows ~2.8x in one year) |
+| Scenario | Accounts | Sponsored gas/acct/day | Annual sponsored gas F | Net mint (LIMO) | Inflation vs total supply | Capital immobilized |
+|---|---:|---:|---:|---:|---:|---:|
+| Organic-light | 10,000 | 0.1 LIMO | 365,000 | +219,000 | +0.022% | — |
+| Organic-heavy | 100,000 | 1 LIMO (full budget) | 36,500,000 | +21,900,000 | +2.19% | (held by real users) |
+| Sybil-budget-maxed | 100,000 | 1 LIMO (full budget) | 36,500,000 | +21,900,000 | +2.19% | 100,000 LIMO locked |
+| Sybil-at-scale | 1,000,000 | 1 LIMO (full budget) | 365,000,000 | +219,000,000 | +21.9% | 1,000,000 LIMO locked |
 
-Reference point: one maxed account = 3,650 LIMO/yr sponsored gas -> +1,825 LIMO minted -> +0.0001825% inflation. **About 5,480 maxed accounts mint 1% of total supply per year.** Organic-heavy and sybil-baseline-maxed differ only in per-account draw; the protocol cannot tell them apart and mints for both. Against the circulating float (smaller than total supply), every percentage above is correspondingly larger.
+Reference point: one maxed account = 365 LIMO/yr sponsored gas -> +219 LIMO minted -> +0.0000219% inflation. **About 45,700 maxed accounts mint 1% of total supply per year — but to run them the attacker must lock ~45,700 LIMO (`HoldMinimum` each), and the daily mint cap ceilings the total regardless.** Organic-heavy and sybil-budget-maxed differ only in intent, not mechanics; the protocol cannot tell them apart and mints for both, but both now pay the hold requirement and both hit the same daily ceiling. Against the circulating float (smaller than total supply), every percentage above is correspondingly larger.
 
 ---
 
 ## 6. Sybil cost analysis
 
-The attacker's recoverable cost per farmed account is **~0**:
+Sybil is no longer ~free. Each farmed account now carries a real, non-recoverable-while-farming capital cost:
 
 - **Account creation = 0.** Accounts are lazily created in the ante with no fee; the keypair is generated offline for free.
-- **Per-tx fee within baseline = 0.** Sponsored txs are paid by the pool; the user balance is never touched.
-- **The held balance is a reusable float, never spent.** The affordability gate requires `balance >= gasLimit*gasFeeCap + value` for the largest single tx, but the same balance satisfies every sponsored tx that day because it is never debited. The single-tx floor is ~21,000 aLIMO (~2.1e-14 LIMO) for one minimal transfer. But to actually **max** the 10 LIMO/day counter you need many txs (the counter debits gasLimit*price), and at a feasible volume of ~1e5 txs/day the per-tx price, and therefore the reusable float you must hold, is on the order of **~1e-4 LIMO**. That float is roughly **0.001% of the 10 LIMO/day of sponsored gas it unlocks**. The single-tx 21,000-aLIMO figure is the floor for one transaction only, not the cost to max the baseline.
+- **But eligibility requires holding `HoldMinimum` LIMO (1 LIMO live).** `effectiveAllowance` returns 0 for any account holding less than `HoldMinimum`. The held balance is a reusable float (never debited when sponsored), but it must be *held* — so to run N maxed accounts an attacker must simultaneously immobilize `N x HoldMinimum` LIMO. That capital is not spent, but it is locked out of any other use for as long as the farm runs. This is the "skin-in-the-game" gate.
+- **Cold-start onboarding is one-shot and tiny.** A brand-new 0-balance account gets a single lifetime `OnboardingGrant` (0.05 LIMO), enough for its first few transactions with no faucet, then must hold `HoldMinimum` to continue. It cannot be recycled per day.
+- **The daily mint cap bounds the aggregate.** Even if an attacker funds many accounts, `RefillDailyMintCap` ceilings the total new supply the refill can mint per UTC day. Beyond the cap, sponsored gas is served from the existing pool buffer (no new mint) until it drains, at which point sponsorship for the day degrades rather than minting without limit.
 
-So per fresh keypair an attacker farms up to ~10 LIMO/day of freshly minted sponsored gas (net +5 LIMO/day of new supply at the +0.5X upper bound) while holding a ~1e-4 LIMO float they never spend. N keypairs farm ~10N LIMO/day. The only limit is the attacker's willingness to generate keypairs.
+So per fresh keypair an attacker farms up to 1 LIMO/day of sponsored gas (net +0.6 LIMO/day of new supply at the +0.6X upper bound) **only while locking >= 1 LIMO of real capital**, and the sum across all keypairs is hard-capped by the daily mint ceiling. The open, cost-free sybil surface of the earlier design is closed on both the per-account (capital) and the aggregate (mint-cap) axes.
 
-Two structural facts compound this: the allowance is keyed solely on sender address with no account-age or creation cost (the core sybil lever), and old-day allowance keys are never deleted (a minor state-bloat side effect of high-volume farming).
+Residual notes: allowance keys are still keyed on sender address per UTC-day and old-day keys are not deleted (a minor state-bloat side effect of high-volume traffic, not an inflation lever).
 
 ---
 
-## 7. The synthesis: inflation = sybil surface
+## 7. The synthesis: inflation is now bounded, not open-ended
 
 Combining sections 4-6:
 
 ```
-F_max = (farmable accounts N) * baseline * 365
-r_max ~ 0.5 * N * 3650 / 1e9 = N * 1.825e-6   (vs total supply)
+uncapped form:   F_max = N * DailyBudget * 365,   r ~ 0.6 * N * 365 / 1e9  (per account: +219 LIMO/yr)
+bounded by:      (a) capital gate   -> each of the N accounts locks HoldMinimum LIMO
+                 (b) hard mint cap  -> annual mint <= 365 * RefillDailyMintCap, independent of N
 ```
 
-Every farmable account is exactly one account's worth of minted inflation. Inflation is not set by a parameter; it is set by N.
+Inflation used to be set purely by N (the sybil surface) with nothing bounding it. It is now bounded from two directions at once: a per-account capital cost that makes large N expensive, and an absolute daily mint ceiling that makes worst-case inflation independent of N. It is still not zero, and the ceiling is a governance parameter (choose it deliberately — section 9), but "inflation = unbounded sybil surface" is no longer the correct description of the live binary.
 
-**The base-fee tension (the unavoidable trade-off under the current design).**
+**The base-fee tension (the remaining trade-off under the current design).**
 
-- **base_fee ~ 0 (live today):** an organic zero-priced tx is free-by-truncation, not sponsored. It debits no daily counter and triggers no mint, so realized inflation from organic traffic is ~0 today. But there is also **no price-based anti-spam**. Critically, **minting is already farmable on demand today**: an attacker simply sets a positive gas price (the base fee is ~0, so the price is pure tip), sponsorship engages, and the pool re-mints. No fee-floor change is needed to exploit it.
-- **base_fee > 0 (positive fee floor, likely needed for mainnet anti-spam):** every positive-fee tx is sponsored-and-minted. A fee floor does not create the attack; it **additionally forces organic zero-priced traffic into the minted path** too.
+- **base_fee ~ 0 (live today):** an organic zero-priced tx is free-by-truncation, not sponsored. It debits no daily counter and triggers no mint, so realized inflation from organic traffic is ~0 today. But there is also **no price-based anti-spam**. An attacker can still engage minting on demand by setting a positive gas price (the base fee is ~0, so the price is pure tip) — but now only from accounts that hold `HoldMinimum`, and only up to the daily mint cap.
+- **base_fee > 0 (positive fee floor, likely needed for mainnet anti-spam):** every positive-fee tx is sponsored-and-minted (up to the cap). A fee floor does not create the attack; it additionally forces organic zero-priced traffic into the minted path too.
 
-You cannot get price-based anti-spam and zero sponsored-mint at the same time while the baseline is a flat per-account allowance.
+You still cannot get price-based anti-spam and zero sponsored-mint at the same time; but with the hold requirement and the daily mint cap, the *magnitude* of that mint is now bounded rather than open-ended.
 
 ---
 
 ## 8. Mitigations (LIVE vs ROADMAP)
 
-1. **History-scaled allowance - LIVE (2026-06-26). The linchpin.** The per-account daily allowance is now `min(baseline 10/day, cold_start 0.1/day + heldLIMO / balance_divisor)` (balance_divisor=1 live). A fresh dust account gets only the 0.1/day cold-start; a meaningful allowance requires HOLDING LIMO (skin-in-the-game), so a sybil must lock real capital per account to farm more. This bounds F to funded accounts and collapses the open sybil surface. The residual free amount is just the cold-start times the number of accounts (0.1/day each), which is why the cold-start is kept small; lowering it or routing through the escrow path (below) tightens it further.
-2. **Lower mainnet baseline - ROADMAP DECISION.** Live is 10 LIMO/day; the source default is 1 LIMO/day. Lowering it linearly lowers per-account yield and inflation, but does not change the structural `N * baseline` form. A knob, not a fix.
-3. **Non-zero mainnet fee floor - ROADMAP DECISION.** Restores economic anti-spam, but forces organic traffic into the minted path. Must be chosen jointly with the baseline and the history-scaling curve.
-4. **Route sponsorship through approved-dApp / dev-funded models - CODE LIVE / USE ROADMAP.** The approved-dApp path is uncapped but admin-gated, with zero live registrations; the dev-funded paymaster is a scaffold with no message server. Moving sponsorship off the open baseline onto these models puts an accountable payer (who buys LIMO to fund it) in front of the mint.
-5. **Asymmetric pool buffer - LIVE, structural dampener only.** Excess above target is never clawed back, so recycled user-paid grants accumulate and absorb later sponsored deficits, pulling realized inflation below the +0.5X upper bound. A mild natural dampener, not a control.
-6. **Per-epoch mint cap / circuit-breaker - ROADMAP (NOT BUILT).** A hard ceiling per block/epoch would bound worst-case inflation independent of N. Nothing of the kind exists today.
+1. **Per-account hold requirement (`HoldMinimum`) - LIVE. Capital gate.** Only accounts holding >= `HoldMinimum` (1 LIMO live) earn `DailyBudget`. Farming N accounts immobilizes `N x HoldMinimum` of real capital, converting the previously free sybil surface into a capital-bounded one.
+2. **Hard daily mint cap (`RefillDailyMintCap`) - LIVE. Absolute ceiling.** The refill may not mint past a fixed aLIMO total per UTC day. This bounds worst-case inflation **independent of N** — the circuit-breaker that earlier revisions listed as "not built" now exists.
+3. **Uniform daily budget (`DailyBudget`) - LIVE. Simplicity + predictability.** Every eligible account gets the same flat 1 LIMO/day (users and apps alike), replacing the prior history-scaled curve. Combined with the hold gate, per-account yield is fixed and legible; lowering it linearly lowers inflation.
+4. **Developer-escrow (self-funded) sponsorship - LIVE, non-inflationary.** Beyond the free daily budget, apps fund their users' gas from an `x/sponsorpool` deposit (precompile 0x901). That gas is paid from deposited supply, not new mint, so it does not inflate. Moving heavy sponsorship onto this path puts an accountable payer (who buys LIMO to fund it) in front of the mint. The approved-dApp path (uncapped but admin-gated, bounded per-tx by `DappPerTxFeeCap`) is the other routed option; both are preferable to open baseline draw at scale.
+5. **Asymmetric pool buffer - LIVE, structural dampener.** Excess above target is never clawed back, so recycled user-paid grants accumulate and absorb later sponsored deficits, pulling realized inflation below the +0.6X upper bound.
+6. **One-shot onboarding grant (`OnboardingGrant`) - LIVE, bounded.** A cold wallet's first-tx grant is a single lifetime 0.05 LIMO, not a renewable per-day allowance, so it cannot be farmed by cycling fresh keypairs — its total draw across all accounts is itself counted against the daily mint cap.
+7. **Non-zero mainnet fee floor - ROADMAP DECISION.** Restores economic anti-spam, but forces organic traffic into the minted path. Must be chosen jointly with the budget, the hold minimum, and the mint cap.
 
 ---
 
 ## 9. Open before-mainnet decisions (quantitative)
 
-1. **Target steady-state inflation cap.** Choose the acceptable annual % (for example <= 2%/yr), stated against both total and circulating supply. Currently UNBOUNDED in code. This budget constrains everything below. Disclosure of any cap to holders: validate with counsel.
-2. **Baseline size.** Set the mainnet per-account daily allowance. Must satisfy `cap * 1e9 >= 0.5 * N_genuine * baseline * 365` for the expected genuine account count.
-3. **Fee floor.** Decide whether to set a positive minimum gas price and its value, accepting that any positive floor forces organic traffic into the minted path.
-4. **History-scaling curve.** Define `allowance(account) = f(age, tx-count, sustained min-balance, ...)`, the cold-start allowance for new accounts, and the cap. The linchpin; build before the open baseline path is safe at scale.
-5. **Pool refill policy.** Decide whether to claw back excess above target (symmetric refill) and whether to add a hard per-epoch mint cap / circuit-breaker.
-6. **Sponsorship routing at launch.** Decide whether the open per-account baseline path is enabled at mainnet genesis at all, or gated behind approved-dApp / dev-funded sponsorship from day one.
+1. **Target steady-state inflation cap.** Choose the acceptable annual % (for example <= 2%/yr), stated against both total and circulating supply, and set `RefillDailyMintCap` to enforce it: `365 * RefillDailyMintCap <= cap * 1e9`. The mechanism now exists; the number is a governance choice. Disclosure of any cap to holders: validate with counsel.
+2. **Daily budget size.** Set the mainnet per-account `DailyBudget`. Together with expected genuine account count it sets organic mint: `0.6 * N_genuine * DailyBudget * 365`.
+3. **Hold minimum.** Set `HoldMinimum` — the per-account capital an honest user must hold and a sybil must lock. Higher tightens the sybil gate but raises the entry bar for real users.
+4. **Fee floor.** Decide whether to set a positive minimum gas price and its value, accepting that any positive floor forces organic traffic into the minted path.
+5. **Pool refill policy.** Decide whether to claw back excess above target (symmetric refill) in addition to the daily mint cap already in place.
+6. **Sponsorship routing at launch.** Decide how much load sits on the open per-account budget vs the developer-escrow / approved-dApp routed paths from mainnet genesis.
 
 ---
 
 ## 10. Honest disclaimers
 
-- "Gasless" is a subsidy, not magic. The mint-backstop refill makes sponsored gas mildly inflationary up to +0.5X per fee.
-- The +0.5X sponsored delta is an UPPER BOUND; realized inflation is lower when an excess buffer is carried, and organic inflation is ~0 today only because the live base fee is ~0. Attacker-driven minting is already possible today by setting a positive gas price.
+- "Gasless" is a subsidy, not magic. The mint-backstop refill makes sponsored gas mildly inflationary up to +0.6X per fee.
+- The +0.6X sponsored delta is an UPPER BOUND; realized inflation is lower when an excess buffer is carried or the daily mint cap binds, and organic inflation is ~0 today only because the live base fee is ~0. Attacker-driven minting is still possible today by setting a positive gas price — but only from accounts holding `HoldMinimum`, and only up to `RefillDailyMintCap`.
+- Steady-state inflation is now **bounded** on two axes (per-account hold requirement + hard daily mint cap) rather than being an open-ended function of account count. It is **not zero**, and the supply is **not hard-capped** while gas-pool minting is on. Do not represent it as zero-inflation or fixed-supply.
 - Inflation `r` is quoted against total supply (~1B). Dilution of the circulating float is proportionally larger because the premine and locked validator grants do not circulate.
-- The steady-state inflation rate is now bounded by the LIVE history-scaled allowance: the bonus requires held LIMO, so only the small per-account cold-start is free. Separately, contract gas funded via the developer escrow (x/sponsorpool, precompile 0x901) is paid by the developer's deposit, not by new mint, so it is non-inflationary.
-- Total supply is ~1B but not hard-capped while gas-pool minting is on.
+- Contract gas funded via the developer escrow (`x/sponsorpool`, precompile 0x901) is paid by the developer's deposit, not by new mint, so it is non-inflationary.
+- Validators receive 60% of real fees under the split. This is **service compensation for operating a node**, not yield, APR, dividend, or a return on a purchase — LIMO carries no such promise. Today fees are ~0, so that compensation is effectively zero and only becomes meaningful with real fee volume.
 - Testnet tokens are valueless. Any statement about mainnet token value, distribution, or characterization should be validated with counsel.
+</content>
+</invoke>
