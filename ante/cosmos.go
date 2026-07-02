@@ -31,7 +31,7 @@ func newCosmosAnteHandler(ctx sdk.Context, options HandlerOptions) sdk.AnteHandl
 		ante.NewValidateBasicDecorator(),
 		ante.NewTxTimeoutHeightDecorator(),
 		ante.NewValidateMemoDecorator(options.AccountKeeper),
-		cosmosante.NewMinGasPriceDecorator(&feemarketParams),
+		cosmosante.NewMinGasPriceDecorator(&feemarketParams, options.PaymasterKeeper),
 		ante.NewConsumeGasForTxSizeDecorator(options.AccountKeeper),
 		pmante.NewDeductFeeDecorator(options.AccountKeeper, options.BankKeeper, options.FeegrantKeeper, options.PaymasterKeeper, txFeeChecker),
 		// SetPubKeyDecorator must be called before all signature verification decorators

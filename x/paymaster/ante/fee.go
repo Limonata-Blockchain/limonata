@@ -47,20 +47,42 @@ func (d DeductFeeDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool
 	}
 
 	fee := feeTx.GetFee()
+
+	// Resolve sponsorship up front, against the tx's declared fee, so a
+	// sponsored tx can skip the market-rate dynamic fee check below. That
+	// check (d.tfc) enforces the feemarket base-fee floor for organic,
+	// self-paying senders; it has no say over what a paymaster policy is
+	// willing to cover. Without this, a low-fee sponsored tx (e.g. a Keplr
+	// tx built from a stale chain-registry gasPriceStep) would be rejected
+	// here before ever reaching the sponsorship check in deduct() below.
+	sponsor, sponsored := d.resolveSponsor(ctx, tx, feeTx, fee)
+
 	var priority int64
 	var err error
-	if !simulate && d.tfc != nil {
+	if !simulate && d.tfc != nil && !sponsored {
 		if fee, priority, err = d.tfc(ctx, tx); err != nil {
 			return ctx, err
 		}
 	}
-	if err := d.deduct(ctx, tx, fee); err != nil {
+	if err := d.deduct(ctx, tx, fee, sponsor, sponsored); err != nil {
 		return ctx, err
 	}
 	return next(ctx.WithPriority(priority), tx, simulate)
 }
 
-func (d DeductFeeDecorator) deduct(ctx sdk.Context, tx sdk.Tx, fee sdk.Coins) error {
+// resolveSponsor mirrors the auto-sponsorship rule applied in deduct(): it
+// only applies when the user set no explicit fee granter, and pm is
+// configured. It is factored out so AnteHandle can decide up front whether
+// to run the dynamic fee checker, using the same inputs deduct() would use.
+func (d DeductFeeDecorator) resolveSponsor(ctx sdk.Context, tx sdk.Tx, feeTx sdk.FeeTx, fee sdk.Coins) (sdk.AccAddress, bool) {
+	if feeTx.FeeGranter() != nil || d.pm == nil {
+		return nil, false
+	}
+	feePayer := sdk.AccAddress(feeTx.FeePayer())
+	return d.pm.ResolveSponsor(ctx, tx.GetMsgs(), feePayer, fee)
+}
+
+func (d DeductFeeDecorator) deduct(ctx sdk.Context, tx sdk.Tx, fee sdk.Coins, sponsor sdk.AccAddress, sponsored bool) error {
 	feeTx := tx.(sdk.FeeTx)
 	if d.ak.GetModuleAddress(authtypes.FeeCollectorName) == nil {
 		return errorsmod.Wrap(sdkerrors.ErrLogic, "fee collector module account has not been set")
@@ -69,14 +91,9 @@ func (d DeductFeeDecorator) deduct(ctx sdk.Context, tx sdk.Tx, fee sdk.Coins) er
 	feePayer := sdk.AccAddress(feeTx.FeePayer())
 	feeGranter := feeTx.FeeGranter()
 	deductFrom := feePayer
-	sponsored := false
 
-	// Auto-sponsorship applies only when the user set no explicit fee granter.
-	if feeGranter == nil && d.pm != nil {
-		if sponsor, ok := d.pm.ResolveSponsor(ctx, tx.GetMsgs(), feePayer, fee); ok {
-			deductFrom = sponsor
-			sponsored = true
-		}
+	if sponsored {
+		deductFrom = sponsor
 	}
 	if !sponsored && feeGranter != nil {
 		fg := sdk.AccAddress(feeGranter)
