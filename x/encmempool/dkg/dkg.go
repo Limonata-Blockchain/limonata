@@ -1,7 +1,9 @@
-// Package dkg is an EXPERIMENTAL, standalone Joint-Feldman VSS Distributed Key
-// Generation (Pedersen/GJKR-style) for the threshold-ElGamal encrypted mempool.
-// It replaces the TRUSTED dealer in package threshold (threshold.Setup) with a
-// protocol in which n parties jointly generate a threshold key such that:
+// Package dkg is an EXPERIMENTAL, standalone joint-Feldman VSS Distributed Key
+// Generation for the threshold-ElGamal encrypted mempool. (It is plain single-round
+// joint-Feldman — NOT the Pedersen/GJKR commit-then-reveal variant; see the KEY-
+// BIASABILITY caveat below.) It replaces the TRUSTED dealer in package threshold
+// (threshold.Setup) with a protocol in which n parties jointly generate a threshold
+// key such that:
 //
 //   - the master secret key msk = Σ_{i∈QUAL} s_i is NEVER assembled in one place
 //     (no party, and no coalition of < t parties, ever holds it as a scalar);
@@ -21,6 +23,20 @@
 // channels). It is NOT wired into any module, app.go, or consensus. It is NOT
 // audited. Do not use in production without a security review.
 //
+// KEY-BIASABILITY CAVEAT (documented, deliberately NOT fixed here): this is plain
+// joint-Feldman with a single dealing round and no commit-then-reveal / proof-of-
+// possession phase, so a RUSHING adversary that broadcasts its dealing LAST can see
+// the honest partial sum Σ_honest C_{j,0} and choose its own s_adv to steer the
+// master public key pub = Σ C_{i,0} to satisfy any efficiently-checkable predicate
+// (classic Gennaro-Jarecki-Krawczyk-Rabin biasability). This is BENIGN for the ONLY
+// use here — a threshold-ElGamal DECRYPTION key: ElGamal semantic security does not
+// require a uniform public key, msk = Σ s_i still mixes in honest secrets the
+// adversary cannot know, and t-1 parties still cannot decrypt. It would be FATAL if
+// this key or DKG were ever repurposed for threshold SIGNATURES (Schnorr/ECDSA/
+// EdDSA), where a biasable key breaks the security proof. THE RULE: this key is for
+// ENCRYPTION ONLY — never sign with it. A signing deployment MUST add the Pedersen
+// commit-then-reveal round. See README.md / SECURITY.md.
+//
 // Notation: secp256k1, additive, G = generator, group order q. n parties indexed
 // 1..n (the SAME 1-based index domain threshold.Setup uses: it evaluates the
 // sharing polynomial at the point equal to the share index). Reconstruction
@@ -29,6 +45,7 @@ package dkg
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"sort"
@@ -107,11 +124,25 @@ type Result struct {
 	Disqualified      []uint64                  // parties removed by a valid complaint
 }
 
+// RunDKGSecure is the PRODUCTION entry point: it runs the DKG with crypto/rand as
+// the entropy source, so an integrator cannot accidentally supply a weak/seeded
+// io.Reader. Prefer this over RunDKG everywhere except deterministic tests. (Every
+// dealer's secret polynomial is drawn from the same crypto/rand stream in party
+// order; sequential draws from a CSPRNG are independent, so msk secrecy holds — the
+// per-party-independent-entropy abstraction is cosmetic here, see RunDKG.)
+func RunDKGSecure(parties []*Party) (*Result, error) { return RunDKG(parties, rand.Reader) }
+
 // RunDKG runs the full protocol over the given party set with the injected RNG,
-// and returns a fresh independent threshold key. Deterministic in rng: calling it
-// again with a different party set (or a different RNG) yields an independent
-// msk'/pub' — this is the "re-run on set change" story (no proactive resharing,
-// exactly like Shutter/Penumbra: just run it again).
+// and returns a fresh independent threshold key.
+//
+// SECURITY: rng MUST be a cryptographically-secure RNG (crypto/rand.Reader) in any
+// real use — msk secrecy is delegated wholly to it. A low-entropy / seeded reader
+// makes msk predictable and is for REPRODUCIBLE TESTS ONLY. Production code should
+// call RunDKGSecure, which hard-wires crypto/rand and removes this footgun.
+//
+// Deterministic in rng: calling it again with a different party set (or a different
+// RNG) yields an independent msk'/pub' — this is the "re-run on set change" story
+// (no proactive resharing, exactly like Shutter/Penumbra: just run it again).
 func RunDKG(parties []*Party, rng io.Reader) (*Result, error) {
 	dealings, err := DealerRound(parties, rng)
 	if err != nil {
@@ -197,13 +228,29 @@ func Finalize(parties []*Party, dealings []*Dealing, complaints []Complaint) (*R
 		byDealer[d.Dealer] = d
 	}
 
+	disq := make(map[uint64]bool)
+
+	// Structural well-formedness (was the "short commitment vector panics" finding):
+	// a dealer MUST publish a degree-(t-1) polynomial, i.e. EXACTLY t Feldman
+	// commitments, and a share to every party. A dealing that is missing, carries the
+	// wrong number of commitments, or omits a recipient's share is provably malformed
+	// and is disqualified BEFORE aggregation. Without this, an untrusted dealer that
+	// broadcast t-1 commitments (with shares consistent with that lower-degree poly,
+	// so no honest party complains) would survive QUAL and then index Commitments[t-1]
+	// out of range in the V_j loop below — a consensus-halt-class panic on a network.
+	for _, p := range parties {
+		d, ok := byDealer[p.Index]
+		if !ok || len(d.Commitments) != t || !dealsToAll(d, parties) {
+			disq[p.Index] = true
+		}
+	}
+
 	// A complaint is valid iff the disputed share fails against the dealer's OWN
 	// public commitments — a publicly checkable, incontrovertible fault.
-	disq := make(map[uint64]bool)
 	for _, c := range complaints {
 		d, ok := byDealer[c.Against]
-		if !ok {
-			continue
+		if !ok || len(d.Commitments) != t {
+			continue // malformed dealers are already handled by the structural pass
 		}
 		if !VerifyShare(d.Commitments, c.By, d.Shares[c.By]) {
 			disq[c.Against] = true
@@ -363,6 +410,18 @@ func parsePoint(b []byte) (*secp256k1.JacobianPoint, error) {
 	var j secp256k1.JacobianPoint
 	pk.AsJacobian(&j)
 	return &j, nil
+}
+
+// dealsToAll reports whether dealing d supplied a (non-nil) point-to-point share to
+// every party — a well-formedness precondition so Finalize's share-sum never
+// dereferences a missing Shares[m] entry from an untrusted dealer.
+func dealsToAll(d *Dealing, parties []*Party) bool {
+	for _, q := range parties {
+		if d.Shares[q.Index] == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Party) victim() uint64 {

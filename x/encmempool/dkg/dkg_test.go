@@ -196,7 +196,7 @@ func TestMaliciousDecryptorRejected(t *testing.T) {
 	}
 
 	share := res.Shares[0]
-	ds, proof, err := ProveDecryptShare(share, ct, crand.Reader)
+	ds, proof, err := ProveDecryptShare(share, ct)
 	if err != nil {
 		t.Fatalf("ProveDecryptShare: %v", err)
 	}
@@ -266,5 +266,184 @@ func TestRerunIndependence(t *testing.T) {
 	}
 	if got, err := decryptWith(t, run1a, ct2, []int{0, 2, 4}); err == nil {
 		t.Fatalf("run-1 shares decrypted a run-2 ciphertext: %q", got)
+	}
+}
+
+func scalarEq(a, b *secp256k1.ModNScalar) bool {
+	ab, bb := a.Bytes(), b.Bytes()
+	return bytes.Equal(ab[:], bb[:])
+}
+
+// (g) REGRESSION for the HIGH finding: the DLEQ commitment nonce is derived
+// DETERMINISTICALLY from (secret, transcript) with no RNG rail, so (1) proving the
+// same statement twice is byte-identical (deterministic), and (2) proving two
+// DIFFERENT ciphertexts uses DIFFERENT nonces — which defeats the old nonce-reuse
+// attack x=(z1-z2)/(c1-c2). We actively run that extraction and assert it does NOT
+// recover the share.
+func TestDLEQNonceDerandomized(t *testing.T) {
+	res, err := RunDKGSecure(NewParties(5, 3))
+	if err != nil {
+		t.Fatalf("RunDKG: %v", err)
+	}
+	share := res.Shares[0]
+
+	ct1, _ := threshold.Encrypt(res.Pub, []byte("ciphertext one"))
+	ct2, _ := threshold.Encrypt(res.Pub, []byte("ciphertext two"))
+
+	// determinism: same (share, ct) proven twice -> identical proof, no RNG consulted.
+	_, p1a, err := ProveDecryptShare(share, ct1)
+	if err != nil {
+		t.Fatalf("prove 1a: %v", err)
+	}
+	_, p1b, err := ProveDecryptShare(share, ct1)
+	if err != nil {
+		t.Fatalf("prove 1b: %v", err)
+	}
+	if !scalarEq(p1a.C, p1b.C) || !scalarEq(p1a.Z, p1b.Z) {
+		t.Fatal("DLEQ proof is not deterministic — nonce derivation still consults an RNG")
+	}
+
+	// two DIFFERENT ciphertexts -> the derived nonces differ, so the (z1-z2)/(c1-c2)
+	// share-extraction attack yields the WRONG scalar.
+	_, p2, err := ProveDecryptShare(share, ct2)
+	if err != nil {
+		t.Fatalf("prove 2: %v", err)
+	}
+	if scalarEq(p1a.C, p2.C) {
+		t.Fatal("distinct ciphertexts produced the same challenge (transcript not bound)")
+	}
+	num := new(secp256k1.ModNScalar).Set(p1a.Z)
+	negZ2 := new(secp256k1.ModNScalar).Set(p2.Z)
+	negZ2.Negate()
+	num.Add(negZ2) // z1 - z2
+	den := new(secp256k1.ModNScalar).Set(p1a.C)
+	negC2 := new(secp256k1.ModNScalar).Set(p2.C)
+	negC2.Negate()
+	den.Add(negC2) // c1 - c2
+	den.InverseNonConst()
+	cand := num.Mul(den) // (z1-z2)/(c1-c2)
+	if scalarEq(cand, share.Xi) {
+		t.Fatal("SECURITY REGRESSION: nonce reused across ciphertexts — secret share extracted")
+	}
+}
+
+// (h) REGRESSION for the MEDIUM finding: RecoverVerified ENFORCES the DLEQ proof on
+// the recovery path. A provably-bad partial among the inputs is dropped (with
+// attribution) instead of silently corrupting the shared secret, and honest partials
+// still recover the plaintext. With too few honest partials it errors rather than
+// producing a wrong plaintext (no silent DoS / wrong-plaintext).
+func TestRecoverVerifiedEnforced(t *testing.T) {
+	res, err := RunDKGSecure(NewParties(5, 3))
+	if err != nil {
+		t.Fatalf("RunDKG: %v", err)
+	}
+	msg := []byte("verified recovery only")
+	ct, err := threshold.Encrypt(res.Pub, msg)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	prove := func(idx int) VerifiedShare {
+		ds, pf, err := ProveDecryptShare(res.Shares[idx], ct)
+		if err != nil {
+			t.Fatalf("prove %d: %v", idx, err)
+		}
+		return VerifiedShare{Share: ds, Proof: pf}
+	}
+
+	// a provably-bad partial: real proof for share 2, but a tampered D.
+	share2 := res.Shares[2]
+	wrongXi := new(secp256k1.ModNScalar).Set(share2.Xi)
+	wrongXi.Add(scalarFromUint(1))
+	badDs, err := threshold.ComputeShare(threshold.Share{Index: share2.Index, Xi: wrongXi}, ct)
+	if err != nil {
+		t.Fatalf("ComputeShare bad: %v", err)
+	}
+	_, realProof2, err := ProveDecryptShare(share2, ct)
+	if err != nil {
+		t.Fatalf("prove real 2: %v", err)
+	}
+	badPartial := VerifiedShare{Share: badDs, Proof: realProof2}
+
+	// 3 good + 1 bad, bad first: RecoverVerified drops the bad and recovers msg.
+	shared, err := RecoverVerified(res.PublicCommitments, ct.A, 3,
+		[]VerifiedShare{badPartial, prove(0), prove(1), prove(3)})
+	if err != nil {
+		t.Fatalf("RecoverVerified rejected an honest majority: %v", err)
+	}
+	got, err := threshold.Decrypt(shared, ct)
+	if err != nil || !bytes.Equal(got, msg) {
+		t.Fatalf("verified recovery mismatch: got=%q err=%v", got, err)
+	}
+
+	// duplicate index is also dropped (Lagrange-poisoning vector).
+	if _, err := RecoverVerified(res.PublicCommitments, ct.A, 3,
+		[]VerifiedShare{prove(0), prove(0), prove(1)}); err == nil {
+		t.Fatal("RecoverVerified accepted a duplicate index as two distinct partials")
+	}
+
+	// only 2 honest + 1 bad: must ERROR (attribution), never a wrong plaintext.
+	if _, err := RecoverVerified(res.PublicCommitments, ct.A, 3,
+		[]VerifiedShare{prove(0), prove(1), badPartial}); err == nil {
+		t.Fatal("RecoverVerified produced a result from < t verified partials")
+	}
+}
+
+// (i) REGRESSION for the robustness finding: a dealer that broadcasts a SHORT
+// commitment vector (t-1 commitments) with shares consistent with that lower-degree
+// polynomial passes the complaint round (no honest party complains) — the old
+// Finalize would then index Commitments[t-1] out of range and PANIC. It must instead
+// be disqualified as malformed and the DKG must complete (|QUAL| >= t).
+func TestMalformedShortCommitmentDisqualified(t *testing.T) {
+	parties := NewParties(5, 3)
+	dealings, err := DealerRound(parties, crand.Reader)
+	if err != nil {
+		t.Fatalf("DealerRound: %v", err)
+	}
+
+	// craft dealer 1 with only t-1=2 commitments (a degree-1 polynomial) and shares
+	// consistent with it, so VerifyShare passes for every recipient (no complaint).
+	a0, _ := randScalarFrom(crand.Reader)
+	a1, _ := randScalarFrom(crand.Reader)
+	shortCoeffs := []*secp256k1.ModNScalar{a0, a1} // len 2 = t-1
+	commit := make([]secp256k1.JacobianPoint, len(shortCoeffs))
+	for j := range shortCoeffs {
+		secp256k1.ScalarBaseMultNonConst(shortCoeffs[j], &commit[j])
+	}
+	shares := make(map[uint64]*secp256k1.ModNScalar, len(parties))
+	for _, p := range parties {
+		shares[p.Index] = evalPoly(shortCoeffs, p.Index)
+	}
+	dealings[0] = &Dealing{Dealer: 1, Commitments: commit, Shares: shares}
+
+	// the crafted shares are consistent with the short commitments -> no complaint.
+	complaints := ComplaintRound(parties, dealings)
+	for _, c := range complaints {
+		if c.Against == 1 {
+			t.Fatalf("unexpected complaint against the short-commitment dealer: %+v", c)
+		}
+	}
+
+	// Finalize must NOT panic; dealer 1 is disqualified as malformed; DKG completes.
+	res, err := Finalize(parties, dealings, complaints)
+	if err != nil {
+		t.Fatalf("Finalize should complete with |QUAL|>=t: %v", err)
+	}
+	if !contains(res.Disqualified, 1) {
+		t.Fatalf("short-commitment dealer 1 not disqualified: disq=%v", res.Disqualified)
+	}
+	if contains(res.Qual, 1) || len(res.Qual) != 4 {
+		t.Fatalf("QUAL wrong after disqualifying malformed dealer: %v", res.Qual)
+	}
+
+	// surviving key still works.
+	msg := []byte("malformed dealer excluded, key still works")
+	ct, err := threshold.Encrypt(res.Pub, msg)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	got, err := decryptWith(t, res, ct, []int{0, 1, 2})
+	if err != nil || !bytes.Equal(got, msg) {
+		t.Fatalf("post-disqualification decrypt failed: got=%q err=%v", got, err)
 	}
 }
