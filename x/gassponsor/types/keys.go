@@ -31,4 +31,14 @@ var (
 	// hold LIMO to earn the daily budget. (0x04 is intentionally skipped to avoid any
 	// collision with reserved/legacy layouts.)
 	OnboardingPrefix = []byte{0x05}
+	// GrantedTodayPrefix keys the GLOBAL per-UTC-day onboarding-grant budget counter
+	// (mirrors MintedTodayPrefix): 0x06 | day(8) -> cumulative aLIMO handed out via the
+	// onboarding path during that day (math.Int as decimal string). Enforces
+	// OnboardingDailyCap (sybil-flood gate); a new day has no key so it resets to zero.
+	GrantedTodayPrefix = []byte{0x06}
+	// DappSpentPrefix keys the per-(UTC-day, contract) approved-dApp sponsorship counter:
+	// 0x07 | day(8) | contractAddr(20) -> cumulative aLIMO sponsored via the approved-dApp
+	// path for that contract during that day (math.Int as decimal string). Enforces
+	// DappDailyCap (per-contract pool-drain gate); a new day has no key so it resets to zero.
+	DappSpentPrefix = []byte{0x07}
 )

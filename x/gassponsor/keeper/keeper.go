@@ -81,17 +81,26 @@ func (k Keeper) IsSponsored(ctx sdk.Context, sender sdk.AccAddress, to *common.A
 		return false, false
 	}
 
-	// 1. Approved dApp -> sponsorship, bounded per-tx by DappPerTxFeeCap. If the fee exceeds
-	//    the cap, DO NOT sponsor via the dApp path — fall through to sponsorpool/baseline as
-	//    if the dApp were not approved. This closes the pool-drain hole (an attacker holding
-	//    B LIMO setting gasFeeCap so gas*feeCap ≈ B and draining ~B per tx).
+	// 1. Approved dApp -> sponsorship, bounded per-tx by DappPerTxFeeCap AND per-(UTC-day,
+	//    contract) by DappDailyCap. If EITHER cap would be exceeded, DO NOT sponsor via the
+	//    dApp path — fall through to sponsorpool/baseline as if the dApp were not approved.
+	//    The per-tx cap closes the single-tx pool-drain hole (an attacker holding B LIMO
+	//    setting gasFeeCap so gas*feeCap ≈ B and draining ~B per tx); the daily cap closes the
+	//    many-small-tx variant (one approved contract draining the pool over a whole day).
 	if to != nil {
 		if app, ok := k.contest.GetShowcase(ctx, strings.ToLower(to.Hex())); ok && app.Approved && (app.VM == "" || app.VM == "evm") {
-			if k.withinDappCap(p, amt) {
+			day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+			if !k.withinDappCap(p, amt) {
+				// fee > per-tx cap: fall through to the bounded paths below.
+			} else if !k.withinDappDailyCap(ctx, p, day, to, amt) {
+				// contract's day budget exhausted: emit a distinct breaker event and fall through.
+				k.emitDappDailyCapped(ctx, to, k.dappSpentToday(ctx, day, to), amt, p.DappDailyCap)
+			} else {
+				k.addDappSpent(ctx, day, to, amt)
 				k.emitSponsored(ctx, "dapp", sender, to, amt, k.dappRemaining(p, amt))
+				k.emitDappDaily(ctx, to, k.dappSpentToday(ctx, day, to), p.DappDailyCap)
 				return true, true
 			}
-			// fee > cap: fall through to the bounded paths below.
 		}
 	}
 
@@ -199,7 +208,19 @@ func (k Keeper) tryOnboarding(ctx sdk.Context, p types.Params, sender sdk.AccAdd
 	if newUsed.GT(grant) {
 		return false // would exceed the lifetime onboarding budget
 	}
+	// Global daily onboarding budget (sybil-flood gate): if OnboardingDailyCap is set and
+	// today's cumulative onboarding grants + this tx would exceed it, DENY the grant (the cold
+	// wallet falls through to user-paid and simply can't transact until it holds LIMO). Empty/
+	// "0"/non-positive -> unlimited. day = unix/86400 mirrors the other day-bucket counters, so
+	// the global counter self-resets at the UTC rollover.
+	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+	if dailyCap, ok := math.NewIntFromString(p.OnboardingDailyCap); ok && dailyCap.IsPositive() {
+		if k.grantedToday(ctx, day).Add(amt).GT(dailyCap) {
+			return false // daily onboarding budget exhausted
+		}
+	}
 	k.setOnboardingUsed(ctx, sender, newUsed)
+	k.addGrantedToday(ctx, day, amt)
 	k.emitSponsored(ctx, "onboarding", sender, to, amt, grant.Sub(newUsed))
 	return true
 }
@@ -243,6 +264,43 @@ func (k Keeper) withinDappCap(p types.Params, amt math.Int) bool {
 		return true // unlimited
 	}
 	return amt.LTE(cap)
+}
+
+// withinDappDailyCap reports whether sponsoring this fee via the approved-dApp path keeps the
+// contract's cumulative sponsored aLIMO for the current UTC day within DappDailyCap. An empty /
+// "0" / non-positive / unparseable cap means "unlimited" (legacy behaviour, so genesis files
+// written before the field existed keep working); any positive cap is enforced as
+// dappSpentToday(day,to) + amt <= cap.
+func (k Keeper) withinDappDailyCap(ctx context.Context, p types.Params, day uint64, to *common.Address, amt math.Int) bool {
+	cap, ok := math.NewIntFromString(p.DappDailyCap)
+	if !ok || !cap.IsPositive() {
+		return true // unlimited
+	}
+	return k.dappSpentToday(ctx, day, to).Add(amt).LTE(cap)
+}
+
+// emitDappDaily records the running per-(day,contract) sponsored total on a successful dApp
+// sponsorship (observability; events do not affect the app hash). daily_cap is echoed raw
+// ("0"/"" = unlimited).
+func (k Keeper) emitDappDaily(ctx sdk.Context, to *common.Address, spentToday math.Int, dailyCap string) {
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"gassponsor_dapp_daily",
+		sdk.NewAttribute("dapp", strings.ToLower(to.Hex())),
+		sdk.NewAttribute("dapp_spent_today", spentToday.String()),
+		sdk.NewAttribute("daily_cap", dailyCap),
+	))
+}
+
+// emitDappDailyCapped signals that an approved dApp's per-(day,contract) budget was reached and
+// the tx fell through to the bounded paths as if the dApp were not approved (observability).
+func (k Keeper) emitDappDailyCapped(ctx sdk.Context, to *common.Address, spentToday, fee math.Int, dailyCap string) {
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"gassponsor_dapp_daily_capped",
+		sdk.NewAttribute("dapp", strings.ToLower(to.Hex())),
+		sdk.NewAttribute("dapp_spent_today", spentToday.String()),
+		sdk.NewAttribute("fee", fee.String()),
+		sdk.NewAttribute("daily_cap", dailyCap),
+	))
 }
 
 // --- per-account daily allowance ---
@@ -314,6 +372,77 @@ func (k Keeper) AllowanceUsed(ctx sdk.Context, sender sdk.AccAddress) math.Int {
 // in v0.3.0, or the legacy history-scaled cap when DailyBudget is unset) (query/telemetry/tests).
 func (k Keeper) EffectiveAllowance(ctx sdk.Context, sender sdk.AccAddress) math.Int {
 	return k.effectiveAllowance(ctx, k.GetParams(ctx), sender)
+}
+
+// --- per-(UTC-day, contract) approved-dApp spend counter (enforces DappDailyCap) ---
+
+func dappSpentKey(day uint64, to *common.Address) []byte {
+	out := append([]byte{}, types.DappSpentPrefix...)
+	var d [8]byte
+	binary.BigEndian.PutUint64(d[:], day)
+	out = append(out, d[:]...)
+	return append(out, to.Bytes()...) // 20-byte contract address
+}
+
+// dappSpentToday returns the cumulative aLIMO sponsored via the approved-dApp path for the given
+// contract during the given UTC day. A new day has no key, so it reads back zero — the counter
+// resets automatically at rollover.
+func (k Keeper) dappSpentToday(ctx context.Context, day uint64, to *common.Address) math.Int {
+	bz, _ := k.store(ctx).Get(dappSpentKey(day, to))
+	if bz == nil {
+		return math.ZeroInt()
+	}
+	v, ok := math.NewIntFromString(string(bz))
+	if !ok {
+		return math.ZeroInt()
+	}
+	return v
+}
+
+func (k Keeper) addDappSpent(ctx context.Context, day uint64, to *common.Address, amt math.Int) {
+	_ = k.store(ctx).Set(dappSpentKey(day, to), []byte(k.dappSpentToday(ctx, day, to).Add(amt).String()))
+}
+
+// DappSpentToday exposes the current UTC day's cumulative approved-dApp spend for a contract
+// (query/telemetry/tests), mirroring MintedToday/OnboardingUsed.
+func (k Keeper) DappSpentToday(ctx sdk.Context, to common.Address) math.Int {
+	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+	return k.dappSpentToday(ctx, day, &to)
+}
+
+// --- global per-UTC-day onboarding-grant budget counter (enforces OnboardingDailyCap) ---
+
+func grantedTodayKey(day uint64) []byte {
+	out := append([]byte{}, types.GrantedTodayPrefix...)
+	var d [8]byte
+	binary.BigEndian.PutUint64(d[:], day)
+	return append(out, d[:]...)
+}
+
+// grantedToday returns the cumulative aLIMO handed out via the onboarding path during the given
+// UTC day (GLOBAL, across all accounts). A new day has no key, so it reads back zero — the
+// counter resets automatically at rollover.
+func (k Keeper) grantedToday(ctx context.Context, day uint64) math.Int {
+	bz, _ := k.store(ctx).Get(grantedTodayKey(day))
+	if bz == nil {
+		return math.ZeroInt()
+	}
+	v, ok := math.NewIntFromString(string(bz))
+	if !ok {
+		return math.ZeroInt()
+	}
+	return v
+}
+
+func (k Keeper) addGrantedToday(ctx context.Context, day uint64, amt math.Int) {
+	_ = k.store(ctx).Set(grantedTodayKey(day), []byte(k.grantedToday(ctx, day).Add(amt).String()))
+}
+
+// GrantedToday exposes the current UTC day's global cumulative onboarding grants
+// (query/telemetry/tests), mirroring MintedToday.
+func (k Keeper) GrantedToday(ctx sdk.Context) math.Int {
+	day := uint64(ctx.BlockTime().UTC().Unix() / 86400)
+	return k.grantedToday(ctx, day)
 }
 
 // --- one-shot onboarding grant counter (lifetime, per account) ---

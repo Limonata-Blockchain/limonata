@@ -41,6 +41,14 @@ type Params struct {
 	// reaches the cap the refill stops (emitting gassponsor_refill_capped) until the next UTC
 	// day. Empty/"0" -> unlimited (no cap; legacy behaviour, for genesis back-compat).
 	RefillDailyMintCap string `json:"refill_daily_mint_cap"`
+	// DappDailyCap bounds the TOTAL aLIMO the approved-dApp path may sponsor PER (UTC-day,
+	// contract) (aLIMO, math.Int as string). Where DappPerTxFeeCap bounds a single tx, this
+	// bounds a contract's whole-day sponsorship so one approved dApp cannot drain the pool with
+	// many under-per-tx-cap txs. Tracked under DappSpentPrefix (0x07). Before sponsoring via the
+	// dApp path, if this cap is set and dappSpentToday(day,to)+fee would exceed it, the dApp path
+	// is SKIPPED and the tx falls through to sponsorpool/baseline/onboarding (as if the dApp were
+	// not approved). Empty/"0"/non-positive -> unlimited (no cap; legacy behaviour, back-compat).
+	DappDailyCap string `json:"dapp_daily_cap"`
 
 	// --- v0.3.0 UNIFORM daily budget (settled gasless design) ---
 
@@ -65,6 +73,13 @@ type Params struct {
 	// counted against RefillDailyMintCap via the pool-drain -> refill loop.
 	// Empty/"0" -> onboarding disabled (no grant).
 	OnboardingGrant string `json:"onboarding_grant"`
+	// OnboardingDailyCap bounds the TOTAL aLIMO handed out via the onboarding path across ALL
+	// accounts per UTC day (aLIMO, math.Int as string) — a global sybil-flood gate on top of
+	// the per-account OnboardingGrant. Tracked under GrantedTodayPrefix (0x06). When the day's
+	// onboarding budget is exhausted, further cold wallets are DENIED the grant (they fall
+	// through to user-paid and simply cannot transact until they hold LIMO); the cap only bites
+	// under a sybil flood. Empty/"0" -> unlimited (no cap; legacy behaviour, back-compat).
+	OnboardingDailyCap string `json:"onboarding_daily_cap"`
 }
 
 // GenesisState is the x/gassponsor genesis (plain JSON, no proto).
@@ -75,19 +90,21 @@ type GenesisState struct {
 func DefaultParams() Params {
 	return Params{
 		Enabled:            true,
-		BaselineDaily:      "1000000000000000000",         // legacy: 1 LIMO/day max allowance per account (cap)
+		BaselineDaily:      "1000000000000000000", // legacy: 1 LIMO/day max allowance per account (cap)
 		RefillEnabled:      true,
 		MinPoolBalance:     "200000000000000000000000000", // 200,000,000 LIMO
 		ColdStartDaily:     "100000000000000000",          // legacy: 0.1 LIMO/day flat cold-start
-		BalanceDivisor:     "1",                            // legacy: bonus = held LIMO / 1 (1:1), capped at BaselineDaily
-		DappPerTxFeeCap:    "1000000000000000000",          // 1 LIMO/tx cap on the approved-dApp path
-		RefillDailyMintCap: "0",                            // 0 = unlimited daily mint (hardened value set by genesis)
+		BalanceDivisor:     "1",                           // legacy: bonus = held LIMO / 1 (1:1), capped at BaselineDaily
+		DappPerTxFeeCap:    "1000000000000000000",         // 1 LIMO/tx cap on the approved-dApp path
+		RefillDailyMintCap: "0",                           // 0 = unlimited daily mint (hardened value set by genesis)
+		DappDailyCap:       "0",                           // 0 = unlimited per-(day,contract) dApp sponsorship (hardened value set by genesis)
 		// v0.3.0 uniform budget (settled design). Present in DefaultParams so a FRESH
 		// genesis runs the uniform model; an OLD genesis blob (no daily_budget) unmarshals
 		// these as "" and the keeper falls back to the legacy formula above.
-		DailyBudget:     "1000000000000000000", // 1 LIMO/day flat, holders only
-		HoldMinimum:     "1000000000000000000", // must hold >= 1 LIMO to earn the daily budget
-		OnboardingGrant: "50000000000000000",   // 0.05 LIMO one-shot for a cold 0-balance wallet
+		DailyBudget:        "1000000000000000000", // 1 LIMO/day flat, holders only
+		HoldMinimum:        "1000000000000000000", // must hold >= 1 LIMO to earn the daily budget
+		OnboardingGrant:    "50000000000000000",   // 0.05 LIMO one-shot for a cold 0-balance wallet
+		OnboardingDailyCap: "0",                   // 0 = unlimited daily onboarding budget (hardened value set by genesis)
 	}
 }
 
@@ -123,6 +140,11 @@ func (gs GenesisState) Validate() error {
 			return fmt.Errorf("invalid refill_daily_mint_cap %q (must be a non-negative integer)", gs.Params.RefillDailyMintCap)
 		}
 	}
+	if gs.Params.DappDailyCap != "" {
+		if c, ok := math.NewIntFromString(gs.Params.DappDailyCap); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid dapp_daily_cap %q (must be a non-negative integer)", gs.Params.DappDailyCap)
+		}
+	}
 	// v0.3.0 uniform-budget fields are OPTIONAL for back-compat (empty = fall back to the
 	// legacy formula / disabled). When present they must parse as a non-negative Int.
 	if gs.Params.DailyBudget != "" {
@@ -138,6 +160,11 @@ func (gs GenesisState) Validate() error {
 	if gs.Params.OnboardingGrant != "" {
 		if c, ok := math.NewIntFromString(gs.Params.OnboardingGrant); !ok || c.IsNegative() {
 			return fmt.Errorf("invalid onboarding_grant %q (must be a non-negative integer)", gs.Params.OnboardingGrant)
+		}
+	}
+	if gs.Params.OnboardingDailyCap != "" {
+		if c, ok := math.NewIntFromString(gs.Params.OnboardingDailyCap); !ok || c.IsNegative() {
+			return fmt.Errorf("invalid onboarding_daily_cap %q (must be a non-negative integer)", gs.Params.OnboardingDailyCap)
 		}
 	}
 	return nil
