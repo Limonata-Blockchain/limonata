@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
+	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
 	coretypes "github.com/cometbft/cometbft/rpc/core/types"
+	cmttypes "github.com/cometbft/cometbft/types"
 	"github.com/spf13/cobra"
 
 	"github.com/cosmos/cosmos-sdk/client"
@@ -28,6 +31,8 @@ import (
 const (
 	flagEncKeyFile = "enc-key-file"
 	flagShareDir   = "share-dir"
+	// dkgWSSubscriber identifies this daemon's websocket subscription on the node.
+	dkgWSSubscriber = "encmempool-dkg-daemon"
 )
 
 // DkgCmd is the parent for the on-chain validator-DKG node tooling: generate the
@@ -116,11 +121,11 @@ type dkgDaemon struct {
 	encPub   []byte
 	shareDir string
 
-	rounds   map[uint64]*dkgRoundView                        // epoch -> my role/view
-	incoming map[uint64]map[uint64]*threshold.Ciphertext     // epoch -> dealer -> ct addressed to me
-	derived  map[uint64]threshold.Share                      // epoch -> my final share X_m
-	seenDeal map[uint64]bool                                 // epoch -> already broadcast my deal
-	seenSub  map[string]bool                                 // decryptHeight:seq -> already posted a share
+	rounds   map[uint64]*dkgRoundView                    // epoch -> my role/view
+	incoming map[uint64]map[uint64]*threshold.Ciphertext // epoch -> dealer -> ct addressed to me
+	derived  map[uint64]threshold.Share                  // epoch -> my final share X_m
+	seenDeal map[uint64]bool                             // epoch -> already broadcast my deal
+	seenSub  map[string]bool                             // decryptHeight:seq -> already posted a share
 }
 
 type dkgRoundView struct {
@@ -191,23 +196,20 @@ func dkgStartCmd() *cobra.Command {
 				d.acc, hex.EncodeToString(encPub), next, clientCtx.NodeURI)
 
 			poll := time.Duration(pollMs) * time.Millisecond
-			for {
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-				}
-				st, err := node.Status(ctx)
-				if err != nil {
-					time.Sleep(poll)
-					continue
-				}
-				latest := st.SyncInfo.LatestBlockHeight
+
+			// process scans every block in (next..=latest] via BlockResults — the
+			// authoritative source of the FinalizeBlock + tx events the DKG runs on —
+			// and broadcasts whatever this node owes (its dealing / decryption shares).
+			// It advances `next` so no block is scanned twice and, crucially, NONE is
+			// ever skipped even if a wake-up is missed: the loop always closes the gap
+			// up to the latest height. This is the fix for the round that failed when
+			// the old poll-scan fell behind the deal window.
+			process := func(latest int64) {
 				var msgs []sdk.Msg
 				for h := next; h <= latest; h++ {
 					res, err := node.BlockResults(ctx, &h)
 					if err != nil {
-						break
+						break // transient RPC error: retry this height on the next wake
 					}
 					msgs = append(msgs, d.scanBlock(res)...)
 					next = h + 1
@@ -215,17 +217,81 @@ func dkgStartCmd() *cobra.Command {
 				if len(msgs) > 0 {
 					broadcastMsgs(clientCtx, factory, msgs)
 				}
-				time.Sleep(poll)
+			}
+
+			// Catch up to the current head once, then react in REAL TIME to each newly
+			// committed block over a websocket subscription (watch the head), instead
+			// of only waking on a fixed poll interval. Reacting the instant a round
+			// opens is what lets a member reliably land its dealing INSIDE the deal
+			// window on a live multi-node network. A periodic ticker is kept as a
+			// safety net — and is the sole driver if the websocket is unavailable — so
+			// the daemon can never silently fall behind.
+			if st, err := node.Status(ctx); err == nil {
+				process(st.SyncInfo.LatestBlockHeight)
+			}
+			blocks, closeWS := subscribeNewBlocks(ctx, clientCtx.NodeURI)
+			defer closeWS()
+
+			ticker := time.NewTicker(poll)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case ev, ok := <-blocks:
+					if !ok {
+						blocks = nil // websocket closed: fall back to the safety-net ticker
+						continue
+					}
+					if nb, isNB := ev.Data.(cmttypes.EventDataNewBlock); isNB && nb.Block != nil {
+						process(nb.Block.Height)
+					}
+				case <-ticker.C:
+					if st, err := node.Status(ctx); err == nil {
+						process(st.SyncInfo.LatestBlockHeight)
+					}
+				}
 			}
 		},
 	}
 	cmd.Flags().String(flagEncKeyFile, "", "path to this member's DKG enc secret key (from `dkg keygen`)")
 	cmd.Flags().String(flagShareDir, "", "directory to persist derived per-epoch shares (default: home dir)")
-	cmd.Flags().Int(flagPollInterval, 1500, "poll interval in milliseconds")
+	cmd.Flags().Int(flagPollInterval, 1500, "safety-net poll interval in milliseconds (real-time reaction is via a websocket subscription; this is the fallback sweep)")
 	cmd.Flags().Int64(flagLookback, 0, "on start, also scan this many past blocks")
 	_ = cmd.MarkFlagRequired(flagEncKeyFile)
 	flags.AddTxFlagsToCmd(cmd)
 	return cmd
+}
+
+// subscribeNewBlocks opens a websocket to the node and subscribes to committed
+// blocks so the daemon reacts to a round opening in real time rather than on the
+// next poll tick. It degrades GRACEFULLY: on any setup failure it returns a nil
+// channel (which blocks forever in a select, leaving the caller's safety-net ticker
+// as the sole driver) plus a no-op closer, so a node without a reachable websocket
+// still participates via polling instead of the daemon erroring out.
+func subscribeNewBlocks(ctx context.Context, nodeURI string) (<-chan coretypes.ResultEvent, func()) {
+	noop := func() {}
+	c, err := rpchttp.New(nodeURI, "/websocket")
+	if err != nil {
+		fmt.Printf("dkg: websocket unavailable (%v); using poll fallback\n", err)
+		return nil, noop
+	}
+	if err := c.Start(); err != nil {
+		fmt.Printf("dkg: websocket start failed (%v); using poll fallback\n", err)
+		return nil, noop
+	}
+	ch, err := c.Subscribe(ctx, dkgWSSubscriber, cmttypes.EventQueryNewBlock.String())
+	if err != nil {
+		fmt.Printf("dkg: subscribe failed (%v); using poll fallback\n", err)
+		_ = c.Stop()
+		return nil, noop
+	}
+	fmt.Printf("dkg: watching new blocks in real time (websocket)\n")
+	return ch, func() {
+		// best-effort teardown (fresh context: the daemon's ctx is already cancelled).
+		_ = c.UnsubscribeAll(context.Background(), dkgWSSubscriber)
+		_ = c.Stop()
+	}
 }
 
 // scanBlock dispatches on the encmempool DKG events in a block and returns any

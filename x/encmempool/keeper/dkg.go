@@ -80,6 +80,33 @@ func (k Keeper) SetComplaint(ctx context.Context, c types.DkgComplaintRec) error
 	return k.store(ctx).Set(dkgComplaintKey(c.Epoch, c.Against, c.AccuserIndex), mustJSON(c))
 }
 
+// purgeRoundData deletes every stored dealing and complaint for an epoch. It is
+// called on auto-retry so a failed round's now-useless deals/complaints do not
+// accumulate in state across an extended outage. Keys are collected first (a store
+// iterator must not be mutated mid-scan) then deleted — a deterministic operation
+// (the key set is a pure function of committed state). The small DkgRound record is
+// intentionally kept for history/telemetry.
+func (k Keeper) purgeRoundData(ctx context.Context, epoch uint64) {
+	st := k.store(ctx)
+	var keys [][]byte
+	for _, pfx := range [][]byte{
+		concat(types.DkgDealPrefix, u64(epoch)),
+		concat(types.DkgComplaintPrefix, u64(epoch)),
+	} {
+		it, err := st.Iterator(pfx, prefixEnd(pfx))
+		if err != nil {
+			continue
+		}
+		for ; it.Valid(); it.Next() {
+			keys = append(keys, append([]byte(nil), it.Key()...))
+		}
+		it.Close()
+	}
+	for _, key := range keys {
+		_ = st.Delete(key)
+	}
+}
+
 // IterateComplaints visits every stored complaint for an epoch.
 func (k Keeper) IterateComplaints(ctx context.Context, epoch uint64, fn func(types.DkgComplaintRec)) {
 	pfx := concat(types.DkgComplaintPrefix, u64(epoch))
@@ -112,11 +139,15 @@ func (k Keeper) GetActiveKey(ctx context.Context, epoch uint64) (types.ActiveThr
 	return a, true
 }
 
-func (k Keeper) GetCurrentEpoch(ctx context.Context) uint64 { return k.readU64(ctx, types.CurrentEpochKey) }
+func (k Keeper) GetCurrentEpoch(ctx context.Context) uint64 {
+	return k.readU64(ctx, types.CurrentEpochKey)
+}
 func (k Keeper) SetCurrentEpoch(ctx context.Context, e uint64) {
 	_ = k.store(ctx).Set(types.CurrentEpochKey, u64(e))
 }
-func (k Keeper) GetActiveEpoch(ctx context.Context) uint64 { return k.readU64(ctx, types.ActiveEpochKey) }
+func (k Keeper) GetActiveEpoch(ctx context.Context) uint64 {
+	return k.readU64(ctx, types.ActiveEpochKey)
+}
 func (k Keeper) SetActiveEpoch(ctx context.Context, e uint64) {
 	_ = k.store(ctx).Set(types.ActiveEpochKey, u64(e))
 }

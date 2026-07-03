@@ -116,7 +116,7 @@ func Encrypt(pub, msg []byte) (*Ciphertext, error) {
 		return nil, err
 	}
 	var A, shared secp256k1.JacobianPoint
-	secp256k1.ScalarBaseMultNonConst(r, &A) // A = r*G
+	secp256k1.ScalarBaseMultNonConst(r, &A)      // A = r*G
 	secp256k1.ScalarMultNonConst(r, &Y, &shared) // shared = r*Y
 	key := kdf(&shared)
 
@@ -193,13 +193,26 @@ func Recover(shares []*DecryptShare) (*secp256k1.JacobianPoint, error) {
 	return &acc, nil
 }
 
+// NonceSize is the AES-GCM nonce length (bytes) used by Encrypt. Ciphertexts with a
+// nonce of any other length are malformed; Decrypt rejects them with an error rather
+// than letting crypto/cipher panic (which, on the on-chain decrypt path, would halt
+// consensus in BeginBlock).
+const NonceSize = 12
+
 // Decrypt recovers msg from the combined shared secret + ciphertext. Returns an
 // error if the shared secret is wrong (e.g. < t shares) — AES-GCM authentication.
+//
+// It NEVER panics on attacker-controlled ciphertext: an out-of-spec nonce length is
+// rejected up front, because gcm.Open panics (not errors) on a wrong-length nonce and
+// this function is invoked from the deterministic BeginBlock decrypt path.
 func Decrypt(shared *secp256k1.JacobianPoint, ct *Ciphertext) ([]byte, error) {
 	key := kdf(shared)
 	gcm, err := newGCM(key[:])
 	if err != nil {
 		return nil, err
+	}
+	if len(ct.Nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("malformed ciphertext: nonce length %d, want %d", len(ct.Nonce), gcm.NonceSize())
 	}
 	return gcm.Open(nil, ct.Nonce, ct.Body, nil)
 }

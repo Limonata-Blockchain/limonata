@@ -14,6 +14,7 @@ import (
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 
 	"github.com/cosmos/evm/x/encmempool/dkg"
+	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
@@ -96,6 +97,13 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	}
 	if len(msg.A) == 0 || len(msg.Body) == 0 {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing ciphertext (a/body)")
+	}
+	// Reject malformed ciphertexts at ingress. The nonce is attacker-controlled and,
+	// if it reached the BeginBlock decrypt path with a wrong length, AES-GCM would
+	// PANIC (halting consensus). Enforce the exact GCM nonce length here so bad
+	// ciphertexts never enter state; the decrypt path is defended independently too.
+	if len(msg.Nonce) != threshold.NonceSize {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "nonce must be %d bytes, got %d", threshold.NonceSize, len(msg.Nonce))
 	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
 	// Stamp the ciphertext with the DKG epoch whose active key it was encrypted to,

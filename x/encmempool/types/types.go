@@ -26,6 +26,11 @@ type Params struct {
 	DkgComplaintWindow uint64      `json:"dkg_complaint_window"` // blocks for complaints after the deal window
 	DkgThreshold       uint32      `json:"dkg_threshold"`        // t for the DKG; 0 => majority floor(n/2)+1
 	DkgMembers         []DkgMember `json:"dkg_members"`          // genesis-declared member set (operator+account+enc key)
+
+	// --- auto-retry / self-heal (a failed or timed-out round must NEVER leave the
+	// chain permanently keyless; the EndBlocker reopens a fresh round automatically). ---
+	DkgRetryBackoff uint64 `json:"dkg_retry_backoff"` // blocks to wait after a failed round before auto-reopening (>=1 enforced)
+	DkgMaxAttempts  uint64 `json:"dkg_max_attempts"`  // consecutive-failure attempts before emitting a dkg_stalled ALERT (0 = never). NOT a hard stop: retries continue so the chain always converges once >= t members return.
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -33,7 +38,15 @@ type Params struct {
 // x/auth to have seen a pubkey; the ACTIVE member set each round is this list
 // INTERSECTED with the currently-bonded validators (matched by OperatorAddr), which
 // is what drives the Shutter/Penumbra-style re-run when the validator set changes.
-// Production would derive EncPubKey from the validator's registered/consensus key.
+//
+// REMAINING GAP (deferred): deriving EncPubKey from a validator key instead of
+// declaring it. The consensus key is ed25519 (wrong curve for the secp256k1 ECIES
+// used to seal shares), so derivation would key off the operator ACCOUNT's
+// eth_secp256k1 pubkey — which requires (a) wiring an AccountKeeper into this module,
+// (b) a valoper->account lookup, and (c) handling accounts whose pubkey x/auth has
+// not yet seen (never-signed). That is a non-trivial integration with real edge
+// cases, so genesis-declared enc keys are retained here; the auto-derive is left as
+// documented future work rather than destabilize the multi-node hardening.
 type DkgMember struct {
 	OperatorAddr string `json:"operator_addr"` // validator operator address (valoper bech32)
 	AccountAddr  string `json:"account_addr"`  // the member's fee/signer account (bech32) = MsgDkgDeal.dealer
@@ -53,7 +66,7 @@ type RoundMember struct {
 const (
 	DkgStatusOpen   = "open"   // dealing/complaint windows are in progress
 	DkgStatusActive = "active" // finalized successfully; an ActiveThresholdKey was installed
-	DkgStatusFailed = "failed" // |QUAL| < t; the previous active key (if any) is kept
+	DkgStatusFailed = "failed" // |QUAL| < t (or timed out); the EndBlocker auto-reopens a fresh round
 )
 
 // DkgRound is one DKG epoch's on-chain record.
@@ -61,11 +74,15 @@ type DkgRound struct {
 	Epoch             uint64        `json:"epoch"`
 	OpenHeight        uint64        `json:"open_height"`
 	DealDeadline      uint64        `json:"deal_deadline"`      // deals accepted while height <= this
-	ComplaintDeadline uint64        `json:"complaint_deadline"` // finalize runs at height == this
+	ComplaintDeadline uint64        `json:"complaint_deadline"` // finalize runs at height >= this
 	Members           []RoundMember `json:"members"`
 	Threshold         uint32        `json:"threshold"`
 	MembersHash       []byte        `json:"members_hash"` // hash of the active operator set (re-run trigger)
 	Status            string        `json:"status"`
+	// Attempt is the 1-based try count within the CURRENT convergence campaign: it is
+	// 1 for a first run or a fresh campaign after a membership change, and increments
+	// on every auto-retry of a failed round. It resets to 1 once a key is installed.
+	Attempt uint64 `json:"attempt"`
 }
 
 // DkgStoredEncShare is one encrypted point-to-point share as stored on chain.
@@ -154,8 +171,13 @@ type GenesisState struct {
 func DefaultParams() Params {
 	return Params{
 		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: false, DecryptDelay: 1,
-		// DKG is OFF by default; when enabled these give sane windows.
-		DkgEnabled: false, DkgDealWindow: 5, DkgComplaintWindow: 3,
+		// DKG is OFF by default. When enabled, these windows are sized for a REAL
+		// multi-node network (independent validators over p2p + a daemon that must
+		// observe the open, build a dealing, and land the tx) rather than the tiny
+		// single-node smoke-test windows. At ~2s blocks: deal ~40s, complaint ~20s,
+		// retry backoff ~10s. All are governance-tunable per deployment.
+		DkgEnabled: false, DkgDealWindow: 20, DkgComplaintWindow: 10,
+		DkgRetryBackoff: 5, DkgMaxAttempts: 8,
 	}
 }
 

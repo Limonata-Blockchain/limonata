@@ -3,6 +3,7 @@ package keeper
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -78,6 +79,13 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 // cur, in deterministic (seq) order. PROTOTYPE: it emits the decrypted body as an
 // event (proving decryption) rather than re-injecting it into the EVM pipeline.
 //
+// REMAINING GAP (deferred): re-injecting the decrypted plaintext (an RLP EVM tx) into
+// EVM execution. That requires decoding the tx, running it through x/vm's state
+// transition + ante/gas/nonce accounting inside BeginBlock in this deterministic
+// order — a large, halt-risk pipeline change. It is intentionally NOT done here so
+// the multi-node reliability hardening stays build-stable; the decrypted-body event
+// is the stable seam a future EVM-injection step plugs into.
+//
 // On the DKG path (e.Epoch > 0) it routes through dkg.RecoverVerified: each keyper's
 // partial is checked against its public share key (recomputed from the epoch's DKG
 // commitments) via the stored DLEQ proof, so a malicious keyper's bad partial is
@@ -89,36 +97,50 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 
 	order := uint64(0)
 	for _, e := range matured {
-		shares := k.CollectShares(ctx, e.DecryptHeight, e.Seq)
-		shared, need, err := k.recoverSharedSecret(ctx, p, e, shares)
-		switch {
-		case err == errNotEnoughShares:
-			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_missed",
-				sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-				sdk.NewAttribute("have", strconv.Itoa(len(shares))),
-				sdk.NewAttribute("need", strconv.Itoa(need))))
-		case err != nil:
-			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
-				sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-				sdk.NewAttribute("reason", err.Error())))
-		default:
-			plaintext, derr := threshold.Decrypt(shared, &threshold.Ciphertext{A: e.A, Nonce: e.Nonce, Body: e.Body})
-			if derr == nil {
-				ctx.EventManager().EmitEvent(sdk.NewEvent(
-					"encmempool_decrypted",
-					sdk.NewAttribute("submitter", e.Submitter),
+		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a
+		// single malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an
+		// out-of-spec nonce) would halt the whole chain. Process each ciphertext inside
+		// a recover guard; any panic is contained and reported, and the ciphertext is
+		// GC'd below so a bad entry cannot wedge the chain into a crash loop.
+		func(e types.EncTx) {
+			defer func() {
+				if r := recover(); r != nil {
+					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
+						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+						sdk.NewAttribute("reason", fmt.Sprintf("panic recovered: %v", r))))
+				}
+			}()
+			shares := k.CollectShares(ctx, e.DecryptHeight, e.Seq)
+			shared, need, err := k.recoverSharedSecret(ctx, p, e, shares)
+			switch {
+			case err == errNotEnoughShares:
+				ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_missed",
 					sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-					sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
-					sdk.NewAttribute("execution_order", strconv.FormatUint(order, 10)),
-					sdk.NewAttribute("plaintext_hex", hex.EncodeToString(plaintext)),
-				))
-				order++
-			} else {
+					sdk.NewAttribute("have", strconv.Itoa(len(shares))),
+					sdk.NewAttribute("need", strconv.Itoa(need))))
+			case err != nil:
 				ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
 					sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-					sdk.NewAttribute("reason", derr.Error())))
+					sdk.NewAttribute("reason", err.Error())))
+			default:
+				plaintext, derr := threshold.Decrypt(shared, &threshold.Ciphertext{A: e.A, Nonce: e.Nonce, Body: e.Body})
+				if derr == nil {
+					ctx.EventManager().EmitEvent(sdk.NewEvent(
+						"encmempool_decrypted",
+						sdk.NewAttribute("submitter", e.Submitter),
+						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+						sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
+						sdk.NewAttribute("execution_order", strconv.FormatUint(order, 10)),
+						sdk.NewAttribute("plaintext_hex", hex.EncodeToString(plaintext)),
+					))
+					order++
+				} else {
+					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
+						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+						sdk.NewAttribute("reason", derr.Error())))
+				}
 			}
-		}
+		}(e)
 		// GC the ciphertext + its shares regardless (bounded state).
 		k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
 		k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
