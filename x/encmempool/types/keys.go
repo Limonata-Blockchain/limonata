@@ -21,4 +21,12 @@ var (
 	EncSeqKey      = []byte{0x05} // -> uint64 (big-endian) monotonic enc-tx counter
 	EncTxPrefix    = []byte{0x06} // 0x06 | be(decryptHeight) | be(seq) -> JSON EncTx
 	EncSharePrefix = []byte{0x07} // 0x07 | be(decryptHeight) | be(seq) | keyper -> JSON EncShare
+
+	// --- on-chain validator DKG (epoch = uint64 round id) ---
+	DkgRoundPrefix     = []byte{0x10} // 0x10 | be(epoch) -> JSON DkgRound
+	DkgDealPrefix      = []byte{0x11} // 0x11 | be(epoch) | be(dealerIndex) -> JSON Dealing
+	DkgComplaintPrefix = []byte{0x12} // 0x12 | be(epoch) | be(against) | be(accuser) -> JSON DkgComplaint
+	ActiveKeyPrefix    = []byte{0x13} // 0x13 | be(epoch) -> JSON ActiveThresholdKey
+	CurrentEpochKey    = []byte{0x14} // -> uint64 (be): latest round opened
+	ActiveEpochKey     = []byte{0x15} // -> uint64 (be): epoch of the currently-serving active key
 )

@@ -31,6 +31,15 @@ service Msg {
   // SubmitDecryptionShare lets an authorized keyper publish its decryption share
   // for an encrypted tx; BeginBlock decrypts once >= t shares are present.
   rpc SubmitDecryptionShare(MsgSubmitDecryptionShare) returns (MsgSubmitDecryptionShareResponse);
+
+  // DkgDeal posts a validator/dealer's on-chain DKG dealing (Feldman commitments
+  // plus each member's share encrypted to that member) for the open epoch.
+  rpc DkgDeal(MsgDkgDeal) returns (MsgDkgDealResponse);
+
+  // DkgComplaint posts a JUSTIFIED complaint that a dealer sent the accuser a
+  // share inconsistent with its public commitments; a valid complaint disqualifies
+  // the dealer at finalize.
+  rpc DkgComplaint(MsgDkgComplaint) returns (MsgDkgComplaintResponse);
 }
 
 // MsgCommitTx records sha256(reveal_tx || salt) at the current block height.
@@ -100,6 +109,55 @@ message MsgSubmitDecryptionShare {
   uint64 seq = 3;
   uint64 index = 4; // keyper share index (1..n)
   bytes d = 5;      // compressed x_i*A
+  // proof is the serialized Chaum-Pedersen DLEQ (C||Z, 64 bytes) binding d to the
+  // keyper's public share key Y_index = x_i*G from the DKG public commitments, so
+  // the decrypt path routes through dkg.RecoverVerified (a bad share is dropped
+  // WITH ATTRIBUTION instead of silently poisoning the Lagrange combine). Empty on
+  // the legacy trusted-setup path.
+  bytes proof = 6;
 }
 
 message MsgSubmitDecryptionShareResponse {}
+
+// DkgEncShare is one member's point-to-point share, ENCRYPTED to that member's
+// registered encryption key via the threshold hybrid scheme (used here as ECIES).
+// Only the member holding the matching secret can open Body; the plaintext share
+// therefore never appears on chain.
+message DkgEncShare {
+  uint64 member_index = 1; // recipient member index (1..n)
+  bytes a = 2;             // ciphertext component r*G (compressed)
+  bytes nonce = 3;         // AES-GCM nonce
+  bytes body = 4;          // AES-256-GCM(sealed share scalar, 32 bytes)
+}
+
+// MsgDkgDeal is dealer's on-chain DKG dealing for the open epoch: the PUBLIC
+// Feldman commitments C_{i,0..t-1} and one encrypted share per member.
+message MsgDkgDeal {
+  option (cosmos.msg.v1.signer) = "dealer";
+  option (amino.name) = "cosmos/evm/encmempool/MsgDkgDeal";
+
+  string dealer = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  uint64 epoch = 2;
+  repeated bytes commitments = 3;        // compressed C_{i,j}, exactly t entries
+  repeated DkgEncShare enc_shares = 4;   // one per member
+}
+
+message MsgDkgDealResponse {}
+
+// MsgDkgComplaint is a JUSTIFIED complaint: the accuser reveals the ECDH shared
+// point it decrypted for the disputed share AND a DLEQ proof that the shared point
+// was formed with the accuser's OWN encryption secret (so it cannot frame an honest
+// dealer). The chain re-derives the plaintext share and checks it against the
+// dealer's public commitments; if it fails, the dealer is disqualified.
+message MsgDkgComplaint {
+  option (cosmos.msg.v1.signer) = "accuser";
+  option (amino.name) = "cosmos/evm/encmempool/MsgDkgComplaint";
+
+  string accuser = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  uint64 epoch = 2;
+  uint64 against = 3;       // the accused dealer's member index
+  bytes shared_point = 4;   // compressed S = accuser_enc_priv * A_enc (the ECDH secret)
+  bytes dleq_proof = 5;     // C||Z proving S was formed with the accuser's enc secret
+}
+
+message MsgDkgComplaintResponse {}

@@ -3,7 +3,9 @@ package keeper
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"strconv"
 
 	corestore "cosmossdk.io/core/store"
 
@@ -11,11 +13,16 @@ import (
 )
 
 // Keeper for x/encmempool. State is plain JSON-in-store (no proto), like x/contest.
+// stakingKeeper is read-only and only consulted by the DKG EndBlocker to learn the
+// bonded validator set (may be nil in unit tests that never exercise that path).
 type Keeper struct {
-	storeService corestore.KVStoreService
+	storeService  corestore.KVStoreService
+	stakingKeeper types.StakingKeeper
 }
 
-func NewKeeper(ss corestore.KVStoreService) Keeper { return Keeper{storeService: ss} }
+func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper) Keeper {
+	return Keeper{storeService: ss, stakingKeeper: sk}
+}
 
 func (k Keeper) store(ctx context.Context) corestore.KVStore { return k.storeService.OpenKVStore(ctx) }
 
@@ -109,14 +116,26 @@ func (k Keeper) nextEncSeq(ctx context.Context) uint64 {
 
 // SubmitEncTx assigns a seq + decrypt height and stores the ciphertext, ordered by
 // (decryptHeight, seq). The order is fixed here, before any body can be read.
-func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight, decryptDelay uint64, a, nonce, body []byte) types.EncTx {
+func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight, decryptDelay uint64, a, nonce, body []byte, epoch uint64) types.EncTx {
 	e := types.EncTx{
 		Submitter: submitter, SubmitHeight: submitHeight,
 		DecryptHeight: submitHeight + decryptDelay, Seq: k.nextEncSeq(ctx),
-		A: a, Nonce: nonce, Body: body,
+		A: a, Nonce: nonce, Body: body, Epoch: epoch,
 	}
 	_ = k.store(ctx).Set(encTxKey(e.DecryptHeight, e.Seq), mustJSON(e))
 	return e
+}
+
+func (k Keeper) GetEncTx(ctx context.Context, decryptHeight, seq uint64) (types.EncTx, bool) {
+	bz, err := k.store(ctx).Get(encTxKey(decryptHeight, seq))
+	if err != nil || bz == nil {
+		return types.EncTx{}, false
+	}
+	var e types.EncTx
+	if json.Unmarshal(bz, &e) != nil {
+		return types.EncTx{}, false
+	}
+	return e, true
 }
 
 func (k Keeper) DeleteEncTx(ctx context.Context, decryptHeight, seq uint64) {
@@ -219,6 +238,10 @@ func mustJSON(v any) []byte {
 	bz, _ := json.Marshal(v)
 	return bz
 }
+
+func u64str(v uint64) string { return strconv.FormatUint(v, 10) }
+
+func hexstr(b []byte) string { return hex.EncodeToString(b) }
 
 func concat(parts ...[]byte) []byte {
 	n := 0

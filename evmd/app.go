@@ -634,7 +634,9 @@ func NewExampleApp(
 	app.ContestKeeper = contestkeeper.NewKeeper(runtime.NewKVStoreService(keys[contesttypes.StoreKey]))
 	// NOTE: app.ValGrantKeeper is instantiated earlier (before the EVM keeper) so
 	// it can be injected into the valgrant precompile via DefaultStaticPrecompiles.
-	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]))
+	// StakingKeeper (read-only) lets the encmempool DKG EndBlocker learn the bonded
+	// validator set (the keyper set) and re-run the DKG when it changes.
+	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]), app.StakingKeeper)
 	app.GasSponsorKeeper = gassponsorkeeper.NewKeeper(
 		runtime.NewKVStoreService(keys[gassponsortypes.StoreKey]),
 		app.ContestKeeper,

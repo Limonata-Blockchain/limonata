@@ -390,6 +390,12 @@ type MsgSubmitDecryptionShare struct {
 	Seq           uint64 `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
 	Index         uint64 `protobuf:"varint,4,opt,name=index,proto3" json:"index,omitempty"`
 	D             []byte `protobuf:"bytes,5,opt,name=d,proto3" json:"d,omitempty"`
+	// proof is the serialized Chaum-Pedersen DLEQ (C||Z, 64 bytes) binding d to the
+	// keyper's public share key Y_index = x_i*G from the DKG public commitments, so
+	// the decrypt path routes through dkg.RecoverVerified (a bad share is dropped
+	// WITH ATTRIBUTION instead of silently poisoning the Lagrange combine). Empty on
+	// the legacy trusted-setup path.
+	Proof []byte `protobuf:"bytes,6,opt,name=proof,proto3" json:"proof,omitempty"`
 }
 
 func (m *MsgSubmitDecryptionShare) Reset()         { *m = MsgSubmitDecryptionShare{} }
@@ -460,6 +466,13 @@ func (m *MsgSubmitDecryptionShare) GetD() []byte {
 	return nil
 }
 
+func (m *MsgSubmitDecryptionShare) GetProof() []byte {
+	if m != nil {
+		return m.Proof
+	}
+	return nil
+}
+
 type MsgSubmitDecryptionShareResponse struct {
 }
 
@@ -496,6 +509,301 @@ func (m *MsgSubmitDecryptionShareResponse) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_MsgSubmitDecryptionShareResponse proto.InternalMessageInfo
 
+// DkgEncShare is one member's point-to-point share, ENCRYPTED to that member's
+// registered encryption key via the threshold hybrid scheme (used here as ECIES).
+// Only the member holding the matching secret can open Body; the plaintext share
+// therefore never appears on chain.
+type DkgEncShare struct {
+	MemberIndex uint64 `protobuf:"varint,1,opt,name=member_index,json=memberIndex,proto3" json:"member_index,omitempty"`
+	A           []byte `protobuf:"bytes,2,opt,name=a,proto3" json:"a,omitempty"`
+	Nonce       []byte `protobuf:"bytes,3,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	Body        []byte `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+}
+
+func (m *DkgEncShare) Reset()         { *m = DkgEncShare{} }
+func (m *DkgEncShare) String() string { return proto.CompactTextString(m) }
+func (*DkgEncShare) ProtoMessage()    {}
+func (*DkgEncShare) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{8}
+}
+func (m *DkgEncShare) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *DkgEncShare) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_DkgEncShare.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *DkgEncShare) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_DkgEncShare.Merge(m, src)
+}
+func (m *DkgEncShare) XXX_Size() int {
+	return m.Size()
+}
+func (m *DkgEncShare) XXX_DiscardUnknown() {
+	xxx_messageInfo_DkgEncShare.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_DkgEncShare proto.InternalMessageInfo
+
+func (m *DkgEncShare) GetMemberIndex() uint64 {
+	if m != nil {
+		return m.MemberIndex
+	}
+	return 0
+}
+
+func (m *DkgEncShare) GetA() []byte {
+	if m != nil {
+		return m.A
+	}
+	return nil
+}
+
+func (m *DkgEncShare) GetNonce() []byte {
+	if m != nil {
+		return m.Nonce
+	}
+	return nil
+}
+
+func (m *DkgEncShare) GetBody() []byte {
+	if m != nil {
+		return m.Body
+	}
+	return nil
+}
+
+// MsgDkgDeal is dealer's on-chain DKG dealing for the open epoch: the PUBLIC
+// Feldman commitments C_{i,0..t-1} and one encrypted share per member.
+type MsgDkgDeal struct {
+	Dealer      string         `protobuf:"bytes,1,opt,name=dealer,proto3" json:"dealer,omitempty"`
+	Epoch       uint64         `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Commitments [][]byte       `protobuf:"bytes,3,rep,name=commitments,proto3" json:"commitments,omitempty"`
+	EncShares   []*DkgEncShare `protobuf:"bytes,4,rep,name=enc_shares,json=encShares,proto3" json:"enc_shares,omitempty"`
+}
+
+func (m *MsgDkgDeal) Reset()         { *m = MsgDkgDeal{} }
+func (m *MsgDkgDeal) String() string { return proto.CompactTextString(m) }
+func (*MsgDkgDeal) ProtoMessage()    {}
+func (*MsgDkgDeal) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{9}
+}
+func (m *MsgDkgDeal) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgDkgDeal) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgDkgDeal.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgDkgDeal) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgDkgDeal.Merge(m, src)
+}
+func (m *MsgDkgDeal) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgDkgDeal) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgDkgDeal.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgDkgDeal proto.InternalMessageInfo
+
+func (m *MsgDkgDeal) GetDealer() string {
+	if m != nil {
+		return m.Dealer
+	}
+	return ""
+}
+
+func (m *MsgDkgDeal) GetEpoch() uint64 {
+	if m != nil {
+		return m.Epoch
+	}
+	return 0
+}
+
+func (m *MsgDkgDeal) GetCommitments() [][]byte {
+	if m != nil {
+		return m.Commitments
+	}
+	return nil
+}
+
+func (m *MsgDkgDeal) GetEncShares() []*DkgEncShare {
+	if m != nil {
+		return m.EncShares
+	}
+	return nil
+}
+
+type MsgDkgDealResponse struct {
+}
+
+func (m *MsgDkgDealResponse) Reset()         { *m = MsgDkgDealResponse{} }
+func (m *MsgDkgDealResponse) String() string { return proto.CompactTextString(m) }
+func (*MsgDkgDealResponse) ProtoMessage()    {}
+func (*MsgDkgDealResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{10}
+}
+func (m *MsgDkgDealResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgDkgDealResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgDkgDealResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgDkgDealResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgDkgDealResponse.Merge(m, src)
+}
+func (m *MsgDkgDealResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgDkgDealResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgDkgDealResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgDkgDealResponse proto.InternalMessageInfo
+
+// MsgDkgComplaint is a JUSTIFIED complaint: the accuser reveals the ECDH shared
+// point it decrypted for the disputed share AND a DLEQ proof that the shared point
+// was formed with the accuser's OWN encryption secret (so it cannot frame an honest
+// dealer). The chain re-derives the plaintext share and checks it against the
+// dealer's public commitments; if it fails, the dealer is disqualified.
+type MsgDkgComplaint struct {
+	Accuser     string `protobuf:"bytes,1,opt,name=accuser,proto3" json:"accuser,omitempty"`
+	Epoch       uint64 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Against     uint64 `protobuf:"varint,3,opt,name=against,proto3" json:"against,omitempty"`
+	SharedPoint []byte `protobuf:"bytes,4,opt,name=shared_point,json=sharedPoint,proto3" json:"shared_point,omitempty"`
+	DleqProof   []byte `protobuf:"bytes,5,opt,name=dleq_proof,json=dleqProof,proto3" json:"dleq_proof,omitempty"`
+}
+
+func (m *MsgDkgComplaint) Reset()         { *m = MsgDkgComplaint{} }
+func (m *MsgDkgComplaint) String() string { return proto.CompactTextString(m) }
+func (*MsgDkgComplaint) ProtoMessage()    {}
+func (*MsgDkgComplaint) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{11}
+}
+func (m *MsgDkgComplaint) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgDkgComplaint) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgDkgComplaint.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgDkgComplaint) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgDkgComplaint.Merge(m, src)
+}
+func (m *MsgDkgComplaint) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgDkgComplaint) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgDkgComplaint.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgDkgComplaint proto.InternalMessageInfo
+
+func (m *MsgDkgComplaint) GetAccuser() string {
+	if m != nil {
+		return m.Accuser
+	}
+	return ""
+}
+
+func (m *MsgDkgComplaint) GetEpoch() uint64 {
+	if m != nil {
+		return m.Epoch
+	}
+	return 0
+}
+
+func (m *MsgDkgComplaint) GetAgainst() uint64 {
+	if m != nil {
+		return m.Against
+	}
+	return 0
+}
+
+func (m *MsgDkgComplaint) GetSharedPoint() []byte {
+	if m != nil {
+		return m.SharedPoint
+	}
+	return nil
+}
+
+func (m *MsgDkgComplaint) GetDleqProof() []byte {
+	if m != nil {
+		return m.DleqProof
+	}
+	return nil
+}
+
+type MsgDkgComplaintResponse struct {
+}
+
+func (m *MsgDkgComplaintResponse) Reset()         { *m = MsgDkgComplaintResponse{} }
+func (m *MsgDkgComplaintResponse) String() string { return proto.CompactTextString(m) }
+func (*MsgDkgComplaintResponse) ProtoMessage()    {}
+func (*MsgDkgComplaintResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_ec253a7da7cb1f1f, []int{12}
+}
+func (m *MsgDkgComplaintResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *MsgDkgComplaintResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_MsgDkgComplaintResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *MsgDkgComplaintResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_MsgDkgComplaintResponse.Merge(m, src)
+}
+func (m *MsgDkgComplaintResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *MsgDkgComplaintResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_MsgDkgComplaintResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_MsgDkgComplaintResponse proto.InternalMessageInfo
+
 func init() {
 	proto.RegisterType((*MsgCommitTx)(nil), "cosmos.evm.encmempool.v1.MsgCommitTx")
 	proto.RegisterType((*MsgCommitTxResponse)(nil), "cosmos.evm.encmempool.v1.MsgCommitTxResponse")
@@ -505,53 +813,74 @@ func init() {
 	proto.RegisterType((*MsgSubmitEncryptedResponse)(nil), "cosmos.evm.encmempool.v1.MsgSubmitEncryptedResponse")
 	proto.RegisterType((*MsgSubmitDecryptionShare)(nil), "cosmos.evm.encmempool.v1.MsgSubmitDecryptionShare")
 	proto.RegisterType((*MsgSubmitDecryptionShareResponse)(nil), "cosmos.evm.encmempool.v1.MsgSubmitDecryptionShareResponse")
+	proto.RegisterType((*DkgEncShare)(nil), "cosmos.evm.encmempool.v1.DkgEncShare")
+	proto.RegisterType((*MsgDkgDeal)(nil), "cosmos.evm.encmempool.v1.MsgDkgDeal")
+	proto.RegisterType((*MsgDkgDealResponse)(nil), "cosmos.evm.encmempool.v1.MsgDkgDealResponse")
+	proto.RegisterType((*MsgDkgComplaint)(nil), "cosmos.evm.encmempool.v1.MsgDkgComplaint")
+	proto.RegisterType((*MsgDkgComplaintResponse)(nil), "cosmos.evm.encmempool.v1.MsgDkgComplaintResponse")
 }
 
 func init() { proto.RegisterFile("cosmos/evm/encmempool/v1/tx.proto", fileDescriptor_ec253a7da7cb1f1f) }
 
 var fileDescriptor_ec253a7da7cb1f1f = []byte{
-	// 647 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x9c, 0x55, 0xb1, 0x6f, 0xd3, 0x4e,
-	0x18, 0xed, 0x35, 0x49, 0xd5, 0x7e, 0x4d, 0x7f, 0x3f, 0x38, 0x52, 0x61, 0x8c, 0x14, 0x8a, 0x51,
-	0xa5, 0xa8, 0xa2, 0x36, 0x2d, 0x88, 0x21, 0x48, 0x48, 0x14, 0x90, 0x18, 0xe8, 0xe2, 0xc2, 0xc2,
-	0xd2, 0x3a, 0xf1, 0xc9, 0xb6, 0xe8, 0xf9, 0x8c, 0xef, 0x1a, 0x25, 0x1b, 0x62, 0x41, 0x62, 0x42,
-	0xe2, 0x1f, 0xe9, 0xc0, 0x3f, 0xc0, 0xc6, 0x58, 0x98, 0x10, 0x13, 0x6a, 0x87, 0x8a, 0xff, 0x02,
-	0xf9, 0xce, 0x76, 0x8d, 0x5b, 0xb7, 0x09, 0x4b, 0x74, 0xf7, 0xdd, 0xbb, 0xef, 0x7d, 0xef, 0xf9,
-	0xd9, 0x81, 0x9b, 0x7d, 0xc6, 0x29, 0xe3, 0x16, 0x19, 0x50, 0x8b, 0x84, 0x7d, 0x4a, 0x68, 0xc4,
-	0xd8, 0xae, 0x35, 0x58, 0xb3, 0xc4, 0xd0, 0x8c, 0x62, 0x26, 0x18, 0xd6, 0x14, 0xc4, 0x24, 0x03,
-	0x6a, 0x9e, 0x40, 0xcc, 0xc1, 0x9a, 0x7e, 0xd9, 0xa1, 0x41, 0xc8, 0x2c, 0xf9, 0xab, 0xc0, 0xfa,
-	0xd5, 0xb4, 0x1f, 0xe5, 0x5e, 0xd2, 0x84, 0x72, 0x2f, 0x3d, 0xb8, 0xa6, 0x0e, 0xb6, 0xe5, 0xce,
-	0x4a, 0x5b, 0xaa, 0xa3, 0x96, 0xc7, 0x3c, 0xa6, 0xea, 0xc9, 0x4a, 0x55, 0x8d, 0x4f, 0x08, 0xe6,
-	0x37, 0xb9, 0xf7, 0x98, 0x51, 0x1a, 0x88, 0x17, 0x43, 0x7c, 0x07, 0x66, 0x38, 0x09, 0x5d, 0x12,
-	0x6b, 0x68, 0x09, 0x75, 0xe6, 0x36, 0xb4, 0xef, 0x9f, 0x57, 0x5b, 0x69, 0x9f, 0x47, 0xae, 0x1b,
-	0x13, 0xce, 0xb7, 0x44, 0x1c, 0x84, 0x9e, 0x9d, 0xe2, 0xf0, 0x0d, 0x98, 0xef, 0xcb, 0xdb, 0xdb,
-	0xbe, 0xc3, 0x7d, 0x6d, 0x7a, 0x09, 0x75, 0x9a, 0x36, 0xa8, 0xd2, 0x33, 0x87, 0xfb, 0xdd, 0xb5,
-	0x77, 0xc7, 0xfb, 0x2b, 0x29, 0xfa, 0xc3, 0xf1, 0xfe, 0x4a, 0x85, 0x19, 0x85, 0x29, 0x8c, 0xe7,
-	0x70, 0xa5, 0xb0, 0xb5, 0x09, 0x8f, 0x58, 0xc8, 0x09, 0xbe, 0x05, 0x0b, 0x19, 0x15, 0x09, 0x3c,
-	0x5f, 0xc8, 0x19, 0xeb, 0x76, 0x33, 0x25, 0x93, 0x35, 0x7c, 0x09, 0x6a, 0x9c, 0xbc, 0x91, 0x73,
-	0xd4, 0xed, 0x64, 0x69, 0xfc, 0x54, 0x1a, 0x6d, 0x32, 0x20, 0xce, 0xee, 0x3f, 0x69, 0x3c, 0x45,
-	0x3c, 0x5d, 0x4d, 0x5c, 0xcb, 0x89, 0xf1, 0x75, 0x98, 0x8b, 0x25, 0xe9, 0xb6, 0x18, 0x6a, 0x75,
-	0x69, 0xcc, 0x6c, 0x9c, 0x4d, 0x81, 0xa1, 0xce, 0x9d, 0x5d, 0xa1, 0x35, 0x64, 0x5d, 0xae, 0x27,
-	0xb0, 0x2a, 0x13, 0x63, 0x2c, 0x4a, 0xab, 0xb2, 0x6d, 0x66, 0x95, 0xf1, 0x05, 0x01, 0xde, 0xe4,
-	0xde, 0xd6, 0x5e, 0x8f, 0x06, 0xe2, 0x69, 0xd8, 0x8f, 0x47, 0x91, 0x20, 0x2e, 0xbe, 0x0f, 0x73,
-	0x5c, 0x96, 0xc4, 0x18, 0xea, 0x4f, 0xa0, 0xb8, 0x09, 0xc8, 0x49, 0x1f, 0x2d, 0x72, 0x70, 0x0b,
-	0x1a, 0x21, 0x0b, 0xfb, 0x44, 0x6a, 0x6d, 0xda, 0x6a, 0x93, 0x08, 0xea, 0x31, 0x77, 0x94, 0x0a,
-	0x95, 0xeb, 0xee, 0x83, 0x44, 0xd0, 0x49, 0x9f, 0x44, 0x53, 0xa7, 0x52, 0x53, 0x69, 0x58, 0xe3,
-	0x25, 0xe8, 0xa7, 0xab, 0x79, 0x18, 0x96, 0xe1, 0x3f, 0x97, 0xc8, 0xe2, 0xdf, 0x69, 0x58, 0x48,
-	0xab, 0x95, 0x71, 0xf8, 0x8d, 0x40, 0xcb, 0xfb, 0x3e, 0x51, 0xe0, 0x80, 0x85, 0x5b, 0xbe, 0x13,
-	0x93, 0x24, 0x1b, 0xaf, 0xc9, 0x28, 0x1a, 0x27, 0x1b, 0x0a, 0x77, 0xc6, 0x1c, 0xd3, 0xe7, 0xcc,
-	0x51, 0x48, 0x47, 0x0b, 0x1a, 0x41, 0xe8, 0x12, 0x95, 0x8c, 0xba, 0xad, 0x36, 0x89, 0xd3, 0x6e,
-	0x9a, 0x09, 0xe4, 0x76, 0x1f, 0xca, 0x40, 0x28, 0xa6, 0xc4, 0x3c, 0xf3, 0x02, 0xf3, 0x4a, 0x72,
-	0x0c, 0x03, 0x96, 0xaa, 0xce, 0x32, 0x23, 0xd7, 0xbf, 0xd5, 0xa0, 0xb6, 0xc9, 0x3d, 0xbc, 0x03,
-	0xb3, 0xf9, 0x67, 0x60, 0xd9, 0xac, 0xfa, 0x1c, 0x99, 0x85, 0x17, 0x53, 0x5f, 0x1d, 0x0b, 0x96,
-	0x3f, 0xb2, 0x1d, 0x98, 0xcd, 0x5f, 0xc2, 0xf3, 0x19, 0x32, 0xd8, 0x05, 0x0c, 0xe5, 0xd8, 0xe3,
-	0x3d, 0xf8, 0xbf, 0x1c, 0xf9, 0xdb, 0xe7, 0x76, 0x28, 0xa1, 0xf5, 0x7b, 0x93, 0xa0, 0x73, 0xda,
-	0xf7, 0x08, 0x16, 0xcf, 0xce, 0xd3, 0xfa, 0x18, 0xfd, 0x4a, 0x77, 0xf4, 0xee, 0xe4, 0x77, 0xb2,
-	0x49, 0xf4, 0xc6, 0xdb, 0xe3, 0xfd, 0x15, 0xb4, 0xb1, 0xf1, 0xf5, 0xb0, 0x8d, 0x0e, 0x0e, 0xdb,
-	0xe8, 0xd7, 0x61, 0x1b, 0x7d, 0x3c, 0x6a, 0x4f, 0x1d, 0x1c, 0xb5, 0xa7, 0x7e, 0x1c, 0xb5, 0xa7,
-	0x5e, 0x75, 0xbc, 0x40, 0xf8, 0x7b, 0x3d, 0xb3, 0xcf, 0xa8, 0x55, 0x08, 0xd3, 0xb0, 0x18, 0x27,
-	0x31, 0x8a, 0x08, 0xef, 0xcd, 0xc8, 0x7f, 0x88, 0xbb, 0x7f, 0x02, 0x00, 0x00, 0xff, 0xff, 0xe4,
-	0x61, 0x5f, 0x9d, 0xbd, 0x06, 0x00, 0x00,
+	// 911 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x9c, 0x56, 0x4f, 0x6f, 0x1b, 0x45,
+	0x14, 0xcf, 0xc4, 0x76, 0x12, 0x3f, 0xbb, 0x14, 0x06, 0x57, 0xdd, 0x2e, 0xc2, 0xb8, 0x0b, 0x91,
+	0x4c, 0xd4, 0xda, 0x4d, 0x40, 0x3d, 0x18, 0x09, 0x89, 0xd4, 0x95, 0x40, 0x22, 0x52, 0xb5, 0x81,
+	0x0b, 0x12, 0x72, 0xd7, 0xbb, 0xc3, 0x7a, 0x15, 0xcf, 0xcc, 0x76, 0x67, 0x62, 0x25, 0x37, 0xc4,
+	0x05, 0x89, 0x13, 0x12, 0x77, 0x3e, 0x43, 0x0e, 0x7c, 0x01, 0x6e, 0x1c, 0x2b, 0x4e, 0x88, 0x13,
+	0x4a, 0x0e, 0xb9, 0xc1, 0x47, 0xa0, 0x9a, 0x3f, 0xbb, 0x71, 0xdd, 0xda, 0x71, 0x72, 0xb1, 0xe6,
+	0xfd, 0xe6, 0x37, 0xef, 0xcf, 0xef, 0xbd, 0x99, 0x35, 0xdc, 0x0d, 0xb9, 0xa0, 0x5c, 0x74, 0xc9,
+	0x84, 0x76, 0x09, 0x0b, 0x29, 0xa1, 0x29, 0xe7, 0xe3, 0xee, 0x64, 0xbb, 0x2b, 0x8f, 0x3a, 0x69,
+	0xc6, 0x25, 0xc7, 0x8e, 0xa1, 0x74, 0xc8, 0x84, 0x76, 0x2e, 0x28, 0x9d, 0xc9, 0xb6, 0xfb, 0x56,
+	0x40, 0x13, 0xc6, 0xbb, 0xfa, 0xd7, 0x90, 0xdd, 0xdb, 0xd6, 0x1f, 0x15, 0xb1, 0x72, 0x42, 0x45,
+	0x6c, 0x37, 0xee, 0x98, 0x8d, 0x81, 0xb6, 0xba, 0xd6, 0xa5, 0xd9, 0x6a, 0xc4, 0x3c, 0xe6, 0x06,
+	0x57, 0x2b, 0x83, 0x7a, 0xbf, 0x20, 0xa8, 0xed, 0x89, 0xf8, 0x11, 0xa7, 0x34, 0x91, 0x5f, 0x1d,
+	0xe1, 0x07, 0xb0, 0x26, 0x08, 0x8b, 0x48, 0xe6, 0xa0, 0x16, 0x6a, 0x57, 0x77, 0x9d, 0x3f, 0x7f,
+	0xbb, 0xdf, 0xb0, 0x7e, 0x3e, 0x8b, 0xa2, 0x8c, 0x08, 0xb1, 0x2f, 0xb3, 0x84, 0xc5, 0xbe, 0xe5,
+	0xe1, 0xf7, 0xa0, 0x16, 0xea, 0xd3, 0x83, 0x51, 0x20, 0x46, 0xce, 0x6a, 0x0b, 0xb5, 0xeb, 0x3e,
+	0x18, 0xe8, 0xf3, 0x40, 0x8c, 0x7a, 0xdb, 0x3f, 0x9c, 0x9f, 0x6c, 0x59, 0xf6, 0x4f, 0xe7, 0x27,
+	0x5b, 0x73, 0xc4, 0x98, 0xca, 0xc2, 0xfb, 0x12, 0xde, 0x9e, 0x32, 0x7d, 0x22, 0x52, 0xce, 0x04,
+	0xc1, 0xef, 0xc3, 0x8d, 0x3c, 0x14, 0x49, 0xe2, 0x91, 0xd4, 0x39, 0x96, 0xfd, 0xba, 0x0d, 0xa6,
+	0x31, 0xfc, 0x26, 0x94, 0x04, 0x79, 0xa6, 0xf3, 0x28, 0xfb, 0x6a, 0xe9, 0xfd, 0x6d, 0x6a, 0xf4,
+	0xc9, 0x84, 0x04, 0xe3, 0x6b, 0xd5, 0xf8, 0x4a, 0xe0, 0xd5, 0xf9, 0x81, 0x4b, 0x45, 0x60, 0xfc,
+	0x0e, 0x54, 0x33, 0x1d, 0x74, 0x20, 0x8f, 0x9c, 0xb2, 0x16, 0x66, 0x23, 0xcb, 0xb3, 0xc0, 0x50,
+	0x16, 0xc1, 0x58, 0x3a, 0x15, 0x8d, 0xeb, 0xf5, 0x15, 0xa4, 0xca, 0x8b, 0xf1, 0x6e, 0x69, 0xa9,
+	0x72, 0x33, 0x97, 0xca, 0xfb, 0x1d, 0x01, 0xde, 0x13, 0xf1, 0xfe, 0xe1, 0x90, 0x26, 0xf2, 0x31,
+	0x0b, 0xb3, 0xe3, 0x54, 0x92, 0x08, 0x3f, 0x84, 0xaa, 0xd0, 0x90, 0x5c, 0xa2, 0xfa, 0x0b, 0x2a,
+	0xae, 0x03, 0x0a, 0x6c, 0x6b, 0x51, 0x80, 0x1b, 0x50, 0x61, 0x9c, 0x85, 0x44, 0xd7, 0x5a, 0xf7,
+	0x8d, 0xa1, 0x0a, 0x1a, 0xf2, 0xe8, 0xd8, 0x16, 0xaa, 0xd7, 0xbd, 0x4f, 0x54, 0x41, 0x17, 0x7e,
+	0x54, 0x4d, 0xed, 0xb9, 0x35, 0xcd, 0x24, 0xeb, 0x7d, 0x0d, 0xee, 0xab, 0x68, 0x31, 0x0c, 0x9b,
+	0xf0, 0x46, 0x44, 0x34, 0xf8, 0xf2, 0x34, 0xdc, 0xb0, 0xe8, 0xdc, 0x71, 0xf8, 0x1f, 0x81, 0x53,
+	0xf8, 0xed, 0x1b, 0x72, 0xc2, 0xd9, 0xfe, 0x28, 0xc8, 0x88, 0x9a, 0x8d, 0x03, 0x72, 0x9c, 0x2e,
+	0x33, 0x1b, 0x86, 0xf7, 0x9a, 0x3c, 0x56, 0x17, 0xe4, 0x31, 0x35, 0x1d, 0x0d, 0xa8, 0x24, 0x2c,
+	0x22, 0x66, 0x32, 0xca, 0xbe, 0x31, 0x94, 0xd2, 0x91, 0x9d, 0x09, 0x14, 0x29, 0x4e, 0x9a, 0x71,
+	0xfe, 0x9d, 0xb3, 0x66, 0x94, 0xd6, 0x46, 0xef, 0x53, 0x3d, 0x26, 0x26, 0xbe, 0x92, 0xb4, 0x73,
+	0x89, 0xa4, 0x33, 0x45, 0x7a, 0x1e, 0xb4, 0xe6, 0xed, 0x15, 0x03, 0x34, 0x82, 0x5a, 0xff, 0x20,
+	0x7e, 0xcc, 0x42, 0xa3, 0xcb, 0x5d, 0xa8, 0x53, 0x42, 0x87, 0x24, 0x1b, 0x98, 0x9c, 0x8d, 0xd6,
+	0x35, 0x83, 0x7d, 0x91, 0x67, 0x7e, 0x9d, 0x19, 0xf1, 0xfe, 0x45, 0x00, 0x7b, 0x22, 0xee, 0x1f,
+	0xc4, 0x7d, 0x12, 0x8c, 0x55, 0x07, 0x22, 0x12, 0x8c, 0x97, 0xe9, 0x80, 0xe1, 0xa9, 0x50, 0x24,
+	0xe5, 0xe1, 0xc8, 0x0a, 0x6f, 0x0c, 0xdc, 0xca, 0xdf, 0x25, 0x4a, 0x98, 0x14, 0x4e, 0xa9, 0x55,
+	0x6a, 0xd7, 0xfd, 0x69, 0x08, 0xf7, 0x01, 0x08, 0x0b, 0x07, 0x42, 0x15, 0x28, 0x9c, 0x72, 0xab,
+	0xd4, 0xae, 0xed, 0x6c, 0x76, 0xe6, 0xbd, 0xc3, 0x9d, 0x29, 0x39, 0xfc, 0x2a, 0xb1, 0x2b, 0xd1,
+	0x7b, 0xa0, 0x9b, 0x61, 0x52, 0x51, 0xcd, 0x68, 0xcd, 0x6d, 0x86, 0xad, 0xd0, 0x6b, 0xe8, 0xab,
+	0x69, 0xad, 0x42, 0xf0, 0xff, 0x10, 0xdc, 0x34, 0xf0, 0x23, 0x4e, 0xd3, 0x71, 0x90, 0x30, 0x89,
+	0x77, 0x60, 0x3d, 0x08, 0xc3, 0x43, 0xb1, 0x84, 0x18, 0x39, 0x71, 0x8e, 0x1a, 0x0e, 0xac, 0x07,
+	0x71, 0x90, 0x30, 0x21, 0xed, 0x08, 0xe6, 0xa6, 0xea, 0xac, 0x56, 0x20, 0x1a, 0xa4, 0x3c, 0x61,
+	0xd2, 0xb6, 0xa6, 0x66, 0xb0, 0x27, 0x0a, 0xc2, 0xef, 0x02, 0x44, 0x63, 0xf2, 0x6c, 0x60, 0x46,
+	0xd1, 0x0c, 0x67, 0x55, 0x21, 0x4f, 0xf4, 0x38, 0x3e, 0x54, 0x0a, 0xe4, 0xf1, 0x95, 0x04, 0x9b,
+	0x8b, 0x24, 0x28, 0xaa, 0xf3, 0xee, 0xc0, 0xed, 0x19, 0x28, 0x17, 0x63, 0xe7, 0xd7, 0x0a, 0x94,
+	0xf6, 0x44, 0x8c, 0x9f, 0xc2, 0x46, 0xf1, 0x69, 0x5a, 0xd0, 0x9a, 0xa9, 0x8f, 0x85, 0x7b, 0x7f,
+	0x29, 0x5a, 0xf1, 0x8c, 0x3c, 0x85, 0x8d, 0xe2, 0xc3, 0xb0, 0x38, 0x42, 0x4e, 0xbb, 0x24, 0xc2,
+	0xec, 0x53, 0x8c, 0x0f, 0xe1, 0xe6, 0xec, 0x33, 0x7c, 0x6f, 0xa1, 0x87, 0x19, 0xb6, 0xfb, 0xf1,
+	0x55, 0xd8, 0x45, 0xd8, 0x1f, 0x11, 0xdc, 0x7a, 0xfd, 0x1b, 0xb7, 0xb3, 0x84, 0xbf, 0x99, 0x33,
+	0x6e, 0xef, 0xea, 0x67, 0x8a, 0x4c, 0xbe, 0x85, 0xf5, 0xfc, 0x72, 0x7f, 0xb0, 0xd0, 0x8d, 0x65,
+	0xb9, 0xf7, 0x96, 0x61, 0x15, 0xee, 0xc7, 0x50, 0x7f, 0xe9, 0xd2, 0x7c, 0x78, 0xd9, 0xe9, 0x82,
+	0xea, 0x6e, 0x2f, 0x4d, 0xcd, 0xa3, 0xb9, 0x95, 0xef, 0xcf, 0x4f, 0xb6, 0xd0, 0xee, 0xee, 0x1f,
+	0xa7, 0x4d, 0xf4, 0xfc, 0xb4, 0x89, 0xfe, 0x39, 0x6d, 0xa2, 0x9f, 0xcf, 0x9a, 0x2b, 0xcf, 0xcf,
+	0x9a, 0x2b, 0x7f, 0x9d, 0x35, 0x57, 0xbe, 0x69, 0xc7, 0x89, 0x1c, 0x1d, 0x0e, 0x3b, 0x21, 0xa7,
+	0xdd, 0xa9, 0x7b, 0x70, 0x34, 0x7d, 0x13, 0xe4, 0x71, 0x4a, 0xc4, 0x70, 0x4d, 0xff, 0x05, 0xfb,
+	0xe8, 0x45, 0x00, 0x00, 0x00, 0xff, 0xff, 0xc3, 0x3b, 0x53, 0x7b, 0x1e, 0x0a, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -576,6 +905,13 @@ type MsgClient interface {
 	// SubmitDecryptionShare lets an authorized keyper publish its decryption share
 	// for an encrypted tx; BeginBlock decrypts once >= t shares are present.
 	SubmitDecryptionShare(ctx context.Context, in *MsgSubmitDecryptionShare, opts ...grpc.CallOption) (*MsgSubmitDecryptionShareResponse, error)
+	// DkgDeal posts a validator/dealer's on-chain DKG dealing (Feldman commitments
+	// plus each member's share encrypted to that member) for the open epoch.
+	DkgDeal(ctx context.Context, in *MsgDkgDeal, opts ...grpc.CallOption) (*MsgDkgDealResponse, error)
+	// DkgComplaint posts a JUSTIFIED complaint that a dealer sent the accuser a
+	// share inconsistent with its public commitments; a valid complaint disqualifies
+	// the dealer at finalize.
+	DkgComplaint(ctx context.Context, in *MsgDkgComplaint, opts ...grpc.CallOption) (*MsgDkgComplaintResponse, error)
 }
 
 type msgClient struct {
@@ -622,6 +958,24 @@ func (c *msgClient) SubmitDecryptionShare(ctx context.Context, in *MsgSubmitDecr
 	return out, nil
 }
 
+func (c *msgClient) DkgDeal(ctx context.Context, in *MsgDkgDeal, opts ...grpc.CallOption) (*MsgDkgDealResponse, error) {
+	out := new(MsgDkgDealResponse)
+	err := c.cc.Invoke(ctx, "/cosmos.evm.encmempool.v1.Msg/DkgDeal", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *msgClient) DkgComplaint(ctx context.Context, in *MsgDkgComplaint, opts ...grpc.CallOption) (*MsgDkgComplaintResponse, error) {
+	out := new(MsgDkgComplaintResponse)
+	err := c.cc.Invoke(ctx, "/cosmos.evm.encmempool.v1.Msg/DkgComplaint", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MsgServer is the server API for Msg service.
 type MsgServer interface {
 	// CommitTx records a hash-commitment to a future transaction.
@@ -634,6 +988,13 @@ type MsgServer interface {
 	// SubmitDecryptionShare lets an authorized keyper publish its decryption share
 	// for an encrypted tx; BeginBlock decrypts once >= t shares are present.
 	SubmitDecryptionShare(context.Context, *MsgSubmitDecryptionShare) (*MsgSubmitDecryptionShareResponse, error)
+	// DkgDeal posts a validator/dealer's on-chain DKG dealing (Feldman commitments
+	// plus each member's share encrypted to that member) for the open epoch.
+	DkgDeal(context.Context, *MsgDkgDeal) (*MsgDkgDealResponse, error)
+	// DkgComplaint posts a JUSTIFIED complaint that a dealer sent the accuser a
+	// share inconsistent with its public commitments; a valid complaint disqualifies
+	// the dealer at finalize.
+	DkgComplaint(context.Context, *MsgDkgComplaint) (*MsgDkgComplaintResponse, error)
 }
 
 // UnimplementedMsgServer can be embedded to have forward compatible implementations.
@@ -651,6 +1012,12 @@ func (*UnimplementedMsgServer) SubmitEncrypted(ctx context.Context, req *MsgSubm
 }
 func (*UnimplementedMsgServer) SubmitDecryptionShare(ctx context.Context, req *MsgSubmitDecryptionShare) (*MsgSubmitDecryptionShareResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitDecryptionShare not implemented")
+}
+func (*UnimplementedMsgServer) DkgDeal(ctx context.Context, req *MsgDkgDeal) (*MsgDkgDealResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DkgDeal not implemented")
+}
+func (*UnimplementedMsgServer) DkgComplaint(ctx context.Context, req *MsgDkgComplaint) (*MsgDkgComplaintResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DkgComplaint not implemented")
 }
 
 func RegisterMsgServer(s grpc1.Server, srv MsgServer) {
@@ -729,6 +1096,42 @@ func _Msg_SubmitDecryptionShare_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Msg_DkgDeal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MsgDkgDeal)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MsgServer).DkgDeal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/cosmos.evm.encmempool.v1.Msg/DkgDeal",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MsgServer).DkgDeal(ctx, req.(*MsgDkgDeal))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Msg_DkgComplaint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MsgDkgComplaint)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MsgServer).DkgComplaint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/cosmos.evm.encmempool.v1.Msg/DkgComplaint",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MsgServer).DkgComplaint(ctx, req.(*MsgDkgComplaint))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var Msg_serviceDesc = _Msg_serviceDesc
 var _Msg_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "cosmos.evm.encmempool.v1.Msg",
@@ -749,6 +1152,14 @@ var _Msg_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SubmitDecryptionShare",
 			Handler:    _Msg_SubmitDecryptionShare_Handler,
+		},
+		{
+			MethodName: "DkgDeal",
+			Handler:    _Msg_DkgDeal_Handler,
+		},
+		{
+			MethodName: "DkgComplaint",
+			Handler:    _Msg_DkgComplaint_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -1006,6 +1417,13 @@ func (m *MsgSubmitDecryptionShare) MarshalToSizedBuffer(dAtA []byte) (int, error
 	_ = i
 	var l int
 	_ = l
+	if len(m.Proof) > 0 {
+		i -= len(m.Proof)
+		copy(dAtA[i:], m.Proof)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Proof)))
+		i--
+		dAtA[i] = 0x32
+	}
 	if len(m.D) > 0 {
 		i -= len(m.D)
 		copy(dAtA[i:], m.D)
@@ -1054,6 +1472,213 @@ func (m *MsgSubmitDecryptionShareResponse) MarshalTo(dAtA []byte) (int, error) {
 }
 
 func (m *MsgSubmitDecryptionShareResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	return len(dAtA) - i, nil
+}
+
+func (m *DkgEncShare) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *DkgEncShare) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *DkgEncShare) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if len(m.Body) > 0 {
+		i -= len(m.Body)
+		copy(dAtA[i:], m.Body)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Body)))
+		i--
+		dAtA[i] = 0x22
+	}
+	if len(m.Nonce) > 0 {
+		i -= len(m.Nonce)
+		copy(dAtA[i:], m.Nonce)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Nonce)))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if len(m.A) > 0 {
+		i -= len(m.A)
+		copy(dAtA[i:], m.A)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.A)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if m.MemberIndex != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.MemberIndex))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgDkgDeal) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgDkgDeal) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgDkgDeal) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if len(m.EncShares) > 0 {
+		for iNdEx := len(m.EncShares) - 1; iNdEx >= 0; iNdEx-- {
+			{
+				size, err := m.EncShares[iNdEx].MarshalToSizedBuffer(dAtA[:i])
+				if err != nil {
+					return 0, err
+				}
+				i -= size
+				i = encodeVarintTx(dAtA, i, uint64(size))
+			}
+			i--
+			dAtA[i] = 0x22
+		}
+	}
+	if len(m.Commitments) > 0 {
+		for iNdEx := len(m.Commitments) - 1; iNdEx >= 0; iNdEx-- {
+			i -= len(m.Commitments[iNdEx])
+			copy(dAtA[i:], m.Commitments[iNdEx])
+			i = encodeVarintTx(dAtA, i, uint64(len(m.Commitments[iNdEx])))
+			i--
+			dAtA[i] = 0x1a
+		}
+	}
+	if m.Epoch != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.Epoch))
+		i--
+		dAtA[i] = 0x10
+	}
+	if len(m.Dealer) > 0 {
+		i -= len(m.Dealer)
+		copy(dAtA[i:], m.Dealer)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Dealer)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgDkgDealResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgDkgDealResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgDkgDealResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgDkgComplaint) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgDkgComplaint) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgDkgComplaint) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if len(m.DleqProof) > 0 {
+		i -= len(m.DleqProof)
+		copy(dAtA[i:], m.DleqProof)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.DleqProof)))
+		i--
+		dAtA[i] = 0x2a
+	}
+	if len(m.SharedPoint) > 0 {
+		i -= len(m.SharedPoint)
+		copy(dAtA[i:], m.SharedPoint)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.SharedPoint)))
+		i--
+		dAtA[i] = 0x22
+	}
+	if m.Against != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.Against))
+		i--
+		dAtA[i] = 0x18
+	}
+	if m.Epoch != 0 {
+		i = encodeVarintTx(dAtA, i, uint64(m.Epoch))
+		i--
+		dAtA[i] = 0x10
+	}
+	if len(m.Accuser) > 0 {
+		i -= len(m.Accuser)
+		copy(dAtA[i:], m.Accuser)
+		i = encodeVarintTx(dAtA, i, uint64(len(m.Accuser)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *MsgDkgComplaintResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MsgDkgComplaintResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *MsgDkgComplaintResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	i := len(dAtA)
 	_ = i
 	var l int
@@ -1203,10 +1828,111 @@ func (m *MsgSubmitDecryptionShare) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovTx(uint64(l))
 	}
+	l = len(m.Proof)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
 	return n
 }
 
 func (m *MsgSubmitDecryptionShareResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	return n
+}
+
+func (m *DkgEncShare) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.MemberIndex != 0 {
+		n += 1 + sovTx(uint64(m.MemberIndex))
+	}
+	l = len(m.A)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	l = len(m.Nonce)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	l = len(m.Body)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	return n
+}
+
+func (m *MsgDkgDeal) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Dealer)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	if m.Epoch != 0 {
+		n += 1 + sovTx(uint64(m.Epoch))
+	}
+	if len(m.Commitments) > 0 {
+		for _, b := range m.Commitments {
+			l = len(b)
+			n += 1 + l + sovTx(uint64(l))
+		}
+	}
+	if len(m.EncShares) > 0 {
+		for _, e := range m.EncShares {
+			l = e.Size()
+			n += 1 + l + sovTx(uint64(l))
+		}
+	}
+	return n
+}
+
+func (m *MsgDkgDealResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	return n
+}
+
+func (m *MsgDkgComplaint) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Accuser)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	if m.Epoch != 0 {
+		n += 1 + sovTx(uint64(m.Epoch))
+	}
+	if m.Against != 0 {
+		n += 1 + sovTx(uint64(m.Against))
+	}
+	l = len(m.SharedPoint)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	l = len(m.DleqProof)
+	if l > 0 {
+		n += 1 + l + sovTx(uint64(l))
+	}
+	return n
+}
+
+func (m *MsgDkgComplaintResponse) Size() (n int) {
 	if m == nil {
 		return 0
 	}
@@ -2087,6 +2813,40 @@ func (m *MsgSubmitDecryptionShare) Unmarshal(dAtA []byte) error {
 				m.D = []byte{}
 			}
 			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Proof", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Proof = append(m.Proof[:0], dAtA[iNdEx:postIndex]...)
+			if m.Proof == nil {
+				m.Proof = []byte{}
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipTx(dAtA[iNdEx:])
@@ -2135,6 +2895,632 @@ func (m *MsgSubmitDecryptionShareResponse) Unmarshal(dAtA []byte) error {
 		}
 		if fieldNum <= 0 {
 			return fmt.Errorf("proto: MsgSubmitDecryptionShareResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *DkgEncShare) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: DkgEncShare: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: DkgEncShare: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MemberIndex", wireType)
+			}
+			m.MemberIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.MemberIndex |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field A", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.A = append(m.A[:0], dAtA[iNdEx:postIndex]...)
+			if m.A == nil {
+				m.A = []byte{}
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Nonce", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Nonce = append(m.Nonce[:0], dAtA[iNdEx:postIndex]...)
+			if m.Nonce == nil {
+				m.Nonce = []byte{}
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Body", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Body = append(m.Body[:0], dAtA[iNdEx:postIndex]...)
+			if m.Body == nil {
+				m.Body = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgDkgDeal) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgDkgDeal: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgDkgDeal: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Dealer", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Dealer = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Epoch", wireType)
+			}
+			m.Epoch = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Epoch |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Commitments", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Commitments = append(m.Commitments, make([]byte, postIndex-iNdEx))
+			copy(m.Commitments[len(m.Commitments)-1], dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EncShares", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.EncShares = append(m.EncShares, &DkgEncShare{})
+			if err := m.EncShares[len(m.EncShares)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgDkgDealResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgDkgDealResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgDkgDealResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgDkgComplaint) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgDkgComplaint: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgDkgComplaint: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Accuser", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Accuser = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Epoch", wireType)
+			}
+			m.Epoch = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Epoch |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Against", wireType)
+			}
+			m.Against = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Against |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SharedPoint", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.SharedPoint = append(m.SharedPoint[:0], dAtA[iNdEx:postIndex]...)
+			if m.SharedPoint == nil {
+				m.SharedPoint = []byte{}
+			}
+			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field DleqProof", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTx
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthTx
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthTx
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.DleqProof = append(m.DleqProof[:0], dAtA[iNdEx:postIndex]...)
+			if m.DleqProof == nil {
+				m.DleqProof = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipTx(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthTx
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *MsgDkgComplaintResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowTx
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MsgDkgComplaintResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MsgDkgComplaintResponse: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
 		default:

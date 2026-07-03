@@ -195,6 +195,7 @@ func initRootCmd(rootCmd *cobra.Command, evmApp *evmd.EVMD) {
 		queryCommand(),
 		txCommand(),
 		KeyperCmd(),
+		DkgCmd(),
 	)
 
 	// add general tx flags to the root command

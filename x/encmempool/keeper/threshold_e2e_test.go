@@ -23,7 +23,7 @@ func newKeeper(t *testing.T, height int64) (keeper.Keeper, sdk.Context) {
 	key := storetypes.NewKVStoreKey(types.StoreKey)
 	tkey := storetypes.NewTransientStoreKey("transient_encmempool")
 	testCtx := testutil.DefaultContextWithDB(t, key, tkey)
-	k := keeper.NewKeeper(runtime.NewKVStoreService(key))
+	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil)
 	ctx := testCtx.Ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager())
 	return k, ctx
 }
@@ -56,7 +56,7 @@ func TestEncryptedMempool_EndToEnd(t *testing.T) {
 	}
 
 	// submit the ciphertext at height 10 -> matures at height 12
-	e := k.SubmitEncTx(ctx, "cosmosUSER", 10, 2, ct.A, ct.Nonce, ct.Body)
+	e := k.SubmitEncTx(ctx, "cosmosUSER", 10, 2, ct.A, ct.Nonce, ct.Body, 0)
 	if e.DecryptHeight != 12 {
 		t.Fatalf("expected decrypt height 12, got %d", e.DecryptHeight)
 	}
@@ -99,7 +99,7 @@ func TestEncryptedMempool_InsufficientSharesNotDecrypted(t *testing.T) {
 
 	k, ctx := newKeeper(t, 10)
 	_ = k.SetParams(ctx, enableParams(pub, 2, 2, keypers))
-	e := k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body)
+	e := k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 0)
 
 	// only ONE share (< t=2)
 	ds, _ := threshold.ComputeShare(shares[0], ct)
@@ -124,7 +124,7 @@ func TestEncryptedMempool_DisabledIsInert(t *testing.T) {
 	p := enableParams(pub, 2, 2, []string{"k1", "k2", "k3"})
 	p.EncEnabled = false // OFF
 	_ = k.SetParams(ctx, p)
-	e := k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body)
+	e := k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 0)
 	for _, i := range []int{0, 1} {
 		ds, _ := threshold.ComputeShare(shares[i], ct)
 		_ = k.SetEncShare(ctx, types.EncShare{Keyper: "k", DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: ds.Index, D: ds.D})
