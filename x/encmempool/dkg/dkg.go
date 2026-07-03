@@ -156,6 +156,13 @@ func RunDKG(parties []*Party, rng io.Reader) (*Result, error) {
 func DealerRound(parties []*Party, rng io.Reader) ([]*Dealing, error) {
 	out := make([]*Dealing, 0, len(parties))
 	for _, p := range parties {
+		// AUDIT FIX (robustness): reject a degenerate threshold before deal() builds a
+		// zero-length coeffs slice and evalPoly indexes coeffs[-1] (a panic — a
+		// chain-halt-class fault if an integration mis-wires t). threshold.Setup guards
+		// t>=1 identically; the DKG entry points must too.
+		if p.t < 1 {
+			return nil, fmt.Errorf("invalid threshold t=%d (must be >= 1)", p.t)
+		}
 		d, err := p.deal(rng)
 		if err != nil {
 			return nil, err
@@ -223,9 +230,22 @@ func Finalize(parties []*Party, dealings []*Dealing, complaints []Complaint) (*R
 		return nil, fmt.Errorf("no parties")
 	}
 	t := parties[0].t
+	// AUDIT FIX (robustness): guard t>=1 so a direct Finalize call with a degenerate
+	// threshold returns a clean error instead of indexing V[0] out of range on an
+	// empty aggregate below.
+	if t < 1 {
+		return nil, fmt.Errorf("invalid threshold t=%d (must be >= 1)", t)
+	}
 	byDealer := make(map[uint64]*Dealing, len(dealings))
 	for _, d := range dealings {
 		byDealer[d.Dealer] = d
+	}
+	// isParty is the set of REAL participant indices. A complaint whose accuser index
+	// (By) is not a real party must be ignored — see the framing fix in the complaint
+	// loop below.
+	isParty := make(map[uint64]bool, len(parties))
+	for _, p := range parties {
+		isParty[p.Index] = true
 	}
 
 	disq := make(map[uint64]bool)
@@ -247,7 +267,21 @@ func Finalize(parties []*Party, dealings []*Dealing, complaints []Complaint) (*R
 
 	// A complaint is valid iff the disputed share fails against the dealer's OWN
 	// public commitments — a publicly checkable, incontrovertible fault.
+	//
+	// AUDIT FIX (framing / liveness DoS): the accuser index c.By MUST be a real party.
+	// Without this guard, an out-of-range By (0, n+1, 2^40, ...) is a nil-map miss on
+	// d.Shares[c.By]; VerifyShare returns false on the nil share (dkg.go), so Finalize
+	// would CONFLATE "the dealer never dealt to By" with "the dealer dealt By a bad
+	// share" and disqualify a provably-honest dealer whose every real share verifies.
+	// A single forged complaint could then evict any honest dealer, and enough of them
+	// drive |QUAL| < t and abort the run — falsifying the documented "an accuser cannot
+	// frame an honest dealer" guarantee. Bounding By to the party set closes it (a bare
+	// By>=1 check is insufficient — By=n+1 still frames). c.Against out-of-range is
+	// already safe: byDealer miss -> continue.
 	for _, c := range complaints {
+		if !isParty[c.By] {
+			continue // accuser is not a real participant -> cannot be a valid fault proof
+		}
 		d, ok := byDealer[c.Against]
 		if !ok || len(d.Commitments) != t {
 			continue // malformed dealers are already handled by the structural pass
@@ -336,6 +370,13 @@ func VerifyShare(commitments []secp256k1.JacobianPoint, index uint64, share *sec
 // With commitments = QUAL aggregate V, this is the public value against which a
 // keyper's partial decryption is verified (see proof.go). No secret is needed.
 func SharePubKey(commitments []secp256k1.JacobianPoint, index uint64) *secp256k1.JacobianPoint {
+	// AUDIT FIX (defensive): guard the empty slice so this EXPORTED API returns nil
+	// instead of indexing commitments[-1] and panicking (VerifyShare / RecoverVerified
+	// already reject len==0 upstream, but a direct integration call must not panic — a
+	// chain halt in a consensus context).
+	if len(commitments) == 0 {
+		return nil
+	}
 	zi := scalarFromUint(index)
 	acc := commitments[len(commitments)-1] // value copy; slice not mutated
 	for k := len(commitments) - 2; k >= 0; k-- {

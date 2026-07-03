@@ -243,7 +243,17 @@ func ParseShare(data []byte) (Share, error) {
 	var b [32]byte
 	copy(b[:], raw)
 	xi := new(secp256k1.ModNScalar)
-	xi.SetBytes(&b)
+	// AUDIT FIX (canonicality): honour the SetBytes overflow flag. A value >= the group
+	// order q was previously reduced mod q and accepted silently, so distinct on-disk
+	// encodings (v and v+q) mapped to the same scalar, and Xi=q parsed to a ZERO share.
+	// A stored keyper share is always a reduced non-zero scalar, so rejecting an
+	// overflow or a zero here only ever rejects a corrupt/non-canonical file.
+	if overflow := xi.SetBytes(&b); overflow != 0 {
+		return Share{}, errors.New("xi is not a canonical scalar (>= group order)")
+	}
+	if xi.IsZero() {
+		return Share{}, errors.New("xi must be a non-zero scalar")
+	}
 	if j.Index < 1 {
 		return Share{}, errors.New("share index must be >= 1")
 	}

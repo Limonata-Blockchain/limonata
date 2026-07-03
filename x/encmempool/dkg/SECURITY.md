@@ -28,6 +28,13 @@ byte of `msk·G`).
   (all dealings are collected before any complaint — no rushing window).
 - **FATAL if reused for signatures.** For threshold Schnorr / ECDSA / EdDSA a biasable
   key breaks the security proof and is exploitable.
+- **The WHOLE aggregate coefficient vector is adversary-influenced, not just `pub`.**
+  A rushing last dealer influences every `V_j = Σ_i C_{i,j}`, including the top
+  coefficient. In particular a degree collapse (zeroing the top aggregate coefficient
+  so `t-1` shares suffice) would be a *total* secrecy break — but computing it needs the
+  honest **scalar** coefficient sum, of which only the **point** `Σ_honest C_{j,·}` is
+  public. So non-collapse (and the benign-for-encryption conclusion above) rests on the
+  **same ECDLP barrier** as constant-term biasing. Do not assume only `pub` is biasable.
 
 **RULE: the key produced by this package is for ENCRYPTION ONLY. NEVER sign with it.**
 A signing deployment MUST add the Pedersen commit-then-reveal (GJKR) round before

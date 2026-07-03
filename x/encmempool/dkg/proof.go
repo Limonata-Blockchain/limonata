@@ -2,6 +2,7 @@ package dkg
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/cosmos/evm/x/encmempool/threshold"
@@ -59,8 +60,10 @@ func ProveDecryptShare(share threshold.Share, ct *threshold.Ciphertext) (*thresh
 	secp256k1.ScalarBaseMultNonConst(k, &T1)
 	secp256k1.ScalarMultNonConst(k, A, &T2)
 
-	// Challenge c = H(ctx, A, D, Y, T1, T2); response z = k + c*x.
-	c := dleqChallenge(A, D, &Y, &T1, &T2)
+	// Challenge c = H(ctx, index, A, D, Y, T1, T2); response z = k + c*x. The keyper
+	// index is bound into the challenge (AUDIT FIX below) so a proof is valid ONLY for
+	// the index it was issued at.
+	c := dleqChallenge(share.Index, A, D, &Y, &T1, &T2)
 	cx := new(secp256k1.ModNScalar)
 	cx.Set(c).Mul(share.Xi) // c*x
 	z := new(secp256k1.ModNScalar)
@@ -98,16 +101,29 @@ func VerifyDecryptShare(A []byte, ds *threshold.DecryptShare, Y *secp256k1.Jacob
 	secp256k1.ScalarMultNonConst(negC, Dpt, &cD)
 	secp256k1.AddNonConst(&zA, &cD, &T2)
 
-	want := dleqChallenge(Apt, Dpt, Y, &T1, &T2)
+	want := dleqChallenge(ds.Index, Apt, Dpt, Y, &T1, &T2)
 	a := want.Bytes()
 	b := proof.C.Bytes()
 	return a == b
 }
 
 // dleqChallenge is the Fiat-Shamir hash of the transcript, reduced mod q.
-func dleqChallenge(A, D, Y, T1, T2 *secp256k1.JacobianPoint) *secp256k1.ModNScalar {
+//
+// AUDIT FIX (index binding): the keyper `index` is committed into the transcript.
+// Previously the challenge hashed only (ctx,A,D,Y); because SharePubKey reduces the
+// index through scalarFromUint == SetInt(uint32(v)), two indices that agree mod 2^32
+// (e.g. i and i+2^32) yield a BYTE-IDENTICAL Y, so ONE honest proof verified at BOTH
+// indices — letting a replay of a single partial masquerade as a second distinct
+// partial and silently poison RecoverVerified's Lagrange combine. Hashing the full
+// uint64 index makes a proof valid only at the exact index it was issued for, so the
+// replay's challenge no longer matches. (RecoverVerified additionally rejects any
+// index >= 2^32 at ingest — see there.)
+func dleqChallenge(index uint64, A, D, Y, T1, T2 *secp256k1.JacobianPoint) *secp256k1.ModNScalar {
 	h := sha256.New()
 	h.Write([]byte(dleqContext))
+	var idx [8]byte
+	binary.BigEndian.PutUint64(idx[:], index)
+	h.Write(idx[:])
 	h.Write(compressCopy(A))
 	h.Write(compressCopy(D))
 	h.Write(compressCopy(Y))
@@ -192,6 +208,19 @@ func RecoverVerified(commitments []secp256k1.JacobianPoint, ctA []byte, t int, p
 	good := make([]*threshold.DecryptShare, 0, t)
 	for _, vs := range partials {
 		if vs.Share == nil || vs.Proof == nil {
+			continue
+		}
+		// AUDIT FIX (index-truncation dedup bypass): reject any index that is not a
+		// valid keyper index. A keyper index is always in [1, n] with n << 2^32, and
+		// the index is reduced mod 2^32 (scalarFromUint) everywhere it feeds the
+		// crypto. An out-of-range index (0, or >= 2^32) either evaluates the sharing
+		// polynomial at 0 (== msk, unforgeable) or COLLIDES with a real index mod 2^32
+		// while keying seen[] on the distinct full uint64 — the exact hole that let a
+		// replay of ONE partial under {idx, idx+2^32} pass the t-distinct count and
+		// silently corrupt the Lagrange combine. Dropping these makes the surviving
+		// index domain injective under the mod-2^32 reduction, so seen[] on the full
+		// uint64 now agrees with the reduction used by SharePubKey / lagrangeAtZero.
+		if vs.Share.Index < 1 || vs.Share.Index >= (1<<32) {
 			continue
 		}
 		if seen[vs.Share.Index] { // reject duplicate indices (a Lagrange-poisoning vector)
