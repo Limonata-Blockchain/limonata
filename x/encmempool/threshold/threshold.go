@@ -44,6 +44,12 @@ type DecryptShare struct {
 	D     []byte `json:"d"` // compressed x_i*A
 }
 
+// NonceSize is the required AES-256-GCM nonce length in bytes. crypto/cipher's
+// gcm.Open PANICS for a nonce of any other length, so on the consensus decrypt path
+// the nonce MUST be exactly this many bytes (see Decrypt's guard and the
+// SubmitEncrypted ingress check).
+const NonceSize = 12
+
 func randScalar() (*secp256k1.ModNScalar, error) {
 	for {
 		var b [32]byte
@@ -196,6 +202,16 @@ func Recover(shares []*DecryptShare) (*secp256k1.JacobianPoint, error) {
 // Decrypt recovers msg from the combined shared secret + ciphertext. Returns an
 // error if the shared secret is wrong (e.g. < t shares) — AES-GCM authentication.
 func Decrypt(shared *secp256k1.JacobianPoint, ct *Ciphertext) ([]byte, error) {
+	// AUDIT FIX (consensus halt): crypto/cipher's gcm.Open PANICS for any nonce whose
+	// length != NonceSize. On the BeginBlock decrypt path the nonce is
+	// attacker-controlled (SubmitEncrypted stores it verbatim), and an un-recovered
+	// panic over deterministic committed state halts every validator uniformly.
+	// Reject a non-conforming nonce as a normal error instead — decryptMatured already
+	// treats a returned error as a graceful decrypt_failed. This guard is the
+	// defense-in-depth backstop even if the ingress check is ever bypassed.
+	if len(ct.Nonce) != NonceSize {
+		return nil, fmt.Errorf("invalid nonce length %d (want %d)", len(ct.Nonce), NonceSize)
+	}
 	key := kdf(shared)
 	gcm, err := newGCM(key[:])
 	if err != nil {
@@ -243,7 +259,17 @@ func ParseShare(data []byte) (Share, error) {
 	var b [32]byte
 	copy(b[:], raw)
 	xi := new(secp256k1.ModNScalar)
-	xi.SetBytes(&b)
+	// AUDIT FIX (canonicality): honour the SetBytes overflow flag. A value >= the group
+	// order q was previously reduced mod q and accepted silently, so distinct on-disk
+	// encodings (v and v+q) mapped to the same scalar, and Xi=q parsed to a ZERO share.
+	// A stored keyper share is always a reduced non-zero scalar, so rejecting an
+	// overflow or a zero here only ever rejects a corrupt/non-canonical file.
+	if overflow := xi.SetBytes(&b); overflow != 0 {
+		return Share{}, errors.New("xi is not a canonical scalar (>= group order)")
+	}
+	if xi.IsZero() {
+		return Share{}, errors.New("xi must be a non-zero scalar")
+	}
 	if j.Index < 1 {
 		return Share{}, errors.New("share index must be >= 1")
 	}

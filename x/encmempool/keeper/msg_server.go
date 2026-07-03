@@ -12,6 +12,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 
+	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
@@ -94,6 +95,13 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	}
 	if len(msg.A) == 0 || len(msg.Body) == 0 {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing ciphertext (a/body)")
+	}
+	// AUDIT FIX (consensus halt): the nonce is fed verbatim into AES-256-GCM in
+	// BeginBlock, and gcm.Open PANICS on any nonce length != NonceSize. Reject a
+	// non-conforming nonce at ingress so a malformed ciphertext can never reach the
+	// decrypt path (threshold.Decrypt now also guards this as defense-in-depth).
+	if len(msg.Nonce) != threshold.NonceSize {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "nonce must be %d bytes", threshold.NonceSize)
 	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
 	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body)
