@@ -249,6 +249,29 @@ func (k Keeper) CollectMaturedUpTo(ctx context.Context, h uint64, limit int) (ou
 	return out, false
 }
 
+// IterateInFlightFrom visits stored EncTx with decrypt_height >= minHeight, in
+// (decryptHeight, seq) order, invoking fn for up to `limit` entries (stopping early if fn
+// returns false). The upper bound is the exclusive end of the EncTx keyspace (the next
+// prefix, EncSharePrefix). It backs the NODE-LOCAL construction of decryption-share vote
+// extensions for not-yet-matured ciphertexts; the `limit` bounds the vote-extension size.
+func (k Keeper) IterateInFlightFrom(ctx context.Context, minHeight uint64, limit int, fn func(types.EncTx) bool) {
+	it, err := k.store(ctx).Iterator(concat(types.EncTxPrefix, u64(minHeight)), prefixEnd(types.EncTxPrefix))
+	if err != nil {
+		return
+	}
+	defer it.Close()
+	n := 0
+	for ; it.Valid() && n < limit; it.Next() {
+		var e types.EncTx
+		if json.Unmarshal(it.Value(), &e) == nil {
+			n++
+			if !fn(e) {
+				return
+			}
+		}
+	}
+}
+
 // --- in-flight EncTx admission ref-counts (global + per-submitter) ---
 
 func submitterEncCountKey(submitter string) []byte {

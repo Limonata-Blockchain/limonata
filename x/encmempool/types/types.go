@@ -48,6 +48,25 @@ type Params struct {
 	// a stable period, so the gap has already elapsed and it rekeys immediately. 0
 	// disables the dampener (rekey on every change). (HIGH-2 variant fix.)
 	DkgMinRekeyGap uint64 `json:"dkg_min_rekey_gap"`
+
+	// --- TRANSPARENT in-node DKG (ABCI++ vote extensions) ---
+	//
+	// DkgTransparent switches the member set from the genesis-DECLARED DkgMembers list to
+	// the set of BONDED VALIDATORS that have auto-announced a DKG enc key via a vote
+	// extension — i.e. any validator that simply RUNS THE BINARY becomes a member, with
+	// no declared list, no account/fee setup, and no separate daemon. When true, DkgMembers
+	// may be empty (members are derived on-chain). When false, the legacy declared-member
+	// path (with the off-chain `evmd dkg start` daemon) is used unchanged. It is a distinct
+	// switch from DkgEnabled so the transparent path can be validated/staged independently;
+	// BOTH must be on (plus a consensus-param VoteExtensionsEnableHeight) for the in-node
+	// DKG to run — keeping the module dormant by default.
+	DkgTransparent bool `json:"dkg_transparent"`
+
+	// DkgMaxMembers caps the DKG COMMITTEE to the top-N bonded validators by stake weight
+	// (0 => the built-in DefaultDkgMaxMembers cap). Bounding the committee bounds the
+	// vote-extension / injected-block-data size on a large validator set. Only meaningful
+	// on the transparent path.
+	DkgMaxMembers uint32 `json:"dkg_max_members"`
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -254,24 +273,30 @@ func (p Params) Validate() error {
 	// DKG params are gated by their own switch, independent of EncEnabled: a DKG can be
 	// configured/validated even before the encrypted path is flipped on.
 	if p.DkgEnabled {
-		if len(p.DkgMembers) == 0 {
-			return fmt.Errorf("dkg_enabled requires a non-empty dkg_members set")
-		}
-		seenOp, seenAcc := map[string]bool{}, map[string]bool{}
-		for i, m := range p.DkgMembers {
-			if m.OperatorAddr == "" || m.AccountAddr == "" {
-				return fmt.Errorf("dkg_members[%d]: operator_addr and account_addr are required", i)
+		// TRANSPARENT path: members are derived on-chain from the bonded validators that
+		// auto-announced an enc key (no declared list), so DkgMembers is NOT required and
+		// its per-entry checks below are skipped. The declared-member checks only apply to
+		// the legacy declared path.
+		if !p.DkgTransparent {
+			if len(p.DkgMembers) == 0 {
+				return fmt.Errorf("dkg_enabled requires a non-empty dkg_members set (unless dkg_transparent)")
 			}
-			if len(m.EncPubKey) != 33 {
-				return fmt.Errorf("dkg_members[%d]: enc_pubkey must be a 33-byte compressed key, got %d", i, len(m.EncPubKey))
+			seenOp, seenAcc := map[string]bool{}, map[string]bool{}
+			for i, m := range p.DkgMembers {
+				if m.OperatorAddr == "" || m.AccountAddr == "" {
+					return fmt.Errorf("dkg_members[%d]: operator_addr and account_addr are required", i)
+				}
+				if len(m.EncPubKey) != 33 {
+					return fmt.Errorf("dkg_members[%d]: enc_pubkey must be a 33-byte compressed key, got %d", i, len(m.EncPubKey))
+				}
+				if seenOp[m.OperatorAddr] || seenAcc[m.AccountAddr] {
+					return fmt.Errorf("dkg_members[%d]: duplicate operator/account address", i)
+				}
+				seenOp[m.OperatorAddr], seenAcc[m.AccountAddr] = true, true
 			}
-			if seenOp[m.OperatorAddr] || seenAcc[m.AccountAddr] {
-				return fmt.Errorf("dkg_members[%d]: duplicate operator/account address", i)
+			if n := len(p.DkgMembers); p.DkgThreshold != 0 && int(p.DkgThreshold) > n {
+				return fmt.Errorf("dkg_threshold (%d) must be <= number of members (%d)", p.DkgThreshold, n)
 			}
-			seenOp[m.OperatorAddr], seenAcc[m.AccountAddr] = true, true
-		}
-		if n := len(p.DkgMembers); p.DkgThreshold != 0 && int(p.DkgThreshold) > n {
-			return fmt.Errorf("dkg_threshold (%d) must be <= number of members (%d)", p.DkgThreshold, n)
 		}
 		if err := p.ValidateDkgWindows(); err != nil {
 			return err
@@ -332,6 +357,15 @@ const (
 	maxInFlightCeiling uint64 = 1 << 40
 )
 
+// Committee-size bounds for the TRANSPARENT path. DefaultDkgMaxMembers caps the
+// committee when DkgMaxMembers==0; maxDkgCommittee is the absolute upper bound a
+// governance-set DkgMaxMembers may not exceed (bounds vote-extension / injected
+// block-data size, and the O(committee^2) dealing bulk, on a large validator set).
+const (
+	DefaultDkgMaxMembers uint32 = 16
+	maxDkgCommittee      uint32 = 128
+)
+
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
 func (p Params) ValidateDkgWindows() error {
 	for _, f := range []struct {
@@ -355,5 +389,19 @@ func (p Params) ValidateDkgWindows() error {
 	if p.DkgMaxAttempts > maxDkgWindowBlocks {
 		return fmt.Errorf("dkg_max_attempts (%d) must be <= %d", p.DkgMaxAttempts, maxDkgWindowBlocks)
 	}
+	// DkgMaxMembers=0 means "use DefaultDkgMaxMembers"; a positive value must not exceed
+	// the absolute committee ceiling (bounds VE / injected-block-data size).
+	if p.DkgMaxMembers > maxDkgCommittee {
+		return fmt.Errorf("dkg_max_members (%d) must be <= %d", p.DkgMaxMembers, maxDkgCommittee)
+	}
 	return nil
+}
+
+// EffectiveMaxMembers returns the committee cap actually applied: DkgMaxMembers, or
+// DefaultDkgMaxMembers when it is 0. Always <= maxDkgCommittee (enforced by Validate).
+func (p Params) EffectiveMaxMembers() int {
+	if p.DkgMaxMembers == 0 {
+		return int(DefaultDkgMaxMembers)
+	}
+	return int(p.DkgMaxMembers)
 }

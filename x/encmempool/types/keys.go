@@ -52,4 +52,12 @@ var (
 	// deleted when it returns to zero, so live counters stay O(submitters with pending ct) —
 	// itself bounded by the global ceiling.
 	SubmitterEncCountPrefix = []byte{0x19} // 0x19 | submitter -> uint64 (be): # of un-matured EncTx for that submitter
+
+	// --- TRANSPARENT in-node DKG (ABCI++ vote extensions) ---
+	// EncPubKeyPrefix records a bonded validator's AUTO-ANNOUNCED DKG enc pubkey, keyed by
+	// its operator address. The PreBlocker writes it when it consumes a vote extension that
+	// announced a (new) key; ActiveMembers reads it to derive the transparent member set
+	// (bonded validators that have registered an enc key). Idempotent: only rewritten when
+	// the announced key differs from the stored one.
+	EncPubKeyPrefix = []byte{0x1A} // 0x1A | operatorAddr -> 33-byte compressed secp256k1 pubkey
 )

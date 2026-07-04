@@ -295,9 +295,16 @@ func (k Keeper) readU64(ctx context.Context, key []byte) uint64 {
 // ============================================================================
 
 // ActiveMembers returns the DKG member set for the current bonded validator set.
-// If the staking keeper is unavailable it falls back to the full declared set (so
-// unit tests and single-node smoke tests still function).
+//
+// TRANSPARENT path (p.DkgTransparent): members are the bonded validators that have
+// AUTO-ANNOUNCED an enc key (top-N by stake), derived entirely on-chain — no declared
+// list. LEGACY path: the genesis-declared DkgMembers INTERSECTED with the bonded set.
+// If the staking keeper is unavailable it falls back to the full declared set (so unit
+// tests and single-node smoke tests of the legacy path still function).
 func (k Keeper) ActiveMembers(ctx context.Context, p types.Params) []types.RoundMember {
+	if p.DkgTransparent {
+		return k.TransparentMembers(ctx, p)
+	}
 	bonded := map[string]bool{}
 	if k.stakingKeeper != nil {
 		_ = k.stakingKeeper.IterateBondedValidatorsByPower(ctx, func(_ int64, v stakingtypes.ValidatorI) bool {

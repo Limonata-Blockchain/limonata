@@ -69,16 +69,24 @@ func (app *EVMD) configureEVMMempool(appOpts servertypes.AppOptions, logger log.
 	app.EVMMempool = mempool
 
 	// create ABCI handlers
-	prepareProposalHandler := baseapp.
-		NewDefaultProposalHandler(mempool, NewNoCheckProposalTxVerifier(app.BaseApp)).
-		PrepareProposalHandler()
+	proposalHandler := baseapp.NewDefaultProposalHandler(mempool, NewNoCheckProposalTxVerifier(app.BaseApp))
+	prepareProposalHandler := proposalHandler.PrepareProposalHandler()
+	processProposalHandler := proposalHandler.ProcessProposalHandler()
 
 	insertTxHandler := mempool.NewInsertTxHandler(app.TxDecode)
 	reapTxsHandler := mempool.NewReapTxsHandler()
 	checkTxHandler := mempool.NewCheckTxHandler(app.TxDecode, checkTxTimeout)
 
-	// set handlers and the mempool
-	app.SetPrepareProposal(prepareProposalHandler)
+	// set handlers and the mempool. The TRANSPARENT in-node DKG COMPOSES around the EVM
+	// mempool's PrepareProposal (inject the H-1 extended commit) and around the default
+	// ProcessProposal (self-certify + strip the injected blob, then delegate the real txs).
+	// Both wrappers are strict no-ops unless DkgEnabled && DkgTransparent, so the default
+	// binary behaves exactly as before. ExtendVote/VerifyVoteExtension supply/verify the
+	// per-node DKG contribution carried on consensus votes.
+	app.SetPrepareProposal(app.wrapDkgPrepareProposal(prepareProposalHandler))
+	app.SetProcessProposal(app.wrapDkgProcessProposal(processProposalHandler))
+	app.SetExtendVoteHandler(app.dkgExtendVoteHandler())
+	app.SetVerifyVoteExtensionHandler(app.dkgVerifyVoteExtensionHandler())
 	app.SetInsertTxHandler(insertTxHandler)
 	app.SetReapTxsHandler(reapTxsHandler)
 	app.SetCheckTxHandler(checkTxHandler)

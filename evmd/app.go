@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	goruntime "runtime"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/spf13/cast"
@@ -33,6 +34,7 @@ import (
 	contestpost "github.com/cosmos/evm/x/contest/post"
 	contesttypes "github.com/cosmos/evm/x/contest/types"
 	"github.com/cosmos/evm/x/encmempool"
+	"github.com/cosmos/evm/x/encmempool/dkgnode"
 	encmempoolkeeper "github.com/cosmos/evm/x/encmempool/keeper"
 	encmempooltypes "github.com/cosmos/evm/x/encmempool/types"
 	"github.com/cosmos/evm/x/erc20"
@@ -221,6 +223,14 @@ type EVMD struct {
 	SponsorPoolKeeper sponsorpoolkeeper.Keeper
 	NetCapKeeper      netcapkeeper.Keeper
 	EVMMempool        sdkmempool.ExtMempool
+
+	// TRANSPARENT in-node DKG (ABCI++ vote extensions): the node's home dir + its lazily
+	// loaded, auto-generated secp256k1 DKG enc key. dkgEncKey is node-local (never consensus
+	// state); a load error degrades to non-participation, never a halt.
+	dkgHome       string
+	dkgEncKeyOnce sync.Once
+	dkgEncKey     *dkgnode.EncKey
+	dkgEncKeyErr  error
 
 	// the module manager
 	ModuleManager      *module.Manager
@@ -428,6 +438,9 @@ func NewExampleApp(
 		skipUpgradeHeights[int64(h)] = true
 	}
 	homePath := cast.ToString(appOpts.Get(flags.FlagHome))
+	// TRANSPARENT in-node DKG: remember the node home so the vote-extension ExtendVote handler
+	// can auto-generate/load this node's DKG enc key (<home>/dkg_enc_key.json) on first boot.
+	app.dkgHome = homePath
 	// set the governance module account as the authority for conducting upgrades
 	app.UpgradeKeeper = upgradekeeper.NewKeeper(
 		skipUpgradeHeights,
@@ -1029,7 +1042,7 @@ func (app *EVMD) InitChainer(ctx sdk.Context, req *abci.RequestInitChain) (*abci
 	return app.ModuleManager.InitGenesis(ctx, app.appCodec, genesisState)
 }
 
-func (app *EVMD) PreBlocker(ctx sdk.Context, _ *abci.RequestFinalizeBlock) (*sdk.ResponsePreBlock, error) {
+func (app *EVMD) PreBlocker(ctx sdk.Context, req *abci.RequestFinalizeBlock) (*sdk.ResponsePreBlock, error) {
 	// Limonata: fast NON-GOV operator path for the valgrant-v1 upgrade. No-op
 	// unless VALGRANT_FORCE_UPGRADE=1 and the init has not run yet; runs exactly
 	// once on the first block after the binary swap. See evmd/upgrades.go.
@@ -1041,6 +1054,13 @@ func (app *EVMD) PreBlocker(ctx sdk.Context, _ *abci.RequestFinalizeBlock) (*sdk
 	// on the first block after the binary swap. See evmd/upgrades.go.
 	if err := app.maybeRunEncMempoolForceInit(ctx); err != nil {
 		panic(err)
+	}
+	// TRANSPARENT in-node DKG: deterministically consume the proposer-injected extended
+	// commit (dealings / decryption shares / enc-key announcements) into module state BEFORE
+	// module PreBlock/BeginBlock/EndBlock run this block. No-op unless the path is active and a
+	// blob is present (see consumeDkgVoteExtensions). ProcessProposal already self-certified it.
+	if req != nil {
+		app.consumeDkgVoteExtensions(ctx, req.Txs)
 	}
 	return app.ModuleManager.PreBlock(ctx)
 }
