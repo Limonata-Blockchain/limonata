@@ -65,8 +65,16 @@ func transparentParams(thr uint32, maxMembers uint32) types.Params {
 		DkgEnabled: true, DkgTransparent: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMaxMembers: maxMembers,
 		DkgRetryBackoff: 5, DkgMaxAttempts: 8, DkgMinRekeyGap: 0,
+		// HIGH-3: a SMALL stake-apportionment budget keeps test dealings tiny/fast while still
+		// exercising the stake-weighted eval-point path (the live default is 256). With S=24 the
+		// reconstruction threshold is t = floor(2*24/3)+1 = 17.
+		DkgShareBudget: 24,
 	}
 }
+
+// transparentStakeThreshold is the stake-weighted reconstruction threshold t = floor(2S/3)+1
+// for the test share budget S, mirroring keeper.stakeThreshold for assertions.
+const transparentStakeThreshold = 2*24/3 + 1 // = 17
 
 func idxByOp(round types.DkgRound, op string) uint64 {
 	for _, m := range round.Members {
@@ -200,8 +208,8 @@ func TestTransparent_DealAndFinalize(t *testing.T) {
 	if !ok {
 		t.Fatal("no active key after finalize")
 	}
-	if len(ak.Qual) != 3 || ak.Threshold != 2 || len(ak.Pub) != 33 {
-		t.Fatalf("unexpected active key: qual=%v t=%d publen=%d", ak.Qual, ak.Threshold, len(ak.Pub))
+	if len(ak.Qual) != 3 || ak.Threshold != transparentStakeThreshold || len(ak.Pub) != 33 {
+		t.Fatalf("unexpected active key: qual=%v t=%d (want %d) publen=%d", ak.Qual, ak.Threshold, transparentStakeThreshold, len(ak.Pub))
 	}
 	if r, _ := k.GetDkgRound(ctx, 1); r.Status != types.DkgStatusActive {
 		t.Fatalf("round not active: %s", r.Status)

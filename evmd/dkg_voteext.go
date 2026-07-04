@@ -151,44 +151,55 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 const maxSharesPerExtension = 256
 
 // buildDecryptShares produces this node's DLEQ-proved decryption shares for in-flight
-// (not-yet-matured) ciphertexts of epochs it holds a share for. The per-epoch share X_m is
-// derived once from COMMITTED dealings + the epoch's QUAL set, then reused.
+// (not-yet-matured) ciphertexts of epochs it holds shares for. HIGH-3: on the stake-weighted
+// path this node owns a SET of Shamir evaluation points, so it contributes ONE decryption share
+// per owned point per ciphertext. The per-epoch shares X_p are derived once from COMMITTED
+// dealings + the epoch's QUAL set, then reused. The total emitted is capped at
+// maxSharesPerExtension to bound vote-extension size (the rest are picked up on later heights).
 func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey, op string) []encmempooltypes.VoteExtShare {
 	k := app.EncMempoolKeeper
 	h := uint64(ctx.BlockHeight())
 	shareByEpoch := map[uint64]*sharedCache{}
 	var out []encmempooltypes.VoteExtShare
 	k.IterateInFlightFrom(ctx, h, maxSharesPerExtension, func(e encmempooltypes.EncTx) bool {
+		if len(out) >= maxSharesPerExtension {
+			return false // vote-extension share budget reached
+		}
 		if e.Epoch == 0 {
 			return true // legacy trusted-setup path is not served by the in-node DKG
 		}
 		sc := shareByEpoch[e.Epoch]
 		if sc == nil {
-			sc = app.deriveEpochShare(ctx, ek, op, e.Epoch)
+			sc = app.deriveEpochShares(ctx, ek, op, e.Epoch)
 			shareByEpoch[e.Epoch] = sc
 		}
 		if !sc.ok {
 			return true // not a member / not finalized: nothing to contribute
 		}
-		d, proof, err := dkgnode.ProveShareFor(sc.share, e.A)
-		if err != nil {
-			return true
+		for _, sh := range sc.shares {
+			if len(out) >= maxSharesPerExtension {
+				break
+			}
+			d, proof, err := dkgnode.ProveShareFor(sh, e.A)
+			if err != nil {
+				continue
+			}
+			out = append(out, encmempooltypes.VoteExtShare{
+				Epoch: e.Epoch, DecryptHeight: e.DecryptHeight, Seq: e.Seq,
+				Index: sh.Index, D: d, Proof: proof,
+			})
 		}
-		out = append(out, encmempooltypes.VoteExtShare{
-			Epoch: e.Epoch, DecryptHeight: e.DecryptHeight, Seq: e.Seq,
-			Index: sc.share.Index, D: d, Proof: proof,
-		})
 		return true
 	})
 	return out
 }
 
 type sharedCache struct {
-	ok    bool
-	share threshold.Share
+	ok     bool
+	shares []threshold.Share
 }
 
-func (app *EVMD) deriveEpochShare(ctx sdk.Context, ek *dkgnode.EncKey, op string, epoch uint64) *sharedCache {
+func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op string, epoch uint64) *sharedCache {
 	k := app.EncMempoolKeeper
 	round, ok := k.GetDkgRound(ctx, epoch)
 	if !ok {
@@ -198,17 +209,29 @@ func (app *EVMD) deriveEpochShare(ctx sdk.Context, ek *dkgnode.EncKey, op string
 	if idx == 0 {
 		return &sharedCache{}
 	}
+	// Resolve THIS node's owned evaluation points from the round (its stake-allocated share
+	// indices; a single point == its Index on the unweighted path).
+	var myPoints []uint64
+	for _, m := range round.Members {
+		if m.Index == idx {
+			myPoints = m.OwnedEvalPoints()
+			break
+		}
+	}
+	if len(myPoints) == 0 {
+		return &sharedCache{}
+	}
 	ak, ok := k.GetActiveKey(ctx, epoch)
 	if !ok {
 		return &sharedCache{} // round not finalized yet
 	}
 	dealings := map[uint64]encmempooltypes.Dealing{}
 	k.IterateDealings(ctx, epoch, func(d encmempooltypes.Dealing) { dealings[d.DealerIndex] = d })
-	share, err := dkgnode.DeriveShare(idx, ek.Priv, ak.Qual, dealings)
+	shares, err := dkgnode.DeriveShares(myPoints, ek.Priv, ak.Qual, dealings)
 	if err != nil {
 		return &sharedCache{}
 	}
-	return &sharedCache{ok: true, share: share}
+	return &sharedCache{ok: true, shares: shares}
 }
 
 // ---- VerifyVoteExtension: lenient structural check (heavy validation is on-chain) ----

@@ -90,13 +90,15 @@ func TestReg_H4_SelfIdentifyByOperator(t *testing.T) {
 	}
 }
 
-// HIGH-3 — the committee is STAKE-ranked but the Shamir threshold is a member COUNT, so a
-// stake-minority Sybil can hold a seat-majority. The decrypt path now additionally requires
-// the contributing set to hold a STRICT MAJORITY of committee stake, so a stake-minority
-// seat-majority can no longer form a valid decrypting set.
+// HIGH-3 — the committee is STAKE-ranked, and stake is now baked into the CRYPTOGRAPHY:
+// each member is allocated Shamir evaluation points PROPORTIONAL to its stake within budget S,
+// and the reconstruction threshold is t = floor(2S/3)+1 of them. So a stake-minority seat-
+// majority holds < t points and cannot reconstruct (on OR off chain), while the full committee
+// holds all S >= t. This asserts the committee-level allocation property; the off-chain
+// reconstruction itself is exercised in the H3 regression tests.
 //
-// PRE-FIX: there was no stake gate; the attacker's >= t seats alone decrypted. The
-// DecryptingSetMeetsStake(attacker)==false assertion is the fix and fails pre-fix.
+// PRE-FIX: the threshold was a member COUNT, so the attacker's seat-majority == a share-majority
+// and it decrypted. Bounding its eval points to its stake fraction is the fix.
 func TestReg_H3_StakeMinoritySeatMajorityCannotDecrypt(t *testing.T) {
 	var vals []stakingtypes.Validator
 	members := map[string]member{}
@@ -119,7 +121,7 @@ func TestReg_H3_StakeMinoritySeatMajorityCannotDecrypt(t *testing.T) {
 	}
 
 	k, ctx := newKeeperSK(t, 1, &mockStaking{vals: vals})
-	p := transparentParams(0, 0) // DkgThreshold=0 -> count majority; default committee cap 16
+	p := transparentParams(0, 0) // committee cap 16, share budget S=24 (=> t=17)
 	_ = k.SetParams(ctx, p)
 	for _, m := range members {
 		k.RecordEncPubKey(ctx, m.op, m.pub, dkg.SignEncKeyPoP(m.priv, m.op))
@@ -127,35 +129,48 @@ func TestReg_H3_StakeMinoritySeatMajorityCannotDecrypt(t *testing.T) {
 
 	committee := k.ActiveMembers(ctx, p)
 	n := len(committee)
-	tThreshold := n/2 + 1
+	tThreshold := int(2*types.TotalEvalPoints(committee)/3 + 1) // stake-fraction threshold on S
 
 	attacker := map[uint64]bool{}
-	attackerSeats := 0
+	attackerSeats, attackerPoints, totalPoints := 0, 0, 0
 	for _, cm := range committee {
+		totalPoints += len(cm.OwnedEvalPoints())
 		if strings.HasPrefix(cm.OperatorAddr, "attacker") {
 			attacker[cm.Index] = true
 			attackerSeats++
+			attackerPoints += len(cm.OwnedEvalPoints())
 		}
 	}
 
-	// Preconditions of the finding still hold: attacker is a COUNT-majority and a stake-MINORITY.
-	if attackerSeats < tThreshold {
-		t.Fatalf("expected attacker to hold a count-majority (>= t=%d) of seats, got %d", tThreshold, attackerSeats)
+	// Preconditions: attacker is a SEAT-majority and a stake-MINORITY.
+	if attackerSeats <= n/2 {
+		t.Fatalf("expected attacker to hold a seat majority, got %d of %d", attackerSeats, n)
 	}
 	if attackerStake >= honestStake {
 		t.Fatalf("expected attacker to be a stake minority, got attacker=%d honest=%d", attackerStake, honestStake)
 	}
 
-	// THE FIX: the stake-minority seat-majority is NOT a valid decrypting set.
-	if keeper.DecryptingSetMeetsStake(committee, attacker) {
-		t.Fatal("HIGH-3: a stake-minority seat-majority must NOT form a valid decrypting set")
+	// THE FIX: the stake-minority seat-majority holds < t EVALUATION POINTS, so it cannot gather
+	// the t Shamir shares reconstruction needs.
+	if attackerPoints >= tThreshold {
+		t.Fatalf("HIGH-3: attacker holds %d >= t=%d eval points (allocation must bound the minority)", attackerPoints, tThreshold)
 	}
-	// The full committee (a stake majority) still decrypts — liveness preserved.
+	// The full committee owns the entire budget (>= t) — liveness preserved.
+	if totalPoints < tThreshold {
+		t.Fatalf("the full committee must own >= t=%d eval points, got %d", tThreshold, totalPoints)
+	}
+	// Defense-in-depth: the on-chain stake gate also rejects the stake-minority member set and
+	// accepts the full committee.
+	if keeper.DecryptingSetMeetsStake(committee, attacker) {
+		t.Fatal("defense-in-depth: a stake-minority seat-majority must fail the on-chain stake gate")
+	}
 	full := map[uint64]bool{}
 	for _, cm := range committee {
 		full[cm.Index] = true
 	}
 	if !keeper.DecryptingSetMeetsStake(committee, full) {
-		t.Fatal("the full committee (stake majority) must form a valid decrypting set")
+		t.Fatal("the full committee (stake majority) must pass the on-chain stake gate")
 	}
+	t.Logf("attacker seat-majority (%d/%d) holds %d < t=%d eval points; full committee owns %d",
+		attackerSeats, n, attackerPoints, tThreshold, totalPoints)
 }

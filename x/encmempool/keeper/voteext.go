@@ -167,7 +167,11 @@ func (k Keeper) TransparentMembers(ctx context.Context, p types.Params) []types.
 	for i, c := range cands {
 		out[i] = types.RoundMember{Index: uint64(i + 1), OperatorAddr: c.op, EncPubKey: c.key, Weight: c.tokens}
 	}
-	return out
+	// HIGH-3: allocate each member a stake-proportional block of Shamir evaluation points
+	// within the fixed budget S, deterministically from the snapshotted weights. This is what
+	// makes off-chain reconstruction require a stake supermajority (a stake-minority holds < t
+	// points), instead of only gating the on-chain combine.
+	return AllocateEvalPoints(out, p.EffectiveShareBudget())
 }
 
 // memberIndexByOperator returns a round member's index by operator address, or 0.
@@ -175,21 +179,17 @@ func memberIndexByOperator(round types.DkgRound, op string) uint64 {
 	return types.MemberIndexByOperator(round.Members, op)
 }
 
-// DecryptingSetMeetsStake reports whether the committee members whose share indices are in
-// `present` collectively hold a STRICT MAJORITY of the committee's snapshotted stake weight.
+// DecryptingSetMeetsStake reports whether the committee MEMBERS whose indices are in `present`
+// collectively hold a STRICT MAJORITY of the committee's snapshotted stake weight (2*got > total).
 //
-// HIGH-3: the committee seats are STAKE-ranked (top-N by tokens), but the Shamir decryption
-// threshold is a member COUNT, so a stake-minority Sybil holding a seat-majority could reach
-// the count and capture decryption. Gating the decrypting set on a strict stake majority
-// closes that: a stake-minority set (even a seat-majority) can never satisfy 2*got > total,
-// while the honest stake majority always can (in transparent operation every member serves a
-// share). It reduces to the count threshold alone on the LEGACY/unweighted path (no weights
-// recorded => returns true), preserving existing behavior.
-//
-// Policy justification: a STRICT MAJORITY (> 1/2 stake) is the minimal bar that guarantees no
-// stake-minority can decrypt AND that any honest stake majority can always block a premature
-// decryption; a stricter > 2/3 bar (BFT) would let a 1/3 stake minority block liveness, which
-// is a heavier tradeoff than this dormant feature warrants. It is overflow-safe (sdkmath.Int).
+// HIGH-3 (DEMOTED to defense-in-depth): stake is now baked into the CRYPTOGRAPHY via
+// stake-weighted Shamir evaluation points (see AllocateEvalPoints / stakeThreshold), so the
+// real capability check is "does the decrypting set hold >= t = floor(2S/3)+1 evaluation
+// points", which the recover path enforces directly. This member-stake-majority test is retained
+// only as a redundant guard on the on-chain combine (recoverSharedSecret maps present eval points
+// to their owning members before calling it). It reduces to a no-op on the LEGACY/unweighted path
+// (no weights recorded => returns true), preserving existing behavior. It is overflow-safe
+// (sdkmath.Int).
 func DecryptingSetMeetsStake(members []types.RoundMember, present map[uint64]bool) bool {
 	total := sdkmath.ZeroInt()
 	got := sdkmath.ZeroInt()
@@ -350,9 +350,13 @@ func (k Keeper) IngestDealingFromVE(ctx sdk.Context, round types.DkgRound, opera
 	return true
 }
 
-// validateDealingShape enforces the SAME well-formedness the DkgDeal handler enforces:
-// exactly `threshold` valid compressed commitment points, and exactly one well-formed
-// enc-share (valid compressed A, exact-length nonce, non-empty body) per member index.
+// validateDealingShape enforces well-formedness of a stake-weighted dealing: exactly
+// `threshold` valid compressed commitment points (the degree-(t-1) Feldman polynomial), and
+// exactly one well-formed enc-share (valid compressed A, exact-length nonce, non-empty body)
+// per EVALUATION POINT in the round's budget domain — each addressed to a point some member
+// owns, with no duplicates. On the unweighted legacy path each member owns a single point ==
+// its index, so this reduces to one enc-share per member. This mirrors the DkgDeal handler's
+// intent so a malformed dealing can never enter QUAL.
 func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares []types.DkgStoredEncShare) error {
 	if len(commitments) != int(round.Threshold) {
 		return fmt.Errorf("expected %d commitments, got %d", round.Threshold, len(commitments))
@@ -360,26 +364,26 @@ func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares 
 	if _, err := dkg.ParseCommitmentPoints(commitments); err != nil {
 		return fmt.Errorf("malformed commitment: %w", err)
 	}
-	n := len(round.Members)
-	if len(encShares) != n {
-		return fmt.Errorf("expected %d enc_shares, got %d", n, len(encShares))
+	want := types.TotalEvalPoints(round.Members)
+	if len(encShares) != want {
+		return fmt.Errorf("expected %d enc_shares (one per eval point), got %d", want, len(encShares))
 	}
-	seen := make(map[uint64]bool, n)
+	seen := make(map[uint64]bool, want)
 	for _, s := range encShares {
-		if _, ok := memberByIndex(round, s.MemberIndex); !ok {
-			return fmt.Errorf("enc_share for non-member index %d", s.MemberIndex)
+		if types.EvalPointOwner(round.Members, s.MemberIndex) == 0 {
+			return fmt.Errorf("enc_share for unowned eval point %d", s.MemberIndex)
 		}
 		if seen[s.MemberIndex] {
-			return fmt.Errorf("duplicate enc_share for member %d", s.MemberIndex)
+			return fmt.Errorf("duplicate enc_share for eval point %d", s.MemberIndex)
 		}
 		if !dkg.ValidCompressedPoint(s.A) {
-			return fmt.Errorf("enc_share for member %d has malformed A", s.MemberIndex)
+			return fmt.Errorf("enc_share for eval point %d has malformed A", s.MemberIndex)
 		}
 		if len(s.Nonce) != threshold.NonceSize {
-			return fmt.Errorf("enc_share for member %d has bad nonce length %d", s.MemberIndex, len(s.Nonce))
+			return fmt.Errorf("enc_share for eval point %d has bad nonce length %d", s.MemberIndex, len(s.Nonce))
 		}
 		if len(s.Body) == 0 {
-			return fmt.Errorf("empty enc_share body for member %d", s.MemberIndex)
+			return fmt.Errorf("empty enc_share body for eval point %d", s.MemberIndex)
 		}
 		seen[s.MemberIndex] = true
 	}
@@ -387,12 +391,13 @@ func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares 
 }
 
 // IngestDecryptShareFromVE authorizes + stores a DLEQ-proved decryption share carried on a
-// vote extension, authorizing by OPERATOR against the ciphertext's epoch round (the operator
-// must be a member and the share index must equal its member index). It mirrors the
-// SubmitDecryptionShare msg-server authorization, minus the account/signer. First-wins per
-// (decryptHeight, seq, memberIndex). The stored EncShare.Keyper is the operator address (a
-// unique per-member dedup key); the decrypt path (recoverSharedSecret) uses only Index/D/Proof.
-// Returns whether it stored a new share.
+// vote extension, authorizing by OPERATOR against the ciphertext's epoch round: the operator
+// must be a member AND the share's index must be an EVALUATION POINT that member OWNS (HIGH-3 —
+// so a member can only ever contribute shares at its own stake-allocated points, never claim
+// another member's point). It mirrors the SubmitDecryptionShare msg-server authorization, minus
+// the account/signer. First-wins per (decryptHeight, seq, evalPoint). The stored EncShare.Keyper
+// is the operator address (attribution only); the decrypt path (recoverSharedSecret) uses only
+// Index/D/Proof. Returns whether it stored a new share.
 func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s types.VoteExtShare) bool {
 	if len(s.D) == 0 {
 		return false
@@ -406,17 +411,23 @@ func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s typ
 		return false
 	}
 	idx := memberIndexByOperator(round, operator)
-	if idx == 0 || idx != s.Index {
-		return false // not a member of the epoch, or claimed the wrong index
+	if idx == 0 {
+		return false // operator is not a member of the epoch
 	}
-	// First-wins: a member cannot overwrite its own already-recorded share for this ct.
+	member, ok := memberByIndex(round, idx)
+	if !ok || !member.OwnsEvalPoint(s.Index) {
+		return false // the claimed eval point is not one this member owns
+	}
+	// First-wins per EVALUATION POINT: an already-recorded share at this point (by anyone) is
+	// not overwritten. Since each point is owned by exactly one member, this both dedups a
+	// member's own re-submission and blocks a claim on another member's point.
 	for _, ex := range k.CollectShares(ctx, s.DecryptHeight, s.Seq) {
-		if ex.Index == idx {
+		if ex.Index == s.Index {
 			return false
 		}
 	}
 	if k.SetEncShare(ctx, types.EncShare{
-		Keyper: operator, DecryptHeight: s.DecryptHeight, Seq: s.Seq, Index: idx, D: s.D, Proof: s.Proof,
+		Keyper: operator, DecryptHeight: s.DecryptHeight, Seq: s.Seq, Index: s.Index, D: s.D, Proof: s.Proof,
 	}) != nil {
 		return false
 	}

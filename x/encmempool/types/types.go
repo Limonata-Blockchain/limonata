@@ -71,6 +71,15 @@ type Params struct {
 	// vote-extension / injected-block-data size on a large validator set. Only meaningful
 	// on the transparent path.
 	DkgMaxMembers uint32 `json:"dkg_max_members"`
+
+	// DkgShareBudget is the FIXED total number of Shamir evaluation points S the transparent
+	// committee's stake is apportioned across (HIGH-3 stake-weighted secret sharing). Each
+	// member gets ~round(stake_fraction * S) distinct points, and the reconstruction
+	// threshold is t = floor(2S/3)+1 of them, so gathering t points requires a stake
+	// supermajority. It is a FIXED cap (0 => DefaultDkgShareBudget=256) so the per-dealing /
+	// vote-extension size stays O(S) regardless of raw stake magnitude. Only meaningful on
+	// the transparent path.
+	DkgShareBudget uint32 `json:"dkg_share_budget"`
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -103,11 +112,75 @@ type RoundMember struct {
 	// Weight is the member's committee STAKE weight, snapshotted at round-open (the
 	// transparent path records the validator's tokens; the legacy declared path leaves it
 	// zero). It is NOT part of MembersHash, so a validator's stake drifting does not churn
-	// the member set / trigger a rekey. HIGH-3 uses it to require a decrypting set to hold
-	// a STRICT MAJORITY of committee stake, so a stake-minority Sybil that grabbed a
-	// seat-majority still cannot capture decryption. Zero/absent on the legacy path =>
-	// the count threshold alone governs (unchanged behavior).
+	// the member set / trigger a rekey. HIGH-3 uses it to allocate EvalPoints proportional
+	// to stake (see below), so a stake-minority Sybil that grabbed a seat-majority still
+	// cannot reconstruct the epoch secret. Zero/absent on the legacy path.
 	Weight sdkmath.Int `json:"weight"`
+
+	// EvalPoints are the Shamir EVALUATION POINTS (share indices) this member owns for the
+	// round, allocated PROPORTIONAL to its stake Weight within a bounded total budget S
+	// (HIGH-3). A member with stake fraction w owns ~round(w*S) distinct points; the whole
+	// committee's points are the contiguous domain 1..S. Because the reconstruction
+	// threshold t is a fraction of S (t = floor(2S/3)+1), assembling t points requires a
+	// stake supermajority — so a stake-MINORITY seat-MAJORITY holds < t points and CANNOT
+	// reconstruct the secret even off-chain. It is a deterministic pure function of the
+	// snapshotted Weight (see keeper.AllocateEvalPoints) so every node allocates identically.
+	//
+	// EMPTY on the legacy/declared path (and on hand-built rounds): the member then owns the
+	// single point equal to its Index — see OwnedEvalPoints — which preserves the original
+	// unweighted (one-share-per-member, count-threshold) behaviour byte-for-byte.
+	EvalPoints []uint64 `json:"eval_points,omitempty"`
+}
+
+// OwnedEvalPoints returns the Shamir evaluation points this member holds a share at.
+//
+//   - Stake-weighted transparent path: its allocated EvalPoints. A member allocated ZERO points
+//     (negligible stake) owns NOTHING — the empty result is correct, NOT a fallback to its index.
+//     Such a member is identified by carrying a positive stake Weight while having no EvalPoints.
+//   - Unweighted legacy/declared/hand-built round: no stake Weight is recorded, so the member
+//     falls back to the single point equal to its Index (one share per member), preserving the
+//     original scheme byte-for-byte.
+func (m RoundMember) OwnedEvalPoints() []uint64 {
+	if len(m.EvalPoints) > 0 {
+		return m.EvalPoints
+	}
+	if !m.Weight.IsNil() && m.Weight.IsPositive() {
+		return nil // weighted member allocated zero points: owns no shares
+	}
+	return []uint64{m.Index}
+}
+
+// OwnsEvalPoint reports whether this member holds a share at Shamir evaluation point p.
+func (m RoundMember) OwnsEvalPoint(p uint64) bool {
+	for _, q := range m.OwnedEvalPoints() {
+		if q == p {
+			return true
+		}
+	}
+	return false
+}
+
+// TotalEvalPoints is the size of the round's Shamir evaluation-point domain S' = Σ|EvalPoints|
+// over all members (the bounded budget S on the weighted path; the member count n on the
+// unweighted path). It is what the reconstruction threshold is a fraction of.
+func TotalEvalPoints(members []RoundMember) int {
+	total := 0
+	for _, m := range members {
+		total += len(m.OwnedEvalPoints())
+	}
+	return total
+}
+
+// EvalPointOwner returns the member index that owns Shamir evaluation point p in the round,
+// or 0 if p is not owned by any member. Used to authorize a decryption share carried on a
+// vote extension (the share's index must be a point its operator actually owns).
+func EvalPointOwner(members []RoundMember, p uint64) uint64 {
+	for _, m := range members {
+		if m.OwnsEvalPoint(p) {
+			return m.Index
+		}
+	}
+	return 0
 }
 
 // MemberIndexByOperator returns the 1-based DKG member index for `operator` in `members`,
@@ -161,6 +234,13 @@ type DkgRound struct {
 }
 
 // DkgStoredEncShare is one encrypted point-to-point share as stored on chain.
+//
+// MemberIndex is the Shamir EVALUATION POINT (share index) this sealed share f_dealer(p) is
+// for; the ciphertext is ECIES-sealed to the enc key of the member that OWNS that point. On
+// the stake-weighted transparent path a dealing carries one entry per evaluation point in the
+// budget domain 1..S (a member owning k points receives k entries, all under its own key). On
+// the unweighted legacy path there is exactly one entry per member and the point equals the
+// member's index — so the field name still reads naturally there.
 type DkgStoredEncShare struct {
 	MemberIndex uint64 `json:"member_index"`
 	A           []byte `json:"a"`
@@ -403,6 +483,15 @@ const (
 const (
 	DefaultDkgMaxMembers uint32 = 16
 	maxDkgCommittee      uint32 = 128
+	// DefaultDkgShareBudget is the fixed stake-apportionment budget S used when
+	// DkgShareBudget==0. 256 gives ~0.4%/point stake resolution and keeps the worst-case
+	// largest-remainder rounding slop (<= committee_size/2 <= 64) well below the S/3 margin
+	// that separates a 1/3-stake adversary's points from the t=floor(2S/3)+1 threshold, so a
+	// within-BFT (<=1/3 stake) adversary can never assemble t points. See keeper.stakeThreshold.
+	DefaultDkgShareBudget uint32 = 256
+	// maxDkgShareBudget bounds a governance-set budget so per-dealing / vote-extension size
+	// (O(S) sealed shares + O(t) commitments) cannot be blown up without bound.
+	maxDkgShareBudget uint32 = 4096
 )
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
@@ -433,7 +522,22 @@ func (p Params) ValidateDkgWindows() error {
 	if p.DkgMaxMembers > maxDkgCommittee {
 		return fmt.Errorf("dkg_max_members (%d) must be <= %d", p.DkgMaxMembers, maxDkgCommittee)
 	}
+	// DkgShareBudget=0 means "use DefaultDkgShareBudget"; a positive value must not exceed the
+	// absolute budget ceiling (bounds per-dealing / vote-extension size).
+	if p.DkgShareBudget > maxDkgShareBudget {
+		return fmt.Errorf("dkg_share_budget (%d) must be <= %d", p.DkgShareBudget, maxDkgShareBudget)
+	}
 	return nil
+}
+
+// EffectiveShareBudget returns the stake-apportionment budget S actually applied:
+// DkgShareBudget, or DefaultDkgShareBudget when it is 0. Always <= maxDkgShareBudget
+// (enforced by Validate).
+func (p Params) EffectiveShareBudget() int {
+	if p.DkgShareBudget == 0 {
+		return int(DefaultDkgShareBudget)
+	}
+	return int(p.DkgShareBudget)
 }
 
 // EffectiveMaxMembers returns the committee cap actually applied: DkgMaxMembers, or

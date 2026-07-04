@@ -343,10 +343,11 @@ func MembersHash(members []types.RoundMember) []byte {
 }
 
 // roundThreshold picks the COUNT threshold t for a round of n members: params.DkgThreshold
-// if it is in [1, n], else the honest majority floor(n/2)+1. On the STAKE-ranked transparent
-// committee a count threshold alone is not enough (a stake-minority can hold a seat-majority),
-// so the decrypt path additionally gates on a strict stake majority — see DecryptingSetMeetsStake
-// (HIGH-3). t remains a member count because the underlying Shamir scheme is unweighted.
+// if it is in [1, n], else the honest majority floor(n/2)+1. This governs the LEGACY/declared
+// (unweighted) path, where every member holds exactly one Shamir share. The STAKE-WEIGHTED
+// transparent path does NOT use it — there the threshold is a fraction of the evaluation-point
+// budget S (see stakeThreshold), so that assembling t shares provably requires a stake
+// supermajority (HIGH-3), and DkgThreshold (a member count) has no meaning.
 func roundThreshold(p types.Params, n int) uint32 {
 	if p.DkgThreshold >= 1 && int(p.DkgThreshold) <= n {
 		return p.DkgThreshold
@@ -361,9 +362,16 @@ func roundThreshold(p types.Params, n int) uint32 {
 // ============================================================================
 
 func (k Keeper) finalizeRound(ctx sdk.Context, round types.DkgRound) {
+	// HIGH-3: build the per-member evaluation-point weights (stake-weighted transparent path)
+	// or unit weights (unweighted legacy path, where OwnedEvalPoints == {Index}). The QUAL set
+	// must collectively own >= round.Threshold points for the round to succeed — i.e. dealers
+	// representing a stake supermajority participated — which for the unweighted path reduces
+	// EXACTLY to the original |QUAL| >= t check.
 	members := make([]uint64, 0, len(round.Members))
+	weightOf := make(map[uint64]int, len(round.Members))
 	for _, m := range round.Members {
 		members = append(members, m.Index)
+		weightOf[m.Index] = len(m.OwnedEvalPoints())
 	}
 
 	var pubDealings []dkg.PublicDealing
@@ -380,7 +388,7 @@ func (k Keeper) finalizeRound(ctx sdk.Context, round types.DkgRound) {
 		}
 	})
 
-	res, err := dkg.FinalizePublic(members, int(round.Threshold), pubDealings, disq)
+	res, err := dkg.FinalizePublicWeighted(members, int(round.Threshold), pubDealings, disq, weightOf, int(round.Threshold))
 	if err != nil {
 		round.Status = types.DkgStatusFailed
 		_ = k.SetDkgRound(ctx, round)

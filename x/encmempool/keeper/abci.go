@@ -368,17 +368,23 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 		if len(shares) < need {
 			return nil, need, errNotEnoughShares
 		}
-		// HIGH-3: reconcile the COUNT threshold with STAKE. The committee seats are stake-ranked,
-		// so a count-majority can be a stake-minority; require the members actually contributing
-		// shares to hold a STRICT MAJORITY of committee stake. A stake-minority Sybil holding a
-		// seat-majority therefore cannot capture on-chain decryption. No-op on the legacy path
-		// (unweighted members => DecryptingSetMeetsStake returns true).
+		// HIGH-3 DEFENSE-IN-DEPTH: the stake weighting is now enforced by the CRYPTOGRAPHY —
+		// each member holds Shamir shares only at its stake-proportional evaluation points, and
+		// the threshold need = floor(2S/3)+1 is a fraction of the point budget, so the
+		// `len(shares) < need` gate above ALREADY means a decrypting set must control a stake
+		// supermajority (a stake-minority holds < need points and cannot even off-chain). This
+		// residual stake gate is kept only as a redundant guard: map each present evaluation
+		// point to its owning member and require those members to hold a strict majority of
+		// committee stake. It never rejects a crypto-valid set (need points => ~2/3 stake > 1/2)
+		// and is a no-op on the unweighted legacy path (no recorded weights => returns true).
 		if round, ok := k.GetDkgRound(ctx, e.Epoch); ok && len(round.Members) > 0 {
-			present := make(map[uint64]bool, len(shares))
+			memberPresent := make(map[uint64]bool, len(shares))
 			for _, s := range shares {
-				present[s.Index] = true
+				if owner := types.EvalPointOwner(round.Members, s.Index); owner != 0 {
+					memberPresent[owner] = true
+				}
 			}
-			if !DecryptingSetMeetsStake(round.Members, present) {
+			if !DecryptingSetMeetsStake(round.Members, memberPresent) {
 				return nil, need, errStakeMinority
 			}
 		}

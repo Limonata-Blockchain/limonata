@@ -187,7 +187,16 @@ func (k Keeper) retryFailedRound(ctx sdk.Context, prevEpoch uint64, lastRound ty
 // can auto-deal off block events without a custom query endpoint. attempt/reason are
 // emitted so operators can watch convergence (start / member_change / retry).
 func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMember, hash []byte, h uint64, p types.Params, attempt uint64, reason string) {
-	t := roundThreshold(p, len(members))
+	// HIGH-3: on the STAKE-WEIGHTED transparent path the threshold is a fraction of the
+	// evaluation-point budget S (t = floor(2S/3)+1), so gathering t Shamir shares requires a
+	// stake supermajority. On the legacy/declared path (unweighted, one point per member) it
+	// stays the member COUNT threshold, unchanged.
+	var t uint32
+	if p.DkgTransparent {
+		t = stakeThreshold(types.TotalEvalPoints(members))
+	} else {
+		t = roundThreshold(p, len(members))
+	}
 	// MEDIUM FIXES: (1) the complaint window is FLOORED at >= 1 block so a dealing that
 	// lands on the deal deadline still has at least one block in which it can be
 	// complained about before finalize — a zero window would let a last-block bad dealer

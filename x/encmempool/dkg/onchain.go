@@ -52,8 +52,31 @@ type PublicResult struct {
 // Every node runs this over identical committed state, so all nodes compute an
 // identical PublicResult. It reads NO secret and cannot form msk.
 func FinalizePublic(members []uint64, t int, dealings []PublicDealing, disqualified []uint64) (*PublicResult, error) {
-	if t < 1 {
-		return nil, fmt.Errorf("invalid threshold t=%d (must be >= 1)", t)
+	// Unweighted path: every member counts as one Shamir share, and the QUAL size must be >= t
+	// (the reconstruction threshold == the dealer-count bar). This is exactly the original
+	// behaviour, so the legacy/declared DKG and the dkg-package tests are unchanged.
+	return FinalizePublicWeighted(members, t, dealings, disqualified, nil, t)
+}
+
+// FinalizePublicWeighted is the STAKE-WEIGHTED generalization of FinalizePublic (HIGH-3).
+//
+//   - degree is the number of Feldman commitments each dealer must publish, i.e. the sharing
+//     polynomial degree + 1 == the reconstruction threshold t. The aggregate key V has `degree`
+//     coefficients, and RecoverVerified needs t of the Shamir evaluation points to reconstruct.
+//   - weightOf[m] is the number of evaluation points member m owns (its stake weight in the
+//     bounded budget). nil => every member weighs 1 (the unweighted path).
+//   - minQualWeight is the minimum TOTAL evaluation-point weight the QUALified dealers must
+//     collectively represent for the round to succeed. On the transparent path this is set to t,
+//     so a round finalizes only when dealers owning >= t points (a stake supermajority, since
+//     points are stake-proportional) participated — the correct robustness/secrecy gate (msk is
+//     then guaranteed to mix in honest entropy, and enough of the committee dealt to reconstruct).
+//
+// Decoupling degree (the poly / reconstruction threshold, which can exceed the dealer COUNT once
+// points are stake-weighted) from the QUAL participation metric is exactly what lets a t=floor(
+// 2S/3)+1 threshold coexist with a committee of only n<=128 dealers.
+func FinalizePublicWeighted(members []uint64, degree int, dealings []PublicDealing, disqualified []uint64, weightOf map[uint64]int, minQualWeight int) (*PublicResult, error) {
+	if degree < 1 {
+		return nil, fmt.Errorf("invalid threshold t=%d (must be >= 1)", degree)
 	}
 	if len(members) == 0 {
 		return nil, fmt.Errorf("no members")
@@ -64,7 +87,7 @@ func FinalizePublic(members []uint64, t int, dealings []PublicDealing, disqualif
 	// and simply never enters byDealer (so its member is excluded from QUAL below).
 	byDealer := make(map[uint64][]secp256k1.JacobianPoint, len(dealings))
 	for _, d := range dealings {
-		if len(d.Commitments) != t {
+		if len(d.Commitments) != degree {
 			continue
 		}
 		pts, err := ParseCommitmentPoints(d.Commitments)
@@ -83,20 +106,22 @@ func FinalizePublic(members []uint64, t int, dealings []PublicDealing, disqualif
 	sorted := append([]uint64(nil), members...)
 	sortUint64(sorted)
 	var qual, disqOut []uint64
+	qualWeight := 0
 	for _, m := range sorted {
 		if _, dealt := byDealer[m]; !dealt || disq[m] {
 			disqOut = append(disqOut, m)
 			continue
 		}
 		qual = append(qual, m)
+		qualWeight += memberWeight(weightOf, m)
 	}
-	if len(qual) < t {
-		return nil, fmt.Errorf("DKG failed: |QUAL|=%d < t=%d", len(qual), t)
+	if qualWeight < minQualWeight {
+		return nil, fmt.Errorf("DKG failed: QUAL weight=%d < required=%d (|QUAL|=%d)", qualWeight, minQualWeight, len(qual))
 	}
 
 	// Aggregate V_j = Σ_{i∈QUAL} C_{i,j}. V_0 = (Σ s_i)*G = msk*G.
-	V := make([]secp256k1.JacobianPoint, t)
-	for j := 0; j < t; j++ {
+	V := make([]secp256k1.JacobianPoint, degree)
+	for j := 0; j < degree; j++ {
 		first := true
 		for _, i := range qual {
 			cij := byDealer[i][j]
@@ -110,11 +135,23 @@ func FinalizePublic(members []uint64, t int, dealings []PublicDealing, disqualif
 			V[j] = sum
 		}
 	}
-	vbz := make([][]byte, t)
+	vbz := make([][]byte, degree)
 	for j := range V {
 		vbz[j] = compressCopy(&V[j])
 	}
 	return &PublicResult{Pub: vbz[0], PublicCommitments: vbz, Qual: qual, Disqualified: disqOut}, nil
+}
+
+// memberWeight returns member m's evaluation-point weight from weightOf, defaulting to 1 when
+// weightOf is nil (the unweighted path) or has no entry for m.
+func memberWeight(weightOf map[uint64]int, m uint64) int {
+	if weightOf == nil {
+		return 1
+	}
+	if w, ok := weightOf[m]; ok {
+		return w
+	}
+	return 1
 }
 
 // ValidCompressedPoint reports whether b is a well-formed COMPRESSED secp256k1 point

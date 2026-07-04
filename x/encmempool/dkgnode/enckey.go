@@ -136,65 +136,81 @@ func (e *EncKey) MyIndex(members []types.RoundMember) uint64 {
 }
 
 // BuildDealing builds this node's Feldman dealing for a round: fresh commitments plus one
-// ECIES-sealed share per member. It is the in-node replacement for the daemon's MsgDkgDeal
-// construction; the secret polynomial never leaves this function.
+// ECIES-sealed share per EVALUATION POINT in the round's stake-weighted budget domain (each
+// point's share is sealed to the enc key of the member that owns it — HIGH-3). On the unweighted
+// legacy path each member owns exactly one point == its index, so this reduces to one sealed
+// share per member. It is the in-node replacement for the daemon's MsgDkgDeal construction; the
+// secret polynomial never leaves this function. The per-dealing size is O(S) (budget) sealed
+// shares + O(t) commitments, bounded regardless of raw stake.
 func BuildDealing(epoch uint64, members []types.RoundMember, myIndex uint64, thr int) (*types.VoteExtDealing, error) {
-	idxs := make([]uint64, len(members))
-	for i, m := range members {
-		idxs[i] = m.Index
+	// The full evaluation-point domain (union of every member's owned points).
+	var evalPoints []uint64
+	for _, m := range members {
+		evalPoints = append(evalPoints, m.OwnedEvalPoints()...)
 	}
-	commitments, shares, err := dkg.Deal(myIndex, idxs, thr, rand.Reader)
+	commitments, shares, err := dkg.Deal(myIndex, evalPoints, thr, rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	enc := make([]types.DkgStoredEncShare, 0, len(members))
+	enc := make([]types.DkgStoredEncShare, 0, len(evalPoints))
 	for _, m := range members {
-		ct, err := dkg.EncryptShareTo(m.EncPubKey, shares[m.Index])
-		if err != nil {
-			return nil, fmt.Errorf("seal share to member %d: %w", m.Index, err)
+		for _, p := range m.OwnedEvalPoints() {
+			s, ok := shares[p]
+			if !ok {
+				return nil, fmt.Errorf("missing share at eval point %d", p)
+			}
+			ct, err := dkg.EncryptShareTo(m.EncPubKey, s)
+			if err != nil {
+				return nil, fmt.Errorf("seal share at eval point %d to member %d: %w", p, m.Index, err)
+			}
+			enc = append(enc, types.DkgStoredEncShare{MemberIndex: p, A: ct.A, Nonce: ct.Nonce, Body: ct.Body})
 		}
-		enc = append(enc, types.DkgStoredEncShare{MemberIndex: m.Index, A: ct.A, Nonce: ct.Nonce, Body: ct.Body})
 	}
 	return &types.VoteExtDealing{Epoch: epoch, Commitments: commitments, EncShares: enc}, nil
 }
 
-// DeriveShare reconstructs this node's final Shamir share X_m = Σ_{i∈QUAL} f_i(m) by
-// opening the enc-share each QUAL dealer sealed to it. dealings is keyed by dealer index.
-// It is the in-node replacement for the daemon's onFinalized share accumulation, but reads
-// COMMITTED dealings instead of accumulated events.
-func DeriveShare(myIndex uint64, encPriv *secp256k1.ModNScalar, qual []uint64, dealings map[uint64]types.Dealing) (threshold.Share, error) {
-	X := new(secp256k1.ModNScalar)
-	first := true
-	for _, dealer := range qual {
-		d, ok := dealings[dealer]
-		if !ok {
-			return threshold.Share{}, fmt.Errorf("missing dealing from qual dealer %d", dealer)
-		}
-		var ct *threshold.Ciphertext
-		for i := range d.EncShares {
-			if d.EncShares[i].MemberIndex == myIndex {
-				ct = &threshold.Ciphertext{A: d.EncShares[i].A, Nonce: d.EncShares[i].Nonce, Body: d.EncShares[i].Body}
-				break
+// DeriveShares reconstructs this node's final Shamir shares — ONE per evaluation point it owns —
+// X_p = Σ_{i∈QUAL} f_i(p), by opening the enc-share each QUAL dealer sealed to it at point p.
+// dealings is keyed by dealer index. It is the in-node replacement for the daemon's onFinalized
+// share accumulation, but reads COMMITTED dealings instead of accumulated events. myEvalPoints is
+// the caller's OwnedEvalPoints() for the round (so on the unweighted path it is a single point).
+func DeriveShares(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []uint64, dealings map[uint64]types.Dealing) ([]threshold.Share, error) {
+	out := make([]threshold.Share, 0, len(myEvalPoints))
+	for _, p := range myEvalPoints {
+		X := new(secp256k1.ModNScalar)
+		first := true
+		for _, dealer := range qual {
+			d, ok := dealings[dealer]
+			if !ok {
+				return nil, fmt.Errorf("missing dealing from qual dealer %d", dealer)
+			}
+			var ct *threshold.Ciphertext
+			for i := range d.EncShares {
+				if d.EncShares[i].MemberIndex == p {
+					ct = &threshold.Ciphertext{A: d.EncShares[i].A, Nonce: d.EncShares[i].Nonce, Body: d.EncShares[i].Body}
+					break
+				}
+			}
+			if ct == nil {
+				return nil, fmt.Errorf("no enc-share at eval point %d from qual dealer %d", p, dealer)
+			}
+			s, err := dkg.DecryptShareFrom(encPriv, p, ct)
+			if err != nil {
+				return nil, fmt.Errorf("open share at eval point %d from dealer %d: %w", p, dealer, err)
+			}
+			if first {
+				X.Set(s)
+				first = false
+			} else {
+				X.Add(s)
 			}
 		}
-		if ct == nil {
-			return threshold.Share{}, fmt.Errorf("no enc-share for member %d from qual dealer %d", myIndex, dealer)
-		}
-		s, err := dkg.DecryptShareFrom(encPriv, myIndex, ct)
-		if err != nil {
-			return threshold.Share{}, fmt.Errorf("open share from dealer %d: %w", dealer, err)
-		}
 		if first {
-			X.Set(s)
-			first = false
-		} else {
-			X.Add(s)
+			return nil, fmt.Errorf("no qual dealers")
 		}
+		out = append(out, threshold.Share{Index: p, Xi: X})
 	}
-	if first {
-		return threshold.Share{}, fmt.Errorf("no qual dealers")
-	}
-	return threshold.Share{Index: myIndex, Xi: X}, nil
+	return out, nil
 }
 
 // ProveShareFor produces a DLEQ-proved decryption share for ciphertext component A (r*G,

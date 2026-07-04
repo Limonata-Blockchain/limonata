@@ -175,12 +175,12 @@ func (k Keeper) DeleteEncTx(ctx context.Context, decryptHeight, seq uint64) {
 }
 
 func (k Keeper) SetEncShare(ctx context.Context, s types.EncShare) error {
-	return k.store(ctx).Set(encShareKey(s.DecryptHeight, s.Seq, s.Keyper), mustJSON(s))
+	return k.store(ctx).Set(encShareKey(s.DecryptHeight, s.Seq, s.Index), mustJSON(s))
 }
 
 func (k Keeper) DeleteSharesFor(ctx context.Context, decryptHeight, seq uint64) {
 	for _, s := range k.CollectShares(ctx, decryptHeight, seq) {
-		_ = k.store(ctx).Delete(encShareKey(decryptHeight, seq, s.Keyper))
+		_ = k.store(ctx).Delete(encShareKey(decryptHeight, seq, s.Index))
 	}
 }
 
@@ -384,8 +384,14 @@ func encTxKey(decryptHeight, seq uint64) []byte {
 	return concat(types.EncTxPrefix, u64(decryptHeight), u64(seq))
 }
 
-func encShareKey(decryptHeight, seq uint64, keyper string) []byte {
-	return concat(types.EncSharePrefix, u64(decryptHeight), u64(seq), []byte(keyper))
+// encShareKey keys a decryption share by its Shamir evaluation-point INDEX (not the keyper).
+// HIGH-3: on the stake-weighted path a single keyper owns MULTIPLE evaluation points and thus
+// submits MULTIPLE shares per ciphertext, so keying by keyper would collide them. The eval-point
+// index is globally unique per round (a point is owned by exactly one member) and unique per
+// keyper on the unweighted legacy path (index == member index), so this is a safe, deterministic
+// dedup key on both paths.
+func encShareKey(decryptHeight, seq, index uint64) []byte {
+	return concat(types.EncSharePrefix, u64(decryptHeight), u64(seq), u64(index))
 }
 
 func mustJSON(v any) []byte {
