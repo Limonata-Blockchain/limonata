@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/cosmos/evm/x/encmempool/types"
@@ -147,6 +148,36 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		k.SetLastRekeyHeight(ctx, h)
 		k.openRound(ctx, cur+1, active, hash, h, p, 1, "member_change")
 
+	case lastRound.Status == types.DkgStatusActive && k.stakeDriftRekeyDue(ctx, lastRound, active, h, p):
+		// OPTIONAL STAKE-DRIFT / EPOCH-CADENCE REKEY (cycle-5; default-off). The OPERATOR set is
+		// UNCHANGED (this case is only reached when the member_change case did NOT fire, i.e.
+		// MembersHash is equal), but the snapshotted committee stake has aged: either the
+		// configured epoch cadence (DkgMaxEpochBlocks) elapsed or the live-vs-snapshot committee
+		// stake drifted past DkgRekeyOnStakeDriftBps. Re-genesis against the SAME members with a
+		// FRESH stake snapshot so the eval-point allocation re-tracks live stake and the
+		// snapshot-proven safety/liveness coupling is restored. It mirrors the member-change
+		// rekey — shed the superseded round's now-dead dealing bulk (its Active key keeps serving
+		// until the new round finalizes, and in-flight ciphertexts stamped to it still need its
+		// record), stamp LastRekeyHeight, open a fresh epoch — but KEEPS the operator set, so it
+		// is NOT a member_change and cannot reset the retry backoff. It fires only for an ACTIVE
+		// round (an Open round already returned above; a Failed round retries), is gap-dampened
+		// (no storm) and deterministic (a pure function of committed state), so every node rekeys
+		// at the identical height.
+		driftBps := committeeMaxCoalitionDriftBps(lastRound.Members, active)
+		k.purgeDealings(ctx, cur)
+		k.SetLastRekeyHeight(ctx, h)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_stake_drift_rekey",
+			sdk.NewAttribute("epoch", u64str(cur)),
+			sdk.NewAttribute("new_epoch", u64str(cur+1)),
+			sdk.NewAttribute("height", u64str(h)),
+			sdk.NewAttribute("open_height", u64str(lastRound.OpenHeight)),
+			sdk.NewAttribute("drift_bps", u64str(driftBps)),
+			sdk.NewAttribute("cadence_blocks", u64str(p.DkgMaxEpochBlocks)),
+			sdk.NewAttribute("drift_threshold_bps", u64str(p.DkgRekeyOnStakeDriftBps)),
+		))
+		k.openRound(ctx, cur+1, active, hash, h, p, 1, "stake_drift")
+
 	case lastRound.Status == types.DkgStatusFailed:
 		// AUTO-RETRY / SELF-HEAL against the (unchanged) member set. Backoff-gated + capped.
 		k.retryFailedRound(ctx, cur, lastRound, active, hash, h, p, "retry")
@@ -250,6 +281,105 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 		sdk.NewAttribute("round_json", string(roundJSON)),
 	))
 }
+
+// stakeDriftRekeyDue reports whether an OPTIONAL cadence/stake-drift rekey of the (unchanged)
+// committee is due at height h. Both triggers are DEFAULT-OFF (param 0 => disabled), so with the
+// defaults this is a cheap early false and EndBlockDKG is byte-identical to the pre-cycle-5
+// behavior. It is DETERMINISTIC — a pure function of committed state (the round's OpenHeight +
+// snapshotted member weights, the live committee weights already computed by ActiveMembers, and
+// h), with no wall-clock and no map-order feeding an output — so every node decides identically
+// (a non-deterministic rekey trigger would fork). It is BOUNDED by the shared DkgMinRekeyGap
+// flap-dampener (never more than one rekey per gap => no storm), and the caller only ever
+// considers it for an ACTIVE round.
+func (k Keeper) stakeDriftRekeyDue(ctx sdk.Context, round types.DkgRound, live []types.RoundMember, h uint64, p types.Params) bool {
+	if !p.DkgTransparent {
+		return false // stake weighting (and thus drift) only exists on the transparent path
+	}
+	if p.DkgMaxEpochBlocks == 0 && p.DkgRekeyOnStakeDriftBps == 0 {
+		return false // feature disabled: dormant behavior byte-identical
+	}
+	// Respect the flap-dampener: never rekey more than once per DkgMinRekeyGap. This bounds the
+	// rekey rate (no storm) and shares the exact guard the member-change path uses.
+	last := k.GetLastRekeyHeight(ctx)
+	if p.DkgMinRekeyGap > 0 && last != 0 && h < addSat(last, p.DkgMinRekeyGap) {
+		return false
+	}
+	// (a) EPOCH CADENCE: the frozen snapshot is at most DkgMaxEpochBlocks blocks old.
+	if p.DkgMaxEpochBlocks > 0 && h >= addSat(round.OpenHeight, p.DkgMaxEpochBlocks) {
+		return true
+	}
+	// (b) STAKE DRIFT: the live committee stake has drifted past the configured bps.
+	if p.DkgRekeyOnStakeDriftBps > 0 &&
+		committeeMaxCoalitionDriftBps(round.Members, live) >= p.DkgRekeyOnStakeDriftBps {
+		return true
+	}
+	return false
+}
+
+// committeeMaxCoalitionDriftBps returns the MAX COALITION stake-fraction drift, in basis points,
+// between a committee's SNAPSHOT weights (snapshot[i].Weight, frozen at round-open) and its LIVE
+// weights (live, recomputed this block by ActiveMembers over the SAME operator set). It equals
+// half the total-variation distance between the two committee stake distributions:
+//
+//	maxCoalitionDrift = (1/2) * Σ_op | w_live(op)/W_live − w_snap(op)/W_snap |
+//
+// which is EXACTLY the largest amount by which ANY coalition's true (live) stake fraction can
+// have moved away from the fraction its frozen eval-point allocation was sized for (a coalition
+// gaining fraction is mirrored by others losing it; the positive movements sum to half the L1
+// distance). Bounding this bounds how far the snapshot-proven safety/liveness coupling can erode
+// between rekeys: a coalition proven < 1/3 at snapshot is still < 1/3 + drift live.
+//
+// It is computed in EXACT big-integer arithmetic over the common denominator 2*W_snap*W_live (no
+// float, no rounding beyond the final floor-to-bps; overflow-safe for any stake magnitude) and
+// the sum is order-independent, so it is a deterministic pure function of committed state —
+// identical on every node. Operators are matched by address; an operator present in only one set
+// contributes its whole weight (a full move). Returns 0 when either committee total is
+// non-positive (degenerate — the member-change path governs a committee that lost all stake).
+func committeeMaxCoalitionDriftBps(snapshot, live []types.RoundMember) uint64 {
+	wSnap, wLive := sdkmath.ZeroInt(), sdkmath.ZeroInt()
+	snapOf := make(map[string]sdkmath.Int, len(snapshot))
+	for _, m := range snapshot {
+		w := weightOrZero(m.Weight)
+		snapOf[m.OperatorAddr] = w
+		wSnap = wSnap.Add(w)
+	}
+	liveOf := make(map[string]sdkmath.Int, len(live))
+	for _, m := range live {
+		w := weightOrZero(m.Weight)
+		liveOf[m.OperatorAddr] = w
+		wLive = wLive.Add(w)
+	}
+	if !wSnap.IsPositive() || !wLive.IsPositive() {
+		return 0
+	}
+	// Σ_op | w_live*W_snap − w_snap*W_live |. Iterate the deterministically-ordered SNAPSHOT
+	// slice for every snapshot operator, then the LIVE slice for operators the snapshot lacked;
+	// the running sum is order-independent regardless. (Committee operators are unique, so no
+	// double-counting.)
+	sumAbs := sdkmath.ZeroInt()
+	for _, m := range snapshot {
+		wl := weightOrZero(liveOf[m.OperatorAddr])
+		diff := wl.Mul(wSnap).Sub(weightOrZero(m.Weight).Mul(wLive)).Abs()
+		sumAbs = sumAbs.Add(diff)
+	}
+	for _, m := range live {
+		if _, ok := snapOf[m.OperatorAddr]; ok {
+			continue // already accounted in the snapshot pass (snapshot weight was included)
+		}
+		// Operator only live (not in the snapshot): snapshot weight 0 => |w_live*W_snap|.
+		sumAbs = sumAbs.Add(weightOrZero(m.Weight).Mul(wSnap).Abs())
+	}
+	// bps = sumAbs / (2 * W_snap * W_live) * 10000, floored. Deterministic integer division.
+	denom := wSnap.Mul(wLive).MulRaw(2)
+	bps := sumAbs.MulRaw(int64(maxBpsDenominator)).Quo(denom)
+	if bps.GT(sdkmath.NewInt(int64(maxBpsDenominator))) {
+		return maxBpsDenominator // clamp (rounding can only under-shoot, but be defensive)
+	}
+	return bps.Uint64()
+}
+
+// maxBpsDenominator is 100% expressed in basis points (10000), the scale drift is reported in.
+const maxBpsDenominator uint64 = 10000
 
 func max64(a, b uint64) uint64 {
 	if a > b {

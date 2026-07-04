@@ -341,9 +341,14 @@ func TestDecryptFloodBoundedAndFair(t *testing.T) {
 		t.Fatalf("want %d stored, got %d", flood+honestN, got)
 	}
 
-	// Block 12: everything matures (with ZERO shares posted — all short of t). Fairness must
-	// ATTEMPT every honest ciphertext THIS block (a decrypt_missed for each honest seq), while
-	// the H-B grace keeps share-less entries in state (non-silent deferral, ref-counts intact).
+	// Block 12: everything matures (with ZERO shares posted — all short of t). CYCLE-5 contract:
+	//   (bounded)  at most MaxDeferredDecryptsPerBlock ciphertexts are DEFERRED (decrypt_missed);
+	//              the rest of the attempted short ones are dropped LOUDLY (deferral_capped) so
+	//              the deferred backlog can never grow past the cap and starve the scan / VE.
+	//   (fair)     the defer slots are fair-shared across submitters, so an attacker flooding the
+	//              LOW seqs (head of the window) cannot consume every heal slot — every honest
+	//              ciphertext still gets a defer slot (a decrypt_missed).
+	//   (bounded work) attempts (missed + capped) equal the per-block decrypt cap.
 	b12 := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
@@ -363,18 +368,27 @@ func TestDecryptFloodBoundedAndFair(t *testing.T) {
 			}
 		}
 	}
+	// FAIRNESS: every honest ciphertext must get a fair defer slot despite the attacker owning
+	// the whole low-seq head of the window.
 	for _, seq := range honestSeq {
 		if !missedSeqs[seq] {
-			t.Fatalf("STARVATION: honest ciphertext seq %d not even attempted on block 12 (stuck behind the flood)", seq)
+			t.Fatalf("UNFAIR: honest ciphertext seq %d denied a defer slot (attacker monopolized the heal grace)", seq)
 		}
 	}
-	// Bounded per-block work: exactly the attempt cap was spent; nothing dropped yet (deferral).
-	if missed != keeper.MaxDecryptAttemptsPerBlock {
-		t.Fatalf("per-block attempts must equal the cap %d, got %d", keeper.MaxDecryptAttemptsPerBlock, missed)
+	// BOUNDED deferred set: exactly the cap deferred, never more.
+	if missed != keeper.MaxDeferredDecryptsPerBlock {
+		t.Fatalf("deferred set must equal the cap %d, got %d", keeper.MaxDeferredDecryptsPerBlock, missed)
 	}
+	capped := countEvents(b12, "encmempool_decrypt_deferral_capped")
+	// BOUNDED work: total attempts (deferred + capped-dropped) equal the per-block decrypt cap.
+	if missed+capped != keeper.MaxDecryptAttemptsPerBlock {
+		t.Fatalf("attempts (missed %d + capped %d) must equal the decrypt cap %d", missed, capped, keeper.MaxDecryptAttemptsPerBlock)
+	}
+	// The capped drops are LOUD and H2-safe: state fell by exactly the capped count, and the
+	// global in-flight counter agrees with stored EncTx (no leak, no silent loss).
 	remaining := countEncTx(k, b12)
-	if remaining != flood+honestN {
-		t.Fatalf("within the grace nothing may drop: want %d in state, got %d", flood+honestN, remaining)
+	if remaining != flood+honestN-capped {
+		t.Fatalf("state must fall by exactly the capped drops: want %d, got %d", flood+honestN-capped, remaining)
 	}
 	if uint64(remaining) != k.GetGlobalEncCount(b12) {
 		t.Fatalf("global in-flight counter (%d) disagrees with stored EncTx (%d)", k.GetGlobalEncCount(b12), remaining)
@@ -383,29 +397,38 @@ func TestDecryptFloodBoundedAndFair(t *testing.T) {
 		t.Fatal("expected a deferred event while the flood drains")
 	}
 
-	// Grace expiry (12 + StrandedDecryptGraceBlocks): the backlog is stranded-dropped LOUDLY,
-	// bounded per block — exactly the cap on the first expiry block.
+	// Drain the remaining backlog block by block. INVARIANTS every block: the deferred set never
+	// exceeds the cap, no ciphertext is ever silently lost (every state removal has a loud
+	// event), and the grace expiry (block 12+grace) drops the never-healed remainder LOUDLY.
 	expiry := int64(12 + keeper.StrandedDecryptGraceBlocks)
-	bx := ctx.WithBlockHeight(expiry).WithEventManager(sdk.NewEventManager())
-	if err := k.BeginBlock(bx); err != nil {
-		t.Fatal(err)
-	}
-	if !hasEvent(bx, "encmempool_decrypt_stranded") {
-		t.Fatal("H-B REGRESSION: grace expiry must drop with a LOUD encmempool_decrypt_stranded event")
-	}
-	if dropped := flood + honestN - countEncTx(k, bx); dropped != keeper.MaxDecryptAttemptsPerBlock {
-		t.Fatalf("per-block stranded drops must equal the cap %d, got %d", keeper.MaxDecryptAttemptsPerBlock, dropped)
-	}
-
-	// The rest drains over the next blocks: bounded deferral, no strand, no leak.
-	for h := expiry + 1; h <= expiry+8; h++ {
+	sawStranded := false
+	for h := int64(13); h <= expiry+4; h++ {
+		before := countEncTx(k, ctx)
 		bctx := ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager())
 		if err := k.BeginBlock(bctx); err != nil {
 			t.Fatal(err)
 		}
+		if m := countEvents(bctx, "encmempool_decrypt_missed"); m > keeper.MaxDeferredDecryptsPerBlock {
+			t.Fatalf("block %d deferred %d > cap %d", h, m, keeper.MaxDeferredDecryptsPerBlock)
+		}
+		// No silent loss: state removed this block == the loud drops (decrypted + stranded +
+		// deferral_capped). decrypt_missed does NOT remove state (the entry is kept).
+		removed := before - countEncTx(k, bctx)
+		loud := countEvents(bctx, "encmempool_decrypted") +
+			countEvents(bctx, "encmempool_decrypt_stranded") +
+			countEvents(bctx, "encmempool_decrypt_deferral_capped")
+		if removed != loud {
+			t.Fatalf("block %d removed %d ciphertexts but only %d loud drops (silent loss!)", h, removed, loud)
+		}
+		if countEvents(bctx, "encmempool_decrypt_stranded") > 0 {
+			sawStranded = true
+		}
 		if countEncTx(k, bctx) == 0 {
 			break
 		}
+	}
+	if !sawStranded {
+		t.Fatal("H-B REGRESSION: the never-healed remainder must drop with a LOUD encmempool_decrypt_stranded event")
 	}
 	if got := countEncTx(k, ctx); got != 0 {
 		t.Fatalf("flood did not fully drain: %d remain", got)

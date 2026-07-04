@@ -193,7 +193,30 @@ const (
 	// through releaseEncTx (H2: epoch ref-count + maybePruneEpoch), and the always-on ceiling
 	// drop still sheds excess regardless of grace. ~64s at 2s blocks.
 	strandedDecryptGraceBlocks = 32
+	// maxDeferredDecryptsPerBlock CAPS how many matured-but-short ciphertexts may be DEFERRED
+	// (kept in state within their StrandedDecryptGrace window awaiting late shares) in a single
+	// block. It bounds the concurrently-deferred set: once this many entries defer in a block,
+	// any FURTHER shortfall is dropped IMMEDIATELY (loud encmempool_decrypt_deferral_capped,
+	// H2-safe via releaseEncTx) instead of deferred.
+	//
+	// WHY (cycle-5): the grace deferral keeps short ciphertexts in state for up to 32 blocks. The
+	// scan (CollectMaturedUpTo) and the vote-extension share serving (buildDecryptShares, from
+	// h-grace) both process the (decryptHeight, seq) keyspace OLDEST-FIRST, so deferred entries —
+	// being the oldest matured — sit at the HEAD of both windows. Without a cap, a flood of
+	// ciphertexts that mature short (a broken/lagging committee, or an attacker spraying an epoch
+	// that cannot reach t) would pile up unboundedly at that head and STARVE fresh healthy
+	// ciphertexts of both the O(cap) decrypt scan (maxDecryptScanPerBlock) and the per-VE share
+	// budget (VoteExtShareCap >= voteExtShareFloor). Capping the deferred set to a constant well
+	// below BOTH windows guarantees the deferred head can never monopolize either. Under a flood
+	// only the OLDEST maxDeferredDecryptsPerBlock short ciphertexts get their full grace; the
+	// rest drop at once (loud, ref-counts released). Normal operation (a handful of transiently-
+	// late ciphertexts) never approaches the cap, so behavior there is byte-identical.
+	maxDeferredDecryptsPerBlock = 128
 )
+
+// MaxDeferredDecryptsPerBlock exposes the per-block deferral cap for regression tests (they
+// assert the concurrently-deferred set never exceeds this under a backlog flood).
+const MaxDeferredDecryptsPerBlock = maxDeferredDecryptsPerBlock
 
 // StrandedDecryptGraceBlocks exposes the bounded decrypt-deferral window for the app layer
 // (vote-extension share serving must keep serving matured-but-deferred ciphertexts) and for
@@ -252,18 +275,29 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 
 	// Process the SELECTED entries in the original (decryptHeight, seq) order — the anti-MEV
 	// execution ordering is unchanged; fairness only decides WHICH subset drains this block.
+	//
+	// PASS 1 (attempt + terminal outcomes): attempt each selected ciphertext. Anything with a
+	// TERMINAL outcome this block — decrypted, hard error, or a share-shortfall whose grace has
+	// EXPIRED — is finalized here (released with its loud event). A share-shortfall still WITHIN
+	// its grace is NOT resolved yet: it becomes a CANDIDATE for one of the bounded, fairly-shared
+	// defer slots decided in PASS 2, so an attacker cannot monopolize the heal grace.
 	order := uint64(0)
 	processed := 0
+	type deferCand struct {
+		e          types.EncTx
+		have, need int
+	}
+	var candidates []deferCand // matured-but-short, within grace — awaiting a fair defer slot
 	for i := range matured {
 		if !selected[i] {
 			continue // fairness-deferred to a later block (still in state, ref-counts intact)
 		}
 		e := matured[i]
 		processed++
-		// release decides whether this entry LEAVES state this block. Default true; the
-		// share-shortfall branch below flips it to false while the entry is within its
-		// bounded deferral grace (cycle-3 H-B). A recovered panic leaves it true, so a
-		// malformed entry is still shed and can never wedge the chain into a crash loop.
+		// release decides whether this entry LEAVES state in PASS 1. Default true; the within-
+		// grace share-shortfall branch flips it to false and records a candidate (resolved in
+		// PASS 2). A recovered panic leaves it true, so a malformed entry is still shed and can
+		// never wedge the chain into a crash loop.
 		release := true
 		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a single
 		// malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an out-of-spec
@@ -287,17 +321,10 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 				// NOT silently dropped. Within the bounded grace it is DEFERRED — kept in
 				// state with ref-counts intact, re-attempted next block as late shares land
 				// via vote extensions / keyper txs. Past the grace it is dropped LOUDLY with
-				// a dedicated stranded event (epoch/height/reason), and the drop still goes
-				// through releaseEncTx below (H2-safe). Deterministic on every node (a pure
-				// function of committed state + height).
-				if cur < addSat(e.DecryptHeight, strandedDecryptGraceBlocks) {
-					release = false
-					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_missed",
-						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-						sdk.NewAttribute("have", strconv.Itoa(len(shares))),
-						sdk.NewAttribute("need", strconv.Itoa(need)),
-						sdk.NewAttribute("deferred_until", strconv.FormatUint(addSat(e.DecryptHeight, strandedDecryptGraceBlocks), 10))))
-				} else {
+				// a dedicated stranded event (epoch/height/reason), through releaseEncTx
+				// (H2-safe). Deterministic on every node (a pure function of committed
+				// state + height).
+				if cur >= addSat(e.DecryptHeight, strandedDecryptGraceBlocks) {
 					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_stranded",
 						sdk.NewAttribute("submitter", e.Submitter),
 						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
@@ -306,7 +333,11 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 						sdk.NewAttribute("have", strconv.Itoa(len(shares))),
 						sdk.NewAttribute("need", strconv.Itoa(need)),
 						sdk.NewAttribute("reason", err.Error())))
+					return // release stays true
 				}
+				// Within grace: candidate for a bounded, fairly-shared defer slot (PASS 2).
+				release = false
+				candidates = append(candidates, deferCand{e: e, have: len(shares), need: need})
 			case err != nil:
 				ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
 					sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
@@ -332,11 +363,51 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		}(e)
 		// Release the ciphertext + shares + ALL ref-counts (global, per-submitter, and — for a
 		// DKG epoch — the epoch ref-count, pruning the epoch the instant it drains). HIGH-2 safe.
-		// A share-shortfall entry within its deferral grace (release=false) stays in state and
-		// is re-attempted on a later block; its FINAL drop (grace expiry, ceiling shed, or the
-		// kill-switch drain) still goes through releaseEncTx — never a silent strand or leak.
+		// A within-grace share-shortfall candidate (release=false) is resolved in PASS 2; its
+		// FINAL drop (grace expiry, deferral-cap shed, ceiling shed, or the kill-switch drain)
+		// always goes through releaseEncTx — never a silent strand or leak.
 		if release {
 			k.releaseEncTx(ctx, e)
+		}
+	}
+
+	// PASS 2 (BOUNDED + FAIR DEFERRAL): grant up to maxDeferredDecryptsPerBlock defer slots to
+	// the within-grace candidates, FAIR-SHARED across submitters via the same deterministic
+	// round-robin the decrypt budget uses. This bounds the concurrently-deferred set (so it can
+	// never monopolize the O(cap) decrypt scan or the per-VE share-serving budget) AND stops an
+	// attacker who floods short spam (low seqs, the head of the window) from consuming every
+	// heal slot and denying grace to honest ciphertexts. Candidates NOT granted a slot are
+	// dropped NOW — LOUDLY (encmempool_decrypt_deferral_capped) and through releaseEncTx (H2:
+	// ref-counts released + epoch pruned) — so nothing is silently lost. Granted candidates stay
+	// in state (ref-counts intact) and are re-attempted next block. Deterministic on every node.
+	if len(candidates) > 0 {
+		candTx := make([]types.EncTx, len(candidates))
+		for j, c := range candidates {
+			candTx[j] = c.e
+		}
+		granted := selectFairDecrypts(candTx, maxDeferredDecryptsPerBlock)
+		for j, c := range candidates {
+			if granted[j] {
+				ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_missed",
+					sdk.NewAttribute("seq", strconv.FormatUint(c.e.Seq, 10)),
+					sdk.NewAttribute("have", strconv.Itoa(c.have)),
+					sdk.NewAttribute("need", strconv.Itoa(c.need)),
+					sdk.NewAttribute("deferred_until", strconv.FormatUint(addSat(c.e.DecryptHeight, strandedDecryptGraceBlocks), 10))))
+				continue // kept in state within its grace
+			}
+			// Over the per-block deferral cap: drop NOW (loud, H2-safe) rather than defer, so
+			// the deferred backlog stays bounded. A distinct event lets operators tell a
+			// backlog-flood shed apart from a genuine grace-expiry strand.
+			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_deferral_capped",
+				sdk.NewAttribute("submitter", c.e.Submitter),
+				sdk.NewAttribute("seq", strconv.FormatUint(c.e.Seq, 10)),
+				sdk.NewAttribute("epoch", strconv.FormatUint(c.e.Epoch, 10)),
+				sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
+				sdk.NewAttribute("have", strconv.Itoa(c.have)),
+				sdk.NewAttribute("need", strconv.Itoa(c.need)),
+				sdk.NewAttribute("cap", strconv.Itoa(maxDeferredDecryptsPerBlock)),
+				sdk.NewAttribute("reason", "deferred-set cap reached; dropped to bound backlog")))
+			k.releaseEncTx(ctx, c.e)
 		}
 	}
 

@@ -87,6 +87,32 @@ type Params struct {
 	// degenerate (all floors 0) and decryption power tracks operator-address order instead
 	// of stake — re-opening HIGH-3 AND locking out the honest supermajority at once.
 	DkgShareBudget uint32 `json:"dkg_share_budget"`
+
+	// --- STAKE-DRIFT REKEY (cycle-5; OPT-IN, both default 0 = OFF) ---
+	//
+	// The stake-weighted committee snapshots each member's stake at ROUND-OPEN and freezes the
+	// eval-point allocation until the next MEMBER-CHANGE rekey. MembersHash covers OPERATORS
+	// ONLY, so a pure re-delegation (same operator set, shifted weights) does NOT re-key: the
+	// live stake drifts away from the snapshot, decryption power drifts from live stake, and the
+	// safety/liveness coupling — proven against the SNAPSHOT (see keeper.stakeThreshold) —
+	// weakens until the next membership change. These two OPTIONAL triggers bound that drift by
+	// re-genesis-ing the SAME committee against a FRESH stake snapshot. Both are DEFAULT-OFF so
+	// the dormant behavior is byte-identical; both are gap-dampened by DkgMinRekeyGap (no rekey
+	// storm) and are pure functions of committed state (deterministic — a non-deterministic
+	// rekey trigger would fork). Only meaningful on the transparent path.
+
+	// DkgMaxEpochBlocks rekeys the committee at least once every N blocks even when the member
+	// set is unchanged (epoch cadence). 0 => disabled. With it set, the frozen stake snapshot is
+	// at most N (+ one round-finalization latency + the flap-gap) blocks stale.
+	DkgMaxEpochBlocks uint64 `json:"dkg_max_epoch_blocks"`
+
+	// DkgRekeyOnStakeDriftBps rekeys the committee when the LIVE committee stake has drifted from
+	// the snapshot by at least this many basis points — measured as the MAX COALITION stake-
+	// fraction drift (half the total-variation distance between the snapshot and live committee
+	// stake distributions; see keeper.committeeMaxCoalitionDriftBps). 0 => disabled. It bounds
+	// the max coalition-fraction drift to this many bps (+ whatever stake can move within the
+	// flap gap / an in-flight round before the next re-genesis fires).
+	DkgRekeyOnStakeDriftBps uint64 `json:"dkg_rekey_on_stake_drift_bps"`
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -502,6 +528,10 @@ const (
 	// maxInFlightCeiling bounds the admission ceilings so a governance-set value cannot
 	// approach a uint64 overflow in the keeper's ref-count arithmetic.
 	maxInFlightCeiling uint64 = 1 << 40
+	// maxDriftBps is 100% in basis points — the upper bound on the stake-drift rekey threshold
+	// (the measured max-coalition drift can never exceed this, so a larger threshold is a
+	// never-fires misconfig).
+	maxDriftBps uint64 = 10000
 )
 
 // Committee-size bounds for the TRANSPARENT path. DefaultDkgMaxMembers caps the
@@ -582,6 +612,18 @@ func (p Params) ValidateDkgWindows() error {
 	// VoteExtMaxBytes).
 	if p.DkgShareBudget > maxDkgShareBudget {
 		return fmt.Errorf("dkg_share_budget (%d) must be <= %d", p.DkgShareBudget, maxDkgShareBudget)
+	}
+	// STAKE-DRIFT REKEY (cycle-5): both triggers are OPTIONAL (0 = disabled). Bound the cadence
+	// so a governance-set value cannot approach the deadline-arithmetic saturation point, and a
+	// bps threshold cannot exceed 100% (10000 bps) — above 10000 the trigger could never fire
+	// (max coalition drift is <= 10000 bps), which is a silent misconfig, so reject it. Neither
+	// couples to the deal/complaint windows: a rekey only ever fires against an ACTIVE (already
+	// finalized) round, so the cadence is naturally floored by one round's finalize latency.
+	if p.DkgMaxEpochBlocks > maxDkgWindowBlocks {
+		return fmt.Errorf("dkg_max_epoch_blocks (%d) must be <= %d", p.DkgMaxEpochBlocks, maxDkgWindowBlocks)
+	}
+	if p.DkgRekeyOnStakeDriftBps > maxDriftBps {
+		return fmt.Errorf("dkg_rekey_on_stake_drift_bps (%d) must be <= %d (100%%)", p.DkgRekeyOnStakeDriftBps, maxDriftBps)
 	}
 	// CYCLE-3 H-A (config-consistency guard, mirroring the HIGH-1 pattern: a bad config can
 	// neither ship at genesis nor be voted in — both paths funnel through Params.Validate):
