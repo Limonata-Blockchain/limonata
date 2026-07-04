@@ -1,13 +1,92 @@
 # Transparent in-node validator-DKG — status & readiness report
 
-**Date:** 2026-07-04 (fix + re-proof + re-audit cycle 2)
+**Date:** 2026-07-04 (fix cycle 4: cycle-3 audit close-out)
 **Branch:** `limonata-dkg-transparent` (feature branch — DO NOT merge into any release)
-**Commit under review:** `a75b027f` — *fix(encmempool/dkg): close the 4 transparent-DKG HIGHs
-(halt-guard, enc-key PoP+uniqueness, stake-weighted decrypt)*
-**Base:** `36b6ee82` (transparent in-node DKG via ABCI++ vote extensions) → `17101a12`
-(full on-chain validator-DKG + governance kill-switch, dormant defaults)
+**Commit under review:** HEAD — *fix(encmempool/dkg): close the 6 cycle-3 findings*, atop
+`19d5cb6f` (stake-weighted secret sharing) → `a75b027f` → `36b6ee82` → `17101a12`
 
-## Decision: **NO-GO for enabling on a real chain.**
+---
+
+## FIX CYCLE 4 — 2026-07-04 (all 6 cycle-3 findings closed: H-A, H-B, M-1, M-2, L-1, L-2)
+
+The cycle-3 audit of `19d5cb6f` (stake-weighted secret sharing, proven live on 4 nodes at
+default config with zero divergence) returned **NO-GO with 11 findings**. This cycle closes
+all six actionable ones with minimal changes; the whole prior regression suite stays green.
+
+### The new threshold + coupling (H-A + H-B, the design core)
+
+- **Threshold:** `t = floor(2S/3) − n + 1` (S = share budget, n = committee size), replacing
+  `floor(2S/3)+1`. Full worst-case Hamilton-apportionment proof in `keeper/stakeweight.go`:
+  for any coalition with stake fraction f, points ∈ (fS − |C|, floor(fS) + min(|C|, n−1)].
+  - **SAFETY:** f ≤ 1/3 ⇒ points ≤ floor(S/3) + n − 1 < t whenever S ≥ 6n − 1.
+  - **LIVENESS:** f > 2/3 online ⇒ points > 2S/3 − n ⇒ points ≥ t — for ALL n, ALL stake
+    distributions, ALL offline patterns whose online remainder holds > 2/3 of the
+    SNAPSHOTTED committee stake. **Zero residual liveness band** (t is the largest threshold
+    with this guarantee — confidentiality is maximized subject to guaranteed liveness). The
+    cycle-3 66.7%→~72.9% strand band is gone; the sweep that found it now runs as a
+    regression and finds nothing.
+- **Coupling (H-A):** `Params.Validate` (shared by genesis `ValidateGenesis` AND
+  `MsgUpdateParams`, mirroring the HIGH-1 guard) now enforces
+  `S ≥ MinShareBudgetPerMember(=8) × effective committee cap`, so safety holds with a
+  ≥ (2n+1)/3-point margin. Runtime defense-in-depth: `TransparentMembers` clamps the
+  committee to `floor(S/8)` top-stake seats (loud event `encmempool_dkg_committee_clamped`,
+  deterministic, never a halt) and `stakeThreshold` degrades to a safety-floor threshold
+  (loud `encmempool_dkg_threshold_degraded`) if an unvalidated config ever slips through.
+  The S<n degenerate regime (decryption power tracking operator-address order) is
+  structurally unreachable.
+
+### The honest decrypt bar (M-1) — the ">2/3 to decrypt" claim is RETIRED
+
+With rounding slop ±n points, ">2/3 stake to decrypt" is **not achievable together with
+guaranteed >2/3 liveness**. The PROVEN bar, now stated everywhere the old claim lived:
+any coalition reaching t holds **f ≥ (t − n + 1)/S > 2/3 − 2n/S**, which is
+**≥ 5/12 (~41.7%)** under the enforced coupling, **always > 1/3** (the Byzantine bound),
+and **≈ 54.7% (140/256)** at the live defaults (S=256, n≤16). The on-chain strict-majority
+gate (`DecryptingSetMeetsStake`) remains as defense-in-depth for the on-chain combine only.
+
+### Non-silent decrypt shortfall (H-B second half)
+
+`errNotEnoughShares`/`errStakeMinority` on a matured ciphertext **no longer silently drops**:
+the entry is DEFERRED (kept in state, loud `encmempool_decrypt_missed`, ref-counts intact,
+re-attempted as late shares land — vote extensions now keep serving matured-but-deferred
+ciphertexts) for a bounded `StrandedDecryptGraceBlocks = 32`, then dropped LOUDLY via
+`encmempool_decrypt_stranded` (submitter/seq/epoch/height/have/need/reason) **through
+`releaseEncTx`** — H2 ref-counts + `maybePruneEpoch` preserved, O(cap) per-block scans
+preserved, ceiling shed still immediate under flood pressure.
+
+### The rest
+
+- **M-2:** per-VE decryption-share cap coupled to S (`Params.VoteExtShareCap()` = max(256, S)
+  — a member can own up to all S points of one ciphertext, so the cap must scale UP with S or
+  a high-stake member could never serve one), and `maxDkgShareBudget` lowered 4096 → 2048 so
+  the worst-case extension (dealing + S shares ≈ 870 KiB) provably fits `VoteExtMaxBytes`
+  (1 MiB). 8×128 = 1024 ≤ 2048 keeps the full committee range configurable.
+- **L-1:** zero-weight member of a weighted committee owns NOTHING — explicit
+  `RoundMember.Weighted` flag (a `Weight.IsNil()` check does NOT survive the JSON store
+  round-trip: sdkmath marshals nil as "0"). The collision → duplicate-enc-share →
+  QUAL-empty → deterministic finalize stall is closed; a zero-token bonded validator can no
+  longer stall the feature chain-wide. Legacy records (flag absent) are byte-identical.
+- **L-2:** remainder-seat tie-break de-ground: (remainder desc, **stake desc**,
+  **sha256(epoch ‖ operator) asc**) — byte-identical across nodes, rotates per epoch, so a
+  vanity low-sorting operator address no longer captures tie-broken seats permanently.
+  Allocation moved to `openRound` (epoch known there); `MembersHash` (operators only) is
+  unaffected.
+
+All four cycle-3 auditor probe files are flipped into regressions (they FAIL on `19d5cb6f`
+alone — verified by temporarily reverting the threshold formula and the L-1 discriminator —
+and PASS with the fix), plus new property sweeps asserting BOTH inequalities for n ∈ [2..128]
+at the boundary distributions (adversary exactly 1/3, offline just under 1/3, whale+dust),
+seed-independent. `gofmt`/`go vet` clean; `go test -tags test ./x/encmempool/... -count=1`
+ALL PASS; evmd builds.
+
+**Residual, stated honestly:** the decrypt bar is the M-1 bar above (not >2/3); the
+guarantees are against the stake SNAPSHOT at round-open (drift until the next rekey is
+inherent to snapshotting); the committee is the top-N by stake, so "committee stake" ≠
+"total bonded stake" (pre-existing committee-selection trust assumption, unchanged).
+
+---
+
+## Decision (cycle 2, historical): **NO-GO for enabling on a real chain.**
 
 The transparent experience is **re-proven end-to-end on a live 4→5-node p2p network with zero
 consensus divergence**, and **both previously-deferred proof cases now pass** (epoch-2

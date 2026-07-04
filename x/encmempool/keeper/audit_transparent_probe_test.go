@@ -92,10 +92,10 @@ func TestReg_H4_SelfIdentifyByOperator(t *testing.T) {
 
 // HIGH-3 — the committee is STAKE-ranked, and stake is now baked into the CRYPTOGRAPHY:
 // each member is allocated Shamir evaluation points PROPORTIONAL to its stake within budget S,
-// and the reconstruction threshold is t = floor(2S/3)+1 of them. So a stake-minority seat-
-// majority holds < t points and cannot reconstruct (on OR off chain), while the full committee
-// holds all S >= t. This asserts the committee-level allocation property; the off-chain
-// reconstruction itself is exercised in the H3 regression tests.
+// and the reconstruction threshold is t = floor(2S/3)-n+1 of them (see keeper.stakeThreshold).
+// So a stake-minority seat-majority holds < t points and cannot reconstruct (on OR off chain),
+// while the full committee holds all S >= t. This asserts the committee-level allocation
+// property; the off-chain reconstruction itself is exercised in the H3 regression tests.
 //
 // PRE-FIX: the threshold was a member COUNT, so the attacker's seat-majority == a share-majority
 // and it decrypted. Bounding its eval points to its stake fraction is the fix.
@@ -121,15 +121,17 @@ func TestReg_H3_StakeMinoritySeatMajorityCannotDecrypt(t *testing.T) {
 	}
 
 	k, ctx := newKeeperSK(t, 1, &mockStaking{vals: vals})
-	p := transparentParams(0, 0) // committee cap 16, share budget S=24 (=> t=17)
+	p := transparentParams(0, 0) // committee cap 16
+	p.DkgShareBudget = 96        // 8 * the 12-seat committee (H-A coupling)
 	_ = k.SetParams(ctx, p)
 	for _, m := range members {
 		k.RecordEncPubKey(ctx, m.op, m.pub, dkg.SignEncKeyPoP(m.priv, m.op))
 	}
 
-	committee := k.ActiveMembers(ctx, p)
+	// Allocation happens at round-open; run it explicitly over the selected committee.
+	committee := keeper.AllocateEvalPoints(k.ActiveMembers(ctx, p), p.EffectiveShareBudget(), 1)
 	n := len(committee)
-	tThreshold := int(2*types.TotalEvalPoints(committee)/3 + 1) // stake-fraction threshold on S
+	tThreshold := 2*types.TotalEvalPoints(committee)/3 - n + 1 // t = floor(2S/3) - n + 1
 
 	attacker := map[uint64]bool{}
 	attackerSeats, attackerPoints, totalPoints := 0, 0, 0

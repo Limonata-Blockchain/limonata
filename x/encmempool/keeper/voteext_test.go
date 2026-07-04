@@ -65,16 +65,20 @@ func transparentParams(thr uint32, maxMembers uint32) types.Params {
 		DkgEnabled: true, DkgTransparent: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMaxMembers: maxMembers,
 		DkgRetryBackoff: 5, DkgMaxAttempts: 8, DkgMinRekeyGap: 0,
-		// HIGH-3: a SMALL stake-apportionment budget keeps test dealings tiny/fast while still
-		// exercising the stake-weighted eval-point path (the live default is 256). With S=24 the
-		// reconstruction threshold is t = floor(2*24/3)+1 = 17.
-		DkgShareBudget: 24,
+		// HIGH-3: a REDUCED stake-apportionment budget keeps test dealings small/fast while
+		// still exercising the stake-weighted eval-point path (the live default is 256).
+		// S=128 is the SMALLEST budget that satisfies the cycle-3 H-A coupling for the
+		// default committee cap (MinShareBudgetPerMember*16 = 128), so this fixture passes
+		// Params.Validate (tests that need a different budget/committee shape override
+		// DkgShareBudget per test and drive the keeper directly).
+		DkgShareBudget: 128,
 	}
 }
 
-// transparentStakeThreshold is the stake-weighted reconstruction threshold t = floor(2S/3)+1
-// for the test share budget S, mirroring keeper.stakeThreshold for assertions.
-const transparentStakeThreshold = 2*24/3 + 1 // = 17
+// transparentStakeThreshold is the stake-weighted reconstruction threshold
+// t = floor(2S/3) - n + 1 for the test share budget S=128 and the 3-member committees the
+// voteext tests build, mirroring keeper.stakeThreshold for assertions.
+const transparentStakeThreshold = (2*128)/3 - 3 + 1 // = 83
 
 func idxByOp(round types.DkgRound, op string) uint64 {
 	for _, m := range round.Members {

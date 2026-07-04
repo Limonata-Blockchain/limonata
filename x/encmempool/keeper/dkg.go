@@ -345,9 +345,10 @@ func MembersHash(members []types.RoundMember) []byte {
 // roundThreshold picks the COUNT threshold t for a round of n members: params.DkgThreshold
 // if it is in [1, n], else the honest majority floor(n/2)+1. This governs the LEGACY/declared
 // (unweighted) path, where every member holds exactly one Shamir share. The STAKE-WEIGHTED
-// transparent path does NOT use it — there the threshold is a fraction of the evaluation-point
-// budget S (see stakeThreshold), so that assembling t shares provably requires a stake
-// supermajority (HIGH-3), and DkgThreshold (a member count) has no meaning.
+// transparent path does NOT use it — there the threshold is t = floor(2S/3)-n+1 of the
+// evaluation-point budget S (see stakeThreshold for the proof and the honest decrypt bar:
+// assembling t points provably requires > 1/3 of committee stake in all valid configs,
+// >= 2/3 - 2n/S in general — HIGH-3), and DkgThreshold (a member count) has no meaning.
 func roundThreshold(p types.Params, n int) uint32 {
 	if p.DkgThreshold >= 1 && int(p.DkgThreshold) <= n {
 		return p.DkgThreshold
@@ -365,8 +366,8 @@ func (k Keeper) finalizeRound(ctx sdk.Context, round types.DkgRound) {
 	// HIGH-3: build the per-member evaluation-point weights (stake-weighted transparent path)
 	// or unit weights (unweighted legacy path, where OwnedEvalPoints == {Index}). The QUAL set
 	// must collectively own >= round.Threshold points for the round to succeed — i.e. dealers
-	// representing a stake supermajority participated — which for the unweighted path reduces
-	// EXACTLY to the original |QUAL| >= t check.
+	// above the proven stake bar participated (> 1/3 of committee stake; see stakeThreshold) —
+	// which for the unweighted path reduces EXACTLY to the original |QUAL| >= t check.
 	members := make([]uint64, 0, len(round.Members))
 	weightOf := make(map[uint64]int, len(round.Members))
 	for _, m := range round.Members {

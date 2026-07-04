@@ -102,7 +102,9 @@ func TestCeilingDropReleasesEpochRefcount_HIGH2Safe(t *testing.T) {
 		t.Fatalf("epoch-1 ref-count should be %d, got %d", n, got)
 	}
 
-	// Block 12: all mature. Global (200) > ceiling (50) => the drop path sheds the excess.
+	// Block 12: all mature. Global (200) > ceiling (50) => the drop path sheds the excess 150
+	// IMMEDIATELY (the ceiling shed ignores the H-B deferral grace — flood pressure wins). The
+	// remaining 50 share-less entries are DEFERRED (kept, loud) for the bounded grace.
 	b12 := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
@@ -110,8 +112,22 @@ func TestCeilingDropReleasesEpochRefcount_HIGH2Safe(t *testing.T) {
 	if !hasEvent(b12, "encmempool_enc_dropped_ceiling") {
 		t.Fatal("expected the last-resort ceiling drop to fire (in-flight 200 >> ceiling 50)")
 	}
-	// Everything left state this block (150 dropped + 50 decrypt-missed), so the superseded
-	// epoch drained and MUST have been pruned via the drop path's decEpochEncCount+maybePrune.
+	if got := countEncTx(k, b12); got != ceiling {
+		t.Fatalf("ceiling shed must leave exactly the ceiling in state (H-B defers the rest): want %d, got %d", ceiling, got)
+	}
+	if got := k.GetEpochEncCount(ctx, 1); got != uint64(ceiling) {
+		t.Fatalf("epoch-1 ref-count must track the 150 ceiling drops: want %d, got %d", ceiling, got)
+	}
+
+	// Grace expiry: the deferred 50 are stranded-dropped LOUDLY; the superseded epoch fully
+	// drains and MUST be pruned via the drop paths' decEpochEncCount+maybePrune (HIGH-2).
+	bx := ctx.WithBlockHeight(12 + int64(keeper.StrandedDecryptGraceBlocks)).WithEventManager(sdk.NewEventManager())
+	if err := k.BeginBlock(bx); err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(bx, "encmempool_decrypt_stranded") {
+		t.Fatal("H-B: the deferred entries' final drop must be LOUD (encmempool_decrypt_stranded)")
+	}
 	if got := k.GetEpochEncCount(ctx, 1); got != 0 {
 		t.Fatalf("HIGH-2 REGRESSION: drop path leaked epoch ref-count (epoch-1 count=%d, want 0)", got)
 	}
@@ -121,11 +137,11 @@ func TestCeilingDropReleasesEpochRefcount_HIGH2Safe(t *testing.T) {
 	if _, ok := k.GetDkgRound(ctx, 1); ok {
 		t.Fatal("HIGH-2 REGRESSION: superseded epoch 1 DkgRound survived a drop-drain (ref-count leaked)")
 	}
-	if g := k.GetGlobalEncCount(b12); g != 0 {
+	if g := k.GetGlobalEncCount(bx); g != 0 {
 		t.Fatalf("global in-flight should be 0 after full drop+drain, got %d", g)
 	}
-	if got := countEncTx(k, b12); got != 0 {
-		t.Fatalf("state not bounded: %d EncTx remain after the ceiling drop", got)
+	if got := countEncTx(k, bx); got != 0 {
+		t.Fatalf("state not bounded: %d EncTx remain after the ceiling drop + grace expiry", got)
 	}
 }
 

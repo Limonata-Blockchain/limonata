@@ -6,6 +6,7 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	"github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
@@ -54,18 +55,26 @@ func TestProbe_DecryptPanicSafety(t *testing.T) {
 	if err := k.BeginBlock(bctx); err != nil {
 		t.Fatalf("BeginBlock returned error: %v", err)
 	}
-	// all garbage ciphertexts must be GC'd (bounded state), none should survive.
-	if n := countEncTx(k, bctx); n != 0 {
+	// Ciphertexts that ATTEMPTED a recover (>= t junk shares present) fail hard and are
+	// GC'd immediately; the rest are short of t and get the BOUNDED H-B deferral grace
+	// (kept, loud) before their stranded drop. Bounded state still holds: everything must
+	// be gone by maturity + StrandedDecryptGraceBlocks, with no halt at any height.
+	bx := ctx.WithBlockHeight(6 + int64(keeper.StrandedDecryptGraceBlocks)).WithEventManager(sdk.NewEventManager())
+	if err := k.BeginBlock(bx); err != nil {
+		t.Fatalf("BeginBlock returned error at grace expiry: %v", err)
+	}
+	if n := countEncTx(k, bx); n != 0 {
 		t.Fatalf("garbage ciphertexts not drained: %d remain", n)
 	}
 	t.Logf("PROBE OK: 200 garbage ciphertexts + junk shares processed with no halt")
 }
 
-// TestProbe_DeferBacklogRescans asserts a sub-ceiling flood SELF-HEALS: it drains fully over
-// successive blocks and every ciphertext is processed exactly once. Since the bounded-scan fix,
-// decryptMatured materializes at most maxDecryptScanPerBlock entries per block (O(cap), not
-// O(backlog)) and drains at maxDecryptAttemptsPerBlock/block — so a 5000-entry flood clears in
-// a few blocks with bounded per-block work.
+// TestProbe_DeferBacklogRescans asserts a sub-ceiling flood SELF-HEALS with bounded
+// per-block work: decryptMatured materializes at most maxDecryptScanPerBlock entries per
+// block (O(cap), not O(backlog)) and attempts at maxDecryptAttemptsPerBlock/block. These
+// share-less ciphertexts get the BOUNDED H-B deferral grace after maturity (kept + loud,
+// never silently dropped), then stranded-drop at cap-rate — so the 5000-entry flood clears
+// within a few blocks after the grace expires, and everything is gone (no strand, no leak).
 func TestProbe_DeferBacklogRescans(t *testing.T) {
 	const n = 5000 // > maxDecryptAttemptsPerBlock (2048) so >= 2 blocks of backlog
 	k, ctx := newKeeper(t, 10)
@@ -83,7 +92,8 @@ func TestProbe_DeferBacklogRescans(t *testing.T) {
 		k.SubmitEncTx(ctx, "user", 10, 2, a, nonce, body, 0)
 	}
 	blocks := 0
-	for h := int64(12); h <= 40; h++ {
+	deadline := int64(12 + keeper.StrandedDecryptGraceBlocks + 4) // grace + ceil(5000/2048) blocks of stranded drops
+	for h := int64(12); h <= deadline; h++ {
 		bctx := ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager())
 		if err := k.BeginBlock(bctx); err != nil {
 			t.Fatal(err)
@@ -96,7 +106,7 @@ func TestProbe_DeferBacklogRescans(t *testing.T) {
 	if got := countEncTx(k, ctx); got != 0 {
 		t.Fatalf("backlog did not drain: %d remain", got)
 	}
-	t.Logf("PROBE OK: %d ciphertexts drained over %d blocks (cap=2048/block); each block re-scanned the full remaining backlog", n, blocks)
+	t.Logf("PROBE OK: %d ciphertexts deferred for the bounded grace then drained over %d blocks (cap=2048/block)", n, blocks)
 }
 
 // TestProbe_NeverFinalizingFlapBoundedRounds flaps the member set continuously with the

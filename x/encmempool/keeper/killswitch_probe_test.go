@@ -67,13 +67,26 @@ func TestProbe_DkgToLegacyTransition_NoStrandNoHalt(t *testing.T) {
 		t.Fatalf("legacy flip rejected: %v", err)
 	}
 
-	// BeginBlock at maturity (height 12): must not halt; the epoch-1 ct must leave state.
+	// BeginBlock at maturity (height 12): must not halt. Under the cycle-3 H-B semantics the
+	// share-less ciphertext is NOT silently dropped at maturity — it is DEFERRED (kept, with a
+	// loud decrypt_missed) for the bounded grace, then stranded-dropped LOUDLY. Either way it
+	// must leave state by maturity + StrandedDecryptGraceBlocks with every ref-count released.
 	bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := k.BeginBlock(bctx); err != nil {
 		t.Fatalf("HALT: BeginBlock returned error: %v", err)
 	}
+	if _, ok := k.GetEncTx(bctx, e.DecryptHeight, e.Seq); !ok {
+		t.Fatal("H-B: a share-less matured ct must be DEFERRED (not silently dropped) within the grace")
+	}
+	bctx = ctx.WithBlockHeight(12 + int64(keeper.StrandedDecryptGraceBlocks)).WithEventManager(sdk.NewEventManager())
+	if err := k.BeginBlock(bctx); err != nil {
+		t.Fatalf("HALT: BeginBlock returned error at grace expiry: %v", err)
+	}
+	if !hasEvent(bctx, "encmempool_decrypt_stranded") {
+		t.Fatal("H-B: the final drop must be LOUD (encmempool_decrypt_stranded)")
+	}
 	if _, ok := k.GetEncTx(bctx, e.DecryptHeight, e.Seq); ok {
-		t.Fatal("STRAND: epoch-1 EncTx still present after maturity in legacy mode")
+		t.Fatal("STRAND: epoch-1 EncTx still present after the deferral grace in legacy mode")
 	}
 	if c := k.GetGlobalEncCount(bctx); c != 0 {
 		t.Fatalf("STRAND: global count = %d, want 0", c)

@@ -160,18 +160,37 @@ func (k Keeper) TransparentMembers(ctx context.Context, p types.Params) []types.
 	if max := p.EffectiveMaxMembers(); len(cands) > max {
 		cands = cands[:max]
 	}
+	// CYCLE-3 H-A runtime guard (defense-in-depth BENEATH Params.Validate, which already
+	// rejects any genesis/gov config with S < MinShareBudgetPerMember * committee cap):
+	// never FORM a committee larger than the share budget can secure. With fewer than
+	// MinShareBudgetPerMember points of stake resolution per seat, Hamilton apportionment
+	// degenerates and decryption power tracks operator-address order instead of stake
+	// (the reproduced HIGH-3 re-opening). Clamping HERE — while still stake-sorted, so the
+	// lowest-stake candidates are shed — keeps MembersHash, the round machine, and the
+	// stakeThreshold safety/liveness proof consistent (S >= 8n always holds at round-open).
+	// Deterministic (pure function of committed state), LOUD, never a halt.
+	if maxByBudget := p.EffectiveShareBudget() / types.MinShareBudgetPerMember; len(cands) > maxByBudget {
+		clamped := len(cands) - maxByBudget
+		cands = cands[:maxByBudget]
+		if sdkCtx, ok := ctx.(sdk.Context); ok {
+			sdkCtx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_committee_clamped",
+				sdk.NewAttribute("share_budget", u64str(uint64(p.EffectiveShareBudget()))),
+				sdk.NewAttribute("max_by_budget", u64str(uint64(maxByBudget))),
+				sdk.NewAttribute("clamped", u64str(uint64(clamped))),
+			))
+		}
+	}
 	// Assign indices by operator address order (stable, committed-state-derived). Each
 	// member also carries its STAKE weight (HIGH-3), snapshotted here from committed state.
+	// The stake-proportional eval-point ALLOCATION happens at round-open (openRound), where
+	// the epoch is known — it seeds the epoch-rotating remainder-seat tie-break (L-2).
 	sort.Slice(cands, func(i, j int) bool { return cands[i].op < cands[j].op })
 	out := make([]types.RoundMember, len(cands))
 	for i, c := range cands {
 		out[i] = types.RoundMember{Index: uint64(i + 1), OperatorAddr: c.op, EncPubKey: c.key, Weight: c.tokens}
 	}
-	// HIGH-3: allocate each member a stake-proportional block of Shamir evaluation points
-	// within the fixed budget S, deterministically from the snapshotted weights. This is what
-	// makes off-chain reconstruction require a stake supermajority (a stake-minority holds < t
-	// points), instead of only gating the on-chain combine.
-	return AllocateEvalPoints(out, p.EffectiveShareBudget())
+	return out
 }
 
 // memberIndexByOperator returns a round member's index by operator address, or 0.
@@ -184,12 +203,17 @@ func memberIndexByOperator(round types.DkgRound, op string) uint64 {
 //
 // HIGH-3 (DEMOTED to defense-in-depth): stake is now baked into the CRYPTOGRAPHY via
 // stake-weighted Shamir evaluation points (see AllocateEvalPoints / stakeThreshold), so the
-// real capability check is "does the decrypting set hold >= t = floor(2S/3)+1 evaluation
-// points", which the recover path enforces directly. This member-stake-majority test is retained
-// only as a redundant guard on the on-chain combine (recoverSharedSecret maps present eval points
-// to their owning members before calling it). It reduces to a no-op on the LEGACY/unweighted path
-// (no weights recorded => returns true), preserving existing behavior. It is overflow-safe
-// (sdkmath.Int).
+// real capability check is "does the decrypting set hold >= t = floor(2S/3)-n+1 evaluation
+// points", which the recover path enforces directly (the PROVEN crypto bar is > 1/3 of
+// committee stake in all valid configs, >= 2/3 - 2n/S in general — NOT ">2/3"; see the
+// stakeThreshold comment, cycle-3 M-1). This member-stake-majority test is retained as a
+// redundant guard on the ON-CHAIN combine (recoverSharedSecret maps present eval points to
+// their owning members before calling it). HONESTY: in worst-case rounding a set can hold t
+// points at just under a stake majority, so this gate can bind ABOVE the crypto bar for
+// on-chain decryption; it can never block the guaranteed liveness case (an online >2/3-stake
+// set is also a strict majority), and it does nothing against OFF-chain reconstruction —
+// only the crypto bar does. It reduces to a no-op on the LEGACY/unweighted path (no weights
+// recorded => returns true), preserving existing behavior. It is overflow-safe (sdkmath.Int).
 func DecryptingSetMeetsStake(members []types.RoundMember, present map[uint64]bool) bool {
 	total := sdkmath.ZeroInt()
 	got := sdkmath.ZeroInt()

@@ -146,23 +146,37 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 	}
 }
 
-// maxSharesPerExtension bounds how many decryption shares a node packs into one vote
-// extension (bounds VE size). Un-served ciphertexts are picked up on the next height.
-const maxSharesPerExtension = 256
-
 // buildDecryptShares produces this node's DLEQ-proved decryption shares for in-flight
-// (not-yet-matured) ciphertexts of epochs it holds shares for. HIGH-3: on the stake-weighted
-// path this node owns a SET of Shamir evaluation points, so it contributes ONE decryption share
-// per owned point per ciphertext. The per-epoch shares X_p are derived once from COMMITTED
-// dealings + the epoch's QUAL set, then reused. The total emitted is capped at
-// maxSharesPerExtension to bound vote-extension size (the rest are picked up on later heights).
+// ciphertexts of epochs it holds shares for — both NOT-YET-MATURED ones and matured ones
+// still inside the keeper's bounded decrypt-deferral window (cycle-3 H-B: a matured
+// ciphertext short of t shares is deferred up to StrandedDecryptGraceBlocks before its loud
+// drop, so late shares from a recovering validator must keep being served or the deferral
+// could never heal anything). HIGH-3: on the stake-weighted path this node owns a SET of
+// Shamir evaluation points, so it contributes ONE decryption share per owned point per
+// ciphertext. The per-epoch shares X_p are derived once from COMMITTED dealings + the
+// epoch's QUAL set, then reused.
+//
+// CYCLE-3 M-2: the per-extension share cap is COUPLED to the share budget S
+// (params.VoteExtShareCap() = max(256, S)): a member may own up to ALL S points of one
+// ciphertext, so a fixed cap below S would leave a high-stake member unable to ever ship a
+// complete share set (liveness break); the coupled cap still bounds the extension because
+// validation bounds S itself (<= 2048, sized against VoteExtMaxBytes).
 func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey, op string) []encmempooltypes.VoteExtShare {
 	k := app.EncMempoolKeeper
 	h := uint64(ctx.BlockHeight())
+	shareCap := k.GetParams(ctx).VoteExtShareCap()
+	// Serve from the start of the deferral window, not from the current height: entries
+	// below h that are still stored are exactly the matured-but-deferred ones awaiting
+	// shares (decrypted entries have left state). Already-recorded shares are deduped by
+	// the consume path (first-wins per eval point), so re-serving is idempotent.
+	from := uint64(0)
+	if h > encmempoolkeeper.StrandedDecryptGraceBlocks {
+		from = h - encmempoolkeeper.StrandedDecryptGraceBlocks
+	}
 	shareByEpoch := map[uint64]*sharedCache{}
 	var out []encmempooltypes.VoteExtShare
-	k.IterateInFlightFrom(ctx, h, maxSharesPerExtension, func(e encmempooltypes.EncTx) bool {
-		if len(out) >= maxSharesPerExtension {
+	k.IterateInFlightFrom(ctx, from, shareCap, func(e encmempooltypes.EncTx) bool {
+		if len(out) >= shareCap {
 			return false // vote-extension share budget reached
 		}
 		if e.Epoch == 0 {
@@ -177,7 +191,7 @@ func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey, op stri
 			return true // not a member / not finalized: nothing to contribute
 		}
 		for _, sh := range sc.shares {
-			if len(out) >= maxSharesPerExtension {
+			if len(out) >= shareCap {
 				break
 			}
 			d, proof, err := dkgnode.ProveShareFor(sh, e.A)

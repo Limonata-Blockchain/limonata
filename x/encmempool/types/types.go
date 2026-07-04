@@ -75,10 +75,17 @@ type Params struct {
 	// DkgShareBudget is the FIXED total number of Shamir evaluation points S the transparent
 	// committee's stake is apportioned across (HIGH-3 stake-weighted secret sharing). Each
 	// member gets ~round(stake_fraction * S) distinct points, and the reconstruction
-	// threshold is t = floor(2S/3)+1 of them, so gathering t points requires a stake
-	// supermajority. It is a FIXED cap (0 => DefaultDkgShareBudget=256) so the per-dealing /
-	// vote-extension size stays O(S) regardless of raw stake magnitude. Only meaningful on
-	// the transparent path.
+	// threshold is t = floor(2S/3) - n + 1 of them (n = committee size; see
+	// keeper.stakeThreshold for the full worst-case rounding proof), so gathering t points
+	// requires strictly more than the 1/3 Byzantine stake bound while any online honest
+	// set holding > 2/3 of the snapshotted committee stake always holds >= t. It is a FIXED
+	// cap (0 => DefaultDkgShareBudget=256) so the per-dealing / vote-extension size stays
+	// O(S) regardless of raw stake magnitude. Only meaningful on the transparent path.
+	//
+	// COUPLING (cycle-3 H-A): validation enforces S >= MinShareBudgetPerMember * the
+	// effective committee cap. Without a floor, a small S makes Hamilton apportionment
+	// degenerate (all floors 0) and decryption power tracks operator-address order instead
+	// of stake — re-opening HIGH-3 AND locking out the honest supermajority at once.
 	DkgShareBudget uint32 `json:"dkg_share_budget"`
 }
 
@@ -121,30 +128,51 @@ type RoundMember struct {
 	// round, allocated PROPORTIONAL to its stake Weight within a bounded total budget S
 	// (HIGH-3). A member with stake fraction w owns ~round(w*S) distinct points; the whole
 	// committee's points are the contiguous domain 1..S. Because the reconstruction
-	// threshold t is a fraction of S (t = floor(2S/3)+1), assembling t points requires a
-	// stake supermajority — so a stake-MINORITY seat-MAJORITY holds < t points and CANNOT
-	// reconstruct the secret even off-chain. It is a deterministic pure function of the
-	// snapshotted Weight (see keeper.AllocateEvalPoints) so every node allocates identically.
+	// threshold is t = floor(2S/3)-n+1 under the enforced S >= 8n coupling (see
+	// keeper.stakeThreshold for the proof), assembling t points provably requires > 1/3 of
+	// committee stake (>= 2/3 - 2n/S in general) — so a within-BFT stake-MINORITY
+	// seat-MAJORITY holds < t points and CANNOT reconstruct the secret even off-chain,
+	// while an online set holding > 2/3 of the snapshotted stake always holds >= t
+	// (liveness). It is a deterministic pure function of the snapshotted Weight and the
+	// round's epoch (see keeper.AllocateEvalPoints) so every node allocates identically.
 	//
 	// EMPTY on the legacy/declared path (and on hand-built rounds): the member then owns the
 	// single point equal to its Index — see OwnedEvalPoints — which preserves the original
 	// unweighted (one-share-per-member, count-threshold) behaviour byte-for-byte.
 	EvalPoints []uint64 `json:"eval_points,omitempty"`
+
+	// Weighted marks a member of a STAKE-WEIGHTED committee (set by AllocateEvalPoints on
+	// every member of a weighted round, including members allocated ZERO points). It is the
+	// EXPLICIT discriminator OwnedEvalPoints uses between "weighted member with an empty
+	// allocation (owns NOTHING)" and "legacy/unweighted member (owns {Index})".
+	//
+	// CYCLE-3 L-1: the previous discriminator was Weight.IsPositive(), so a ZERO-weight
+	// member of a weighted committee (a bonded validator with zero tokens) fell back to
+	// owning {Index} — COLLIDING with the eval point a different member legitimately owned,
+	// inflating TotalEvalPoints past the budget and making every dealing invalid (duplicate
+	// enc-share) => QUAL empty => the round could NEVER finalize (deterministic stall).
+	// A Weight-nil check cannot fix it either: sdkmath.Int marshals a nil Int as "0", so
+	// the nil-vs-zero distinction does not survive the JSON store round-trip. An explicit
+	// flag survives round-trips and is absent (false) on every legacy record.
+	Weighted bool `json:"weighted,omitempty"`
 }
 
 // OwnedEvalPoints returns the Shamir evaluation points this member holds a share at.
 //
-//   - Stake-weighted transparent path: its allocated EvalPoints. A member allocated ZERO points
-//     (negligible stake) owns NOTHING — the empty result is correct, NOT a fallback to its index.
-//     Such a member is identified by carrying a positive stake Weight while having no EvalPoints.
-//   - Unweighted legacy/declared/hand-built round: no stake Weight is recorded, so the member
-//     falls back to the single point equal to its Index (one share per member), preserving the
-//     original scheme byte-for-byte.
+//   - Stake-weighted transparent path (Weighted set by AllocateEvalPoints): its allocated
+//     EvalPoints. A member allocated ZERO points (zero or negligible stake) owns NOTHING —
+//     the empty result is correct, NOT a fallback to its index. CYCLE-3 L-1: discriminating
+//     by Weight.IsPositive() here let a zero-weight weighted member fall back to {Index},
+//     colliding with a point another member legitimately owned and deterministically
+//     stalling every round finalize; the explicit Weighted flag closes that.
+//   - Unweighted legacy/declared/hand-built round (Weighted false): the member owns the
+//     single point equal to its Index (one share per member), preserving the original
+//     scheme byte-for-byte.
 func (m RoundMember) OwnedEvalPoints() []uint64 {
 	if len(m.EvalPoints) > 0 {
 		return m.EvalPoints
 	}
-	if !m.Weight.IsNil() && m.Weight.IsPositive() {
+	if m.Weighted {
 		return nil // weighted member allocated zero points: owns no shares
 	}
 	return []uint64{m.Index}
@@ -484,14 +512,40 @@ const (
 	DefaultDkgMaxMembers uint32 = 16
 	maxDkgCommittee      uint32 = 128
 	// DefaultDkgShareBudget is the fixed stake-apportionment budget S used when
-	// DkgShareBudget==0. 256 gives ~0.4%/point stake resolution and keeps the worst-case
-	// largest-remainder rounding slop (<= committee_size/2 <= 64) well below the S/3 margin
-	// that separates a 1/3-stake adversary's points from the t=floor(2S/3)+1 threshold, so a
-	// within-BFT (<=1/3 stake) adversary can never assemble t points. See keeper.stakeThreshold.
+	// DkgShareBudget==0. 256 gives ~0.4%/point stake resolution and satisfies the enforced
+	// coupling S >= MinShareBudgetPerMember * committee cap for the default cap (8*16=128),
+	// which is what keeps the worst-case largest-remainder rounding slop (< n points per
+	// coalition) strictly inside the gap between a 1/3-stake adversary's points and the
+	// t = floor(2S/3) - n + 1 threshold. See keeper.stakeThreshold for the proof.
 	DefaultDkgShareBudget uint32 = 256
+
+	// MinShareBudgetPerMember is the enforced eval-point budget floor PER COMMITTEE SEAT
+	// (cycle-3 H-A): validation requires S >= MinShareBudgetPerMember * effective committee
+	// cap, and the keeper clamps a transparent committee to floor(S/MinShareBudgetPerMember)
+	// seats as runtime defense-in-depth. WHY 8 (the coupling multiple k): the Hamilton
+	// apportionment worst case lets any coalition of c members deviate from exact stake
+	// proportionality by strictly less than c points down and at most min(c, n-1) points up.
+	// With t = floor(2S/3) - n + 1 the two required inequalities are
+	//   (SAFETY)   f <= 1/3 stake  =>  points <= floor(S/3) + n - 1 < t, needs S >= 6n - 1;
+	//   (LIVENESS) f >  2/3 stake  =>  points >  2S/3 - n, i.e. >= t, holds for ALL S,n.
+	// k=8 therefore guarantees safety with a margin of ~2n/3 points (>= (2n+1)/3) over the
+	// bare S >= 6n-1 requirement while keeping the max committee (128) configurable within
+	// maxDkgShareBudget (8*128 = 1024 <= 2048), and gives every seat >= 8 points of stake
+	// resolution so apportionment can never degenerate to operator-address order.
+	MinShareBudgetPerMember = 8
+
 	// maxDkgShareBudget bounds a governance-set budget so per-dealing / vote-extension size
-	// (O(S) sealed shares + O(t) commitments) cannot be blown up without bound.
-	maxDkgShareBudget uint32 = 4096
+	// (O(S) sealed shares + O(t) commitments + O(S) decryption shares) cannot be blown up
+	// without bound. CYCLE-3 M-2: the per-VE decryption-share cap is COUPLED to S (a member
+	// may own up to all S points of one ciphertext, so the cap must scale UP with S or a
+	// high-stake member could never ship a complete share set — see VoteExtShareCap), which
+	// means S itself must be bounded DOWN so the worst-case extension still fits
+	// VoteExtMaxBytes (1 MiB). Worst case at S=2048: a dealing of S sealed shares
+	// (~160 B JSON each ≈ 320 KiB) + t ≈ 2S/3 commitments (~47 B each ≈ 64 KiB) + S
+	// decryption shares (~240 B JSON each ≈ 480 KiB) ≈ 870 KiB < 1 MiB. The previous 4096
+	// bound would exceed the VE size limit once the share cap scales with S — a node would
+	// then reject its OWN extension (liveness break).
+	maxDkgShareBudget uint32 = 2048
 )
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
@@ -523,9 +577,30 @@ func (p Params) ValidateDkgWindows() error {
 		return fmt.Errorf("dkg_max_members (%d) must be <= %d", p.DkgMaxMembers, maxDkgCommittee)
 	}
 	// DkgShareBudget=0 means "use DefaultDkgShareBudget"; a positive value must not exceed the
-	// absolute budget ceiling (bounds per-dealing / vote-extension size).
+	// absolute budget ceiling (bounds per-dealing / vote-extension size; and, since the per-VE
+	// decryption-share cap scales with the budget — M-2 — keeps the worst-case extension under
+	// VoteExtMaxBytes).
 	if p.DkgShareBudget > maxDkgShareBudget {
 		return fmt.Errorf("dkg_share_budget (%d) must be <= %d", p.DkgShareBudget, maxDkgShareBudget)
+	}
+	// CYCLE-3 H-A (config-consistency guard, mirroring the HIGH-1 pattern: a bad config can
+	// neither ship at genesis nor be voted in — both paths funnel through Params.Validate):
+	// on the transparent path the share budget S must cover the effective committee cap with
+	// at least MinShareBudgetPerMember points per seat. Without this floor a VALID config
+	// with S below the committee size makes Hamilton apportionment degenerate (every quota
+	// < 1, all floors 0, near-equal remainders): the whole budget goes to the first S members
+	// by tie-break order, so DECRYPTION POWER TRACKS OPERATOR-ADDRESS ORDER, NOT STAKE — a
+	// stake minority reconstructs off-chain while the honest stake supermajority is locked
+	// out. The keeper additionally clamps the committee to floor(S/MinShareBudgetPerMember)
+	// seats at selection time as runtime defense-in-depth (deterministic + loud, never a
+	// halt) in case an unvalidated store write ever bypasses this.
+	if p.DkgTransparent {
+		s, m := p.EffectiveShareBudget(), p.EffectiveMaxMembers()
+		if s < MinShareBudgetPerMember*m {
+			return fmt.Errorf(
+				"dkg_share_budget (%d) must be >= %d * the effective committee cap (%d*%d=%d): a smaller budget degenerates stake apportionment (decryption power would track operator-address order, not stake)",
+				s, MinShareBudgetPerMember, MinShareBudgetPerMember, m, MinShareBudgetPerMember*m)
+		}
 	}
 	return nil
 }
@@ -547,4 +622,24 @@ func (p Params) EffectiveMaxMembers() int {
 		return int(DefaultDkgMaxMembers)
 	}
 	return int(p.DkgMaxMembers)
+}
+
+// voteExtShareFloor is the minimum per-vote-extension decryption-share cap (the original
+// fixed cap, kept as a floor so small budgets retain multi-ciphertext throughput per VE).
+const voteExtShareFloor = 256
+
+// VoteExtShareCap is the per-vote-extension decryption-share cap, COUPLED to the share
+// budget S (cycle-3 M-2). DIRECTION: the cap scales UP with S — a single member may own up
+// to ALL S evaluation points of the domain, so serving even ONE matured ciphertext takes up
+// to S shares; a fixed cap below S would mean a high-stake member can NEVER ship a complete
+// share set for a ciphertext, silently collapsing decryption liveness exactly for the
+// members that carry the most reconstruction weight. Bloat in the other direction is
+// bounded by validation: S <= maxDkgShareBudget (2048) keeps the worst-case extension
+// (dealing + S shares) under VoteExtMaxBytes — see the maxDkgShareBudget comment for the
+// wire-size arithmetic.
+func (p Params) VoteExtShareCap() int {
+	if s := p.EffectiveShareBudget(); s > voteExtShareFloor {
+		return s
+	}
+	return voteExtShareFloor
 }

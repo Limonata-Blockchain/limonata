@@ -28,7 +28,7 @@ func TestReg_H3_StakeMinorityOffChainCaptureBlocked(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		stakes["attacker_"+string(rune('a'+i))] = 1000
 	}
-	c := runTransparentDKG(t, stakes, 24)
+	c := runTransparentDKG(t, stakes, 56) // 8 * the 7-seat committee (H-A coupling)
 
 	attackers := opsWithPrefix(c, "attacker")
 	honest := opsWithPrefix(c, "honest")

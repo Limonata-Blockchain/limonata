@@ -180,7 +180,25 @@ const (
 	// maxCeilingDropsPerBlock bounds the last-resort drops per block so shedding excess is
 	// itself O(cap) work, never an O(backlog) burst.
 	maxCeilingDropsPerBlock = maxDecryptScanPerBlock
+	// strandedDecryptGraceBlocks (cycle-3 H-B, non-silent drop): a matured ciphertext whose
+	// shares are still short of t is DEFERRED — kept in state, re-attempted every block — for
+	// up to this many blocks past its decrypt height before it is finally dropped with the
+	// LOUD encmempool_decrypt_stranded event. Rationale: shares arrive via vote extensions /
+	// keyper txs and can lag a few blocks behind maturity (validator restarts, the per-VE
+	// share cap rationing a backlog), so an immediate drop silently loses a ciphertext the
+	// committee was one block away from decrypting. The deferral is BOUNDED (grace, then a
+	// releaseEncTx drop — never a strand), consistent with every flood-hardening rule: the
+	// per-block scan stays O(cap) (deferred entries sit at the head of the bounded
+	// CollectMaturedUpTo window), ref-counts stay intact while deferred, the final drop goes
+	// through releaseEncTx (H2: epoch ref-count + maybePruneEpoch), and the always-on ceiling
+	// drop still sheds excess regardless of grace. ~64s at 2s blocks.
+	strandedDecryptGraceBlocks = 32
 )
+
+// StrandedDecryptGraceBlocks exposes the bounded decrypt-deferral window for the app layer
+// (vote-extension share serving must keep serving matured-but-deferred ciphertexts) and for
+// regression tests.
+const StrandedDecryptGraceBlocks = strandedDecryptGraceBlocks
 
 // MaxDecryptAttemptsPerBlock exposes the per-block decrypt budget for regression tests
 // (they assert the per-block drain equals exactly this cap under a flood).
@@ -242,6 +260,11 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		}
 		e := matured[i]
 		processed++
+		// release decides whether this entry LEAVES state this block. Default true; the
+		// share-shortfall branch below flips it to false while the entry is within its
+		// bounded deferral grace (cycle-3 H-B). A recovered panic leaves it true, so a
+		// malformed entry is still shed and can never wedge the chain into a crash loop.
+		release := true
 		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a single
 		// malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an out-of-spec
 		// nonce) would halt the whole chain. Process each ciphertext inside a recover guard;
@@ -250,6 +273,7 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		func(e types.EncTx) {
 			defer func() {
 				if r := recover(); r != nil {
+					release = true
 					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
 						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
 						sdk.NewAttribute("reason", fmt.Sprintf("panic recovered: %v", r))))
@@ -258,11 +282,31 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 			shares := k.CollectShares(ctx, e.DecryptHeight, e.Seq)
 			shared, need, err := k.recoverSharedSecret(ctx, p, e, shares)
 			switch {
-			case err == errNotEnoughShares:
-				ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_missed",
-					sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-					sdk.NewAttribute("have", strconv.Itoa(len(shares))),
-					sdk.NewAttribute("need", strconv.Itoa(need))))
+			case err == errNotEnoughShares || err == errStakeMinority:
+				// CYCLE-3 H-B (NON-SILENT): a matured ciphertext short of t shares/stake is
+				// NOT silently dropped. Within the bounded grace it is DEFERRED — kept in
+				// state with ref-counts intact, re-attempted next block as late shares land
+				// via vote extensions / keyper txs. Past the grace it is dropped LOUDLY with
+				// a dedicated stranded event (epoch/height/reason), and the drop still goes
+				// through releaseEncTx below (H2-safe). Deterministic on every node (a pure
+				// function of committed state + height).
+				if cur < addSat(e.DecryptHeight, strandedDecryptGraceBlocks) {
+					release = false
+					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_missed",
+						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+						sdk.NewAttribute("have", strconv.Itoa(len(shares))),
+						sdk.NewAttribute("need", strconv.Itoa(need)),
+						sdk.NewAttribute("deferred_until", strconv.FormatUint(addSat(e.DecryptHeight, strandedDecryptGraceBlocks), 10))))
+				} else {
+					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_stranded",
+						sdk.NewAttribute("submitter", e.Submitter),
+						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+						sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
+						sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
+						sdk.NewAttribute("have", strconv.Itoa(len(shares))),
+						sdk.NewAttribute("need", strconv.Itoa(need)),
+						sdk.NewAttribute("reason", err.Error())))
+				}
 			case err != nil:
 				ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
 					sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
@@ -288,7 +332,12 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		}(e)
 		// Release the ciphertext + shares + ALL ref-counts (global, per-submitter, and — for a
 		// DKG epoch — the epoch ref-count, pruning the epoch the instant it drains). HIGH-2 safe.
-		k.releaseEncTx(ctx, e)
+		// A share-shortfall entry within its deferral grace (release=false) stays in state and
+		// is re-attempted on a later block; its FINAL drop (grace expiry, ceiling shed, or the
+		// kill-switch drain) still goes through releaseEncTx — never a silent strand or leak.
+		if release {
+			k.releaseEncTx(ctx, e)
+		}
 	}
 
 	// Anything not processed this block (fairness-deferred, or beyond the bounded scan window)
@@ -370,13 +419,17 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 		}
 		// HIGH-3 DEFENSE-IN-DEPTH: the stake weighting is now enforced by the CRYPTOGRAPHY —
 		// each member holds Shamir shares only at its stake-proportional evaluation points, and
-		// the threshold need = floor(2S/3)+1 is a fraction of the point budget, so the
-		// `len(shares) < need` gate above ALREADY means a decrypting set must control a stake
-		// supermajority (a stake-minority holds < need points and cannot even off-chain). This
-		// residual stake gate is kept only as a redundant guard: map each present evaluation
-		// point to its owning member and require those members to hold a strict majority of
-		// committee stake. It never rejects a crypto-valid set (need points => ~2/3 stake > 1/2)
-		// and is a no-op on the unweighted legacy path (no recorded weights => returns true).
+		// the threshold need = floor(2S/3)-n+1 is set against the point budget, so the
+		// `len(shares) < need` gate above ALREADY means a decrypting set holds > 1/3 of the
+		// snapshotted committee stake (>= 2/3 - 2n/S in general; ~54.7% at live defaults — the
+		// PROVEN bar, see stakeThreshold; a <=1/3-stake coalition holds < need points and cannot
+		// reconstruct even off-chain). This residual stake gate is kept as a redundant guard on
+		// the ON-CHAIN combine: map each present evaluation point to its owning member and
+		// require those members to hold a strict majority of committee stake. In worst-case
+		// rounding it can bind above the crypto bar, but it never blocks the guaranteed
+		// liveness case (an online >2/3-stake set is also a strict majority) and a rejection is
+		// a bounded deferral (errStakeMinority), not a silent drop. It is a no-op on the
+		// unweighted legacy path (no recorded weights => returns true).
 		if round, ok := k.GetDkgRound(ctx, e.Epoch); ok && len(round.Members) > 0 {
 			memberPresent := make(map[uint64]bool, len(shares))
 			for _, s := range shares {

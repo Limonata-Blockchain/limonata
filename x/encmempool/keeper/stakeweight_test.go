@@ -23,12 +23,16 @@ import (
 //
 // The fix bakes stake into the CRYPTOGRAPHY: each committee member is allocated Shamir
 // evaluation points PROPORTIONAL to its stake within a bounded budget S, and the threshold is
-// t = floor(2S/3)+1 of them. So a coalition can reconstruct the epoch secret (on OR off chain)
-// only if it holds >= t points, which requires a stake supermajority. These tests assert:
+// t = floor(2S/3) - n + 1 of them (cycle-3: the largest t that still guarantees an online
+// >2/3-stake set always reaches it — see keeper.stakeThreshold for the proof and the honest
+// decrypt bar: > 1/3 stake always, >= 2/3 - 2n/S in general). These tests assert:
 //   - a stake-MINORITY seat-MAJORITY holds < t points and CANNOT reconstruct off-chain (the flip);
 //   - an honest stake-SUPERMAJORITY holds >= t points and CAN reconstruct (liveness preserved);
 //   - allocation is deterministic from snapshotted stake (fork-safety);
 //   - total allocated points <= S regardless of stake magnitude (bounded VE/dealing size).
+//
+// Budgets used below honor the enforced coupling S >= MinShareBudgetPerMember(=8) * n for the
+// committee each test builds (the keeper clamps a committee the budget cannot secure).
 // ============================================================================
 
 // h3Committee is the resolved output of a full transparent stake-weighted DKG run.
@@ -174,15 +178,16 @@ func opsWithPrefix(c h3Committee, prefix string) []string {
 // TestReg_H3_StakeMinoritySeatMajorityCannotReconstructOffChain is the CORE flip. A committee of
 // 3 honest whales (1000 each) + 9 attacker mid validators (200 each): the attacker is a SEAT
 // MAJORITY (9 of 12) but a STAKE MINORITY (1800 < 3000). Under stake-weighted sharing it holds
-// only ~9 of S=24 eval points, which is < t=17, so — GIVEN ALL ITS REAL SHARES — it cannot
-// reconstruct the epoch secret off-chain. (Pre-fix, its 9 seats == 9 Shamir shares >= the count
-// threshold and it decrypted; that probe is now this regression, asserting the opposite.)
+// only ~36 of S=96 eval points (its 37.5%-stake share), which is < t = floor(2*96/3)-12+1 = 53,
+// so — GIVEN ALL ITS REAL SHARES — it cannot reconstruct the epoch secret off-chain. (Pre-fix,
+// its 9 seats == 9 Shamir shares >= the count threshold and it decrypted; that probe is now this
+// regression, asserting the opposite.) S=96 = 8*12 honors the H-A coupling for a 12-seat committee.
 func TestReg_H3_StakeMinoritySeatMajorityCannotReconstructOffChain(t *testing.T) {
 	stakes := map[string]int64{"honest_A": 1000, "honest_B": 1000, "honest_C": 1000}
 	for i := 0; i < 9; i++ {
 		stakes["attacker_"+string(rune('a'+i))] = 200
 	}
-	c := runTransparentDKG(t, stakes, 24)
+	c := runTransparentDKG(t, stakes, 96)
 
 	attackers := opsWithPrefix(c, "attacker")
 	honest := opsWithPrefix(c, "honest")
@@ -228,7 +233,7 @@ func TestReg_H3_HonestSupermajorityReconstructs(t *testing.T) {
 	for _, op := range []string{"honest_A", "honest_B", "honest_C", "honest_D", "honest_E"} {
 		stakes[op] = 1000
 	}
-	c := runTransparentDKG(t, stakes, 24)
+	c := runTransparentDKG(t, stakes, 48) // 8 * the 6-seat committee (H-A coupling)
 
 	honest := opsWithPrefix(c, "honest")
 	plain := []byte("honest supermajority decrypts at maturity")
@@ -269,8 +274,10 @@ func TestReg_H3_AllocationDeterministic(t *testing.T) {
 		kA.RecordEncPubKey(ctxA, op, m.pub, encPoP(m))
 		kB.RecordEncPubKey(ctxB, op, m.pub, encPoP(m))
 	}
-	membersA := kA.ActiveMembers(ctxA, p)
-	membersB := kB.ActiveMembers(ctxB, p)
+	// Allocation now runs at round-open (seeded with the round's epoch — the L-2 tie-break),
+	// so allocate both nodes' committee snapshots explicitly with the same epoch and compare.
+	membersA := keeper.AllocateEvalPoints(kA.ActiveMembers(ctxA, p), p.EffectiveShareBudget(), 7)
+	membersB := keeper.AllocateEvalPoints(kB.ActiveMembers(ctxB, p), p.EffectiveShareBudget(), 7)
 	if len(membersA) != len(membersB) || len(membersA) == 0 {
 		t.Fatalf("member count mismatch: %d vs %d", len(membersA), len(membersB))
 	}
@@ -289,6 +296,72 @@ func TestReg_H3_AllocationDeterministic(t *testing.T) {
 	}
 }
 
+// TestReg_L2_TieBreakEpochRotatesAndIsIdentical (cycle-3 L-2): the remainder-seat tie-break
+// is (a) byte-identical for the same epoch (fork-safety) and (b) EPOCH-ROTATING — a vanity
+// low-sorting operator address no longer captures the tie-broken remainder seat in every
+// epoch (the pre-fix tie-break was input order == operator-address ascending, a permanently
+// grindable key).
+func TestReg_L2_TieBreakEpochRotatesAndIsIdentical(t *testing.T) {
+	// 4 EQUAL-stake members and a budget that leaves remainder seats on the table:
+	// S=10, quotas 2.5 each -> floors 2, R=2 remainder seats among 4 equal remainders,
+	// so exactly 2 of the 4 equal members win a seat purely on the tie-break.
+	mk := func() []types.RoundMember {
+		return []types.RoundMember{
+			{Index: 1, OperatorAddr: "aaaa", Weight: sdkmath.NewInt(100)}, // vanity low-sorting address
+			{Index: 2, OperatorAddr: "bbbb", Weight: sdkmath.NewInt(100)},
+			{Index: 3, OperatorAddr: "cccc", Weight: sdkmath.NewInt(100)},
+			{Index: 4, OperatorAddr: "dddd", Weight: sdkmath.NewInt(100)},
+		}
+	}
+	winners := func(epoch uint64) (string, []int) {
+		out := keeper.AllocateEvalPoints(mk(), 10, epoch)
+		sig := ""
+		var w []int
+		for i, m := range out {
+			if len(m.OwnedEvalPoints()) == 3 { // floor 2 + a remainder seat
+				sig += m.OperatorAddr + ","
+				w = append(w, i)
+			}
+		}
+		return sig, w
+	}
+	// (a) determinism: two independent allocations of the same epoch are identical.
+	for _, ep := range []uint64{1, 2, 3, 9, 100} {
+		s1, _ := winners(ep)
+		s2, _ := winners(ep)
+		if s1 != s2 {
+			t.Fatalf("epoch %d: tie-break not deterministic: %q vs %q", ep, s1, s2)
+		}
+	}
+	// (b) rotation: across a sweep of epochs the winner set changes at least once AND the
+	// vanity address "aaaa" does not win every epoch (the pre-fix behaviour: input order
+	// always favored the lowest operator address, every round, forever).
+	first, _ := winners(1)
+	rotated := false
+	aaaaWins := 0
+	const epochs = 32
+	for ep := uint64(1); ep <= epochs; ep++ {
+		sig, _ := winners(ep)
+		if sig != first {
+			rotated = true
+		}
+		if containsOp(sig, "aaaa") {
+			aaaaWins++
+		}
+	}
+	if !rotated {
+		t.Fatal("L-2 REGRESSION: remainder-seat winners identical across 32 epochs (tie-break not epoch-rotating)")
+	}
+	if aaaaWins == epochs {
+		t.Fatal("L-2 REGRESSION: vanity low-sorting operator captured the remainder seat in EVERY epoch")
+	}
+	t.Logf("tie-broken seats rotate across epochs (vanity 'aaaa' won %d/%d epochs, expected ~%d)", aaaaWins, epochs, epochs/2)
+}
+
+func containsOp(sig, op string) bool {
+	return strings.Contains(sig, op+",")
+}
+
 // TestReg_H3_AllocationBounded asserts the total allocated eval points never exceeds the budget S
 // regardless of stake magnitude (bounded VE/dealing size), using astronomically large stakes.
 func TestReg_H3_AllocationBounded(t *testing.T) {
@@ -300,7 +373,7 @@ func TestReg_H3_AllocationBounded(t *testing.T) {
 		{Index: 4, OperatorAddr: "opD", Weight: huge.MulRaw(3)},
 	}
 	for _, S := range []int{1, 3, 7, 24, 256, 4096} {
-		out := keeper.AllocateEvalPoints(members, S)
+		out := keeper.AllocateEvalPoints(members, S, 3)
 		total := types.TotalEvalPoints(out)
 		if total > S {
 			t.Fatalf("budget %d: total eval points %d exceeds S", S, total)
@@ -327,7 +400,7 @@ func TestReg_H3_AllocationProportionalAndFloor(t *testing.T) {
 		{Index: 2, OperatorAddr: "dust1", Weight: sdkmath.NewInt(1)},
 		{Index: 3, OperatorAddr: "dust2", Weight: sdkmath.NewInt(1)},
 	}
-	out := keeper.AllocateEvalPoints(members, 24)
+	out := keeper.AllocateEvalPoints(members, 24, 1)
 	if types.TotalEvalPoints(out) != 24 {
 		t.Fatalf("budget must be fully consumed, got %d", types.TotalEvalPoints(out))
 	}
@@ -336,7 +409,7 @@ func TestReg_H3_AllocationProportionalAndFloor(t *testing.T) {
 	}
 	// Unweighted fallback: zero weights => one point per member equal to its index.
 	zero := []types.RoundMember{{Index: 1}, {Index: 2}, {Index: 3}}
-	z := keeper.AllocateEvalPoints(zero, 24)
+	z := keeper.AllocateEvalPoints(zero, 24, 1)
 	for i, m := range z {
 		if len(m.EvalPoints) != 1 || m.EvalPoints[0] != uint64(i+1) {
 			t.Fatalf("unweighted fallback must give member %d the single point %d, got %v", i+1, i+1, m.EvalPoints)

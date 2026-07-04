@@ -2,6 +2,7 @@ package keeper_test
 
 import (
 	"crypto/rand"
+	"fmt"
 	"testing"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -296,15 +297,19 @@ func TestOnChainDKG_MemberChangeFlapDampened(t *testing.T) {
 // TestDecryptFloodBoundedAndFair REPLACES the old TestDecryptCapDefersNotDrops. Its former
 // invariant ("nothing is ever dropped; defer everything") was the self-inflicted HIGH: an
 // unbounded DEFER lets a flooder grow EncTx state without bound and starve honest ciphertexts.
-// The corrected invariants are:
+// The invariants under the cycle-3 H-B semantics (share-shortfall entries get a BOUNDED
+// deferral grace before a LOUD stranded drop — never a silent loss, never an unbounded defer):
 //   - ANTI-STARVATION FAIRNESS: honest ciphertexts submitted BEHIND a flood from another
-//     submitter still decrypt on the very next block (round-robin fair-share), not stuck
+//     submitter are ATTEMPTED on the very next block (round-robin fair-share), not stuck
 //     behind the whole attacker backlog;
-//   - BOUNDED per-block work: exactly maxDecryptAttemptsPerBlock are drained per block;
-//   - no silent loss under this (sub-ceiling) load: the flood self-heals over later blocks.
+//   - BOUNDED per-block work: attempts per block never exceed maxDecryptAttemptsPerBlock, and
+//     once the grace expires exactly the cap is stranded-dropped per block;
+//   - BOUNDED deferral, non-silent: every share-less entry leaves state by
+//     maturity + StrandedDecryptGraceBlocks with an encmempool_decrypt_stranded event, and
+//     every counter returns to zero (no strand, no leak).
 //
 // Pre-fix (strict seq order), the honest ciphertexts (higher seqs, submitted after the flood)
-// were deferred behind the entire 3000-entry attacker backlog and did NOT decrypt on block 12.
+// were deferred behind the entire 3000-entry attacker backlog and not even attempted on block 12.
 func TestDecryptFloodBoundedAndFair(t *testing.T) {
 	const flood = 3000 // > maxDecryptAttemptsPerBlock, < maxDecryptScanPerBlock (fits the fair window)
 	const honestN = 5
@@ -336,20 +341,40 @@ func TestDecryptFloodBoundedAndFair(t *testing.T) {
 		t.Fatalf("want %d stored, got %d", flood+honestN, got)
 	}
 
-	// Block 12: everything matures. Fairness must drain all honest ciphertexts THIS block.
+	// Block 12: everything matures (with ZERO shares posted — all short of t). Fairness must
+	// ATTEMPT every honest ciphertext THIS block (a decrypt_missed for each honest seq), while
+	// the H-B grace keeps share-less entries in state (non-silent deferral, ref-counts intact).
 	b12 := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
 	}
-	for _, seq := range honestSeq {
-		if _, ok := k.GetEncTx(b12, 12, seq); ok {
-			t.Fatalf("STARVATION: honest ciphertext seq %d not decrypted on block 12 (stuck behind the flood)", seq)
+	missedSeqs := map[uint64]bool{}
+	missed := 0
+	for _, ev := range b12.EventManager().Events() {
+		if ev.Type != "encmempool_decrypt_missed" {
+			continue
+		}
+		missed++
+		for _, a := range ev.Attributes {
+			if a.Key == "seq" {
+				var s uint64
+				fmt.Sscanf(a.Value, "%d", &s)
+				missedSeqs[s] = true
+			}
 		}
 	}
-	// Bounded per-block work: exactly the cap drained; the attacker backlog is NOT fully drained.
+	for _, seq := range honestSeq {
+		if !missedSeqs[seq] {
+			t.Fatalf("STARVATION: honest ciphertext seq %d not even attempted on block 12 (stuck behind the flood)", seq)
+		}
+	}
+	// Bounded per-block work: exactly the attempt cap was spent; nothing dropped yet (deferral).
+	if missed != keeper.MaxDecryptAttemptsPerBlock {
+		t.Fatalf("per-block attempts must equal the cap %d, got %d", keeper.MaxDecryptAttemptsPerBlock, missed)
+	}
 	remaining := countEncTx(k, b12)
-	if drained := flood + honestN - remaining; drained != keeper.MaxDecryptAttemptsPerBlock {
-		t.Fatalf("per-block drain must equal the cap %d, got %d", keeper.MaxDecryptAttemptsPerBlock, drained)
+	if remaining != flood+honestN {
+		t.Fatalf("within the grace nothing may drop: want %d in state, got %d", flood+honestN, remaining)
 	}
 	if uint64(remaining) != k.GetGlobalEncCount(b12) {
 		t.Fatalf("global in-flight counter (%d) disagrees with stored EncTx (%d)", k.GetGlobalEncCount(b12), remaining)
@@ -358,8 +383,22 @@ func TestDecryptFloodBoundedAndFair(t *testing.T) {
 		t.Fatal("expected a deferred event while the flood drains")
 	}
 
-	// No silent loss under this sub-ceiling load: the flood self-heals over later blocks.
-	for h := int64(13); h <= 40; h++ {
+	// Grace expiry (12 + StrandedDecryptGraceBlocks): the backlog is stranded-dropped LOUDLY,
+	// bounded per block — exactly the cap on the first expiry block.
+	expiry := int64(12 + keeper.StrandedDecryptGraceBlocks)
+	bx := ctx.WithBlockHeight(expiry).WithEventManager(sdk.NewEventManager())
+	if err := k.BeginBlock(bx); err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(bx, "encmempool_decrypt_stranded") {
+		t.Fatal("H-B REGRESSION: grace expiry must drop with a LOUD encmempool_decrypt_stranded event")
+	}
+	if dropped := flood + honestN - countEncTx(k, bx); dropped != keeper.MaxDecryptAttemptsPerBlock {
+		t.Fatalf("per-block stranded drops must equal the cap %d, got %d", keeper.MaxDecryptAttemptsPerBlock, dropped)
+	}
+
+	// The rest drains over the next blocks: bounded deferral, no strand, no leak.
+	for h := expiry + 1; h <= expiry+8; h++ {
 		bctx := ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager())
 		if err := k.BeginBlock(bctx); err != nil {
 			t.Fatal(err)

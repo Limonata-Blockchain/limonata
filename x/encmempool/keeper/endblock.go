@@ -187,13 +187,31 @@ func (k Keeper) retryFailedRound(ctx sdk.Context, prevEpoch uint64, lastRound ty
 // can auto-deal off block events without a custom query endpoint. attempt/reason are
 // emitted so operators can watch convergence (start / member_change / retry).
 func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMember, hash []byte, h uint64, p types.Params, attempt uint64, reason string) {
-	// HIGH-3: on the STAKE-WEIGHTED transparent path the threshold is a fraction of the
-	// evaluation-point budget S (t = floor(2S/3)+1), so gathering t Shamir shares requires a
-	// stake supermajority. On the legacy/declared path (unweighted, one point per member) it
-	// stays the member COUNT threshold, unchanged.
+	// HIGH-3: on the STAKE-WEIGHTED transparent path each member is allocated Shamir
+	// evaluation points proportional to its snapshotted stake within the budget S, HERE (at
+	// round-open) so the allocation is seeded with the round's EPOCH — the epoch-rotating
+	// remainder-seat tie-break (cycle-3 L-2). The threshold is t = floor(2S/3) - n + 1 (see
+	// stakeThreshold for the safety/liveness proof and the honest decrypt bar). MembersHash
+	// covers only the operator set, so allocating after hashing cannot flap membership.
+	// On the legacy/declared path (unweighted, one point per member) the member COUNT
+	// threshold stays byte-identical.
 	var t uint32
 	if p.DkgTransparent {
-		t = stakeThreshold(types.TotalEvalPoints(members))
+		members = AllocateEvalPoints(members, p.EffectiveShareBudget(), epoch)
+		var degraded bool
+		t, degraded = stakeThreshold(members)
+		if degraded {
+			// Defense-in-depth: unreachable via validated params + the TransparentMembers
+			// committee clamp. Deterministic (pure function of committed state) and LOUD;
+			// the round still opens with the safety-floor threshold — never a halt/fork.
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_threshold_degraded",
+				sdk.NewAttribute("epoch", u64str(epoch)),
+				sdk.NewAttribute("budget", u64str(uint64(types.TotalEvalPoints(members)))),
+				sdk.NewAttribute("members", u64str(uint64(len(members)))),
+				sdk.NewAttribute("reason", "share budget below 6n-1: safety floor applied, liveness not guaranteed"),
+			))
+		}
 	} else {
 		t = roundThreshold(p, len(members))
 	}

@@ -19,13 +19,14 @@ import (
 
 // TestReg_H3_OffChainReconstructionRequiresStakeSupermajority: a committee of 1 honest whale
 // (stake 100, ~77%) + 3 attacker validators (stake 10 each). The 3 attackers are a SEAT MAJORITY
-// (3 of 4) but a STAKE MINORITY (30 < 100). Under stake weighting they hold only ~6 of S=24 eval
-// points (< t=17), so — even given ALL their real derived shares and ignoring every on-chain
-// gate — they cannot recover the epoch secret. The whale alone (a stake supermajority) holds
-// >= t points and can, proving the capability now tracks stake, not seat count.
+// (3 of 4) but a STAKE MINORITY (30 < 100). Under stake weighting they hold only ~7 of S=32 eval
+// points (< t = floor(2*32/3)-4+1 = 18), so — even given ALL their real derived shares and
+// ignoring every on-chain gate — they cannot recover the epoch secret. The whale alone (a stake
+// supermajority) holds >= t points and can, proving the capability now tracks stake, not seat
+// count. S=32 = 8*4 honors the H-A coupling for a 4-seat committee.
 func TestReg_H3_OffChainReconstructionRequiresStakeSupermajority(t *testing.T) {
 	stakes := map[string]int64{"whale_honest": 100, "atk_a": 10, "atk_b": 10, "atk_c": 10}
-	c := runTransparentDKG(t, stakes, 24)
+	c := runTransparentDKG(t, stakes, 32)
 
 	attackers := opsWithPrefix(c, "atk")
 	whale := opsWithPrefix(c, "whale")
