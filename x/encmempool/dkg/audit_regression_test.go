@@ -199,7 +199,7 @@ func TestAuditFix_SharePubKeyEmptyNoPanic(t *testing.T) {
 // q is the secp256k1 group order.
 // ---------------------------------------------------------------------------
 func TestAuditFix_ParseShareRejectsNonCanonical(t *testing.T) {
-	const qHex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"     // q -> reduces to 0
+	const qHex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"      // q -> reduces to 0
 	const qPlus5Hex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364146" // q+5 -> reduces to 5
 	const zeroHex = "0000000000000000000000000000000000000000000000000000000000000000"
 

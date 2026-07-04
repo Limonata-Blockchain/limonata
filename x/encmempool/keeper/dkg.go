@@ -203,6 +203,12 @@ func (k Keeper) getEpochEncCount(ctx context.Context, epoch uint64) uint64 {
 	return k.readU64(ctx, epochEncCountKey(epoch))
 }
 
+// GetEpochEncCount exposes the per-epoch in-flight ref-count for regression tests that assert
+// a drop path still releases the epoch ref-count (HIGH-2 safety).
+func (k Keeper) GetEpochEncCount(ctx context.Context, epoch uint64) uint64 {
+	return k.getEpochEncCount(ctx, epoch)
+}
+
 // incEpochEncCount is called when a ciphertext is submitted for an epoch.
 func (k Keeper) incEpochEncCount(ctx context.Context, epoch uint64) {
 	_ = k.store(ctx).Set(epochEncCountKey(epoch), u64(k.getEpochEncCount(ctx, epoch)+1))

@@ -26,7 +26,24 @@ import (
 // not re-inject the payload into the EVM/tx pipeline. The reveal that a user submits
 // is itself an ordinary tx. Real MEV resistance requires threshold encryption with
 // >= 2 independent keypers, which plugs into this exact commit/reveal/execute slot.
-func (k Keeper) BeginBlock(ctx sdk.Context) error {
+func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
+	// PANIC-GUARD (symmetry with EndBlockDKG): BeginBlock runs inside consensus, so an
+	// unrecovered panic here halts the whole chain. The per-ciphertext decrypt path already
+	// recovers data-dependent crypto panics; this last-resort top-level recover converts any
+	// UNFORESEEN panic (e.g. in the reveal/GC scans) into a contained, DETERMINISTIC event
+	// (identical committed state => identical outcome on every node) instead of a halt, and
+	// does not propagate the error (a returned BeginBlock error is itself fatal to the chain).
+	defer func() {
+		if r := recover(); r != nil {
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_beginblock_panic",
+				sdk.NewAttribute("height", strconv.FormatUint(uint64(ctx.BlockHeight()), 10)),
+				sdk.NewAttribute("reason", fmt.Sprintf("%v", r)),
+			))
+			err = nil
+		}
+	}()
+
 	p := k.GetParams(ctx)
 	cur := uint64(ctx.BlockHeight())
 
@@ -91,42 +108,94 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 // commitments) via the stored DLEQ proof, so a malicious keyper's bad partial is
 // DROPPED WITH ATTRIBUTION instead of silently corrupting the Lagrange combine. On
 // the legacy path (epoch 0) it uses the unverified threshold.Recover as before.
-// maxDecryptAttemptsPerBlock bounds the number of threshold-recovery attempts (each
-// does up to t DLEQ verifications + a Lagrange combine) BeginBlock performs at a single
-// height. Ciphertexts maturing at one height are already gas-bounded (one submit block
-// maps to exactly one decrypt height), so this is defense-in-depth: it caps the crypto
-// work per block so no flood of ciphertexts can stall block production. The cap is far
-// above any legitimate per-block volume, so normal operation never reaches it.
-const maxDecryptAttemptsPerBlock = 2048
+const (
+	// maxDecryptAttemptsPerBlock caps the threshold-recovery ATTEMPTS (each up to t DLEQ
+	// verifications + a Lagrange combine) performed at a single height. It is the per-block
+	// decrypt budget, fair-shared across submitters. Far above any legitimate per-block
+	// volume, so normal operation never reaches it.
+	maxDecryptAttemptsPerBlock = 2048
+	// maxDecryptScanPerBlock caps how many matured EncTx are MATERIALIZED (scanned +
+	// unmarshalled) per block. Set a small multiple above the decrypt budget so the block
+	// still sees enough distinct submitters to fair-share, while guaranteeing the per-block
+	// scan is O(cap) — NOT O(backlog). This closes the DROP->DEFER regression, where the old
+	// "scan the whole matured backlog every block" grew unbounded under a flood. Anything
+	// beyond this window stays in state and drains on a later block (deterministic suffix).
+	maxDecryptScanPerBlock = 2 * maxDecryptAttemptsPerBlock
+	// absMaxInFlightEncTx is the ALWAYS-ON absolute ceiling on in-flight EncTx. Even with
+	// param admission disabled (Params.MaxInFlightEncTx == 0), decryptMatured sheds matured
+	// entries above this with a loud, deterministic drop, so 'bounded state under flood'
+	// holds unconditionally.
+	absMaxInFlightEncTx = 1 << 20
+	// maxCeilingDropsPerBlock bounds the last-resort drops per block so shedding excess is
+	// itself O(cap) work, never an O(backlog) burst.
+	maxCeilingDropsPerBlock = maxDecryptScanPerBlock
+)
+
+// MaxDecryptAttemptsPerBlock exposes the per-block decrypt budget for regression tests
+// (they assert the per-block drain equals exactly this cap under a flood).
+const MaxDecryptAttemptsPerBlock = maxDecryptAttemptsPerBlock
 
 func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
-	// Process everything matured by `cur` (decrypt height <= cur), which INCLUDES any
-	// ciphertext DEFERRED from a prior height when the per-block cap was hit — so nothing
-	// is silently lost. Deterministic (decryptHeight, seq) order on every node.
-	var matured []types.EncTx
-	k.IterateEncTxUpTo(ctx, cur, func(e types.EncTx) { matured = append(matured, e) })
+	// BOUNDED SCAN: materialize at most maxDecryptScanPerBlock matured ciphertexts (decrypt
+	// height <= cur), in deterministic (decryptHeight, seq) order, INCLUDING any deferred from
+	// a prior block. Capping the scan is what keeps per-block cost O(cap), not O(backlog) — a
+	// flood can no longer force every node to re-scan the whole matured backlog each block.
+	matured, truncated := k.CollectMaturedUpTo(ctx, cur, maxDecryptScanPerBlock)
 
-	order := uint64(0)
-	attempts := 0
-	for i, e := range matured {
-		// BOUNDED CRYPTO WORK: once the per-block attempt cap is hit, DEFER the remaining
-		// matured ciphertexts to a later block rather than DROPPING them (MEDIUM FIX). They
-		// stay in state (still ref-counted against their epoch) and are picked up next block
-		// by IterateEncTxUpTo, so no share-carrying work is silently lost — only spread
-		// across blocks. Deterministic: `matured` is in (decryptHeight, seq) order on every
-		// node, so all nodes defer the identical suffix.
-		if attempts >= maxDecryptAttemptsPerBlock {
-			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_deferred",
-				sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
-				sdk.NewAttribute("deferred", strconv.Itoa(len(matured)-i))))
-			break
+	// LAST-RESORT CEILING DROP (defense-in-depth BENEATH ingress admission). If in-flight
+	// EncTx exceeds the effective absolute ceiling, shed the excess NEWEST scanned entries
+	// (tail of the window — keeps the oldest / most-overdue ciphertexts for decryption) with
+	// a LOUD, DETERMINISTIC event, bounded per block. This holds 'bounded state under flood'
+	// even if admission was bypassed (e.g. a genesis import or a governance-lowered ceiling).
+	// CRITICAL: every drop goes through releaseEncTx, which decEpochEncCount + maybePruneEpoch,
+	// so a drop can never re-leak the epoch ref-count (that would regress the HIGH-2 fix).
+	ceiling := uint64(absMaxInFlightEncTx)
+	if p.MaxInFlightEncTx > 0 && p.MaxInFlightEncTx < ceiling {
+		ceiling = p.MaxInFlightEncTx
+	}
+	if global := k.GetGlobalEncCount(ctx); global > ceiling {
+		drop := int(global - ceiling)
+		if drop > maxCeilingDropsPerBlock {
+			drop = maxCeilingDropsPerBlock
 		}
-		attempts++
-		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a
-		// single malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an
-		// out-of-spec nonce) would halt the whole chain. Process each ciphertext inside
-		// a recover guard; any panic is contained and reported, and the ciphertext is
-		// GC'd below so a bad entry cannot wedge the chain into a crash loop.
+		if drop > len(matured) {
+			drop = len(matured)
+		}
+		for i := 0; i < drop; i++ {
+			e := matured[len(matured)-1-i] // newest scanned dropped first
+			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_enc_dropped_ceiling",
+				sdk.NewAttribute("submitter", e.Submitter),
+				sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+				sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
+				sdk.NewAttribute("in_flight", strconv.FormatUint(global, 10)),
+				sdk.NewAttribute("ceiling", strconv.FormatUint(ceiling, 10))))
+			k.releaseEncTx(ctx, e)
+		}
+		matured = matured[:len(matured)-drop]
+	}
+
+	// ANTI-STARVATION FAIRNESS: fair-share the per-block decrypt budget across submitters via
+	// a deterministic round-robin so one flooder cannot starve honest ciphertexts (which would
+	// break the anti-MEV liveness property). When the matured set fits the budget EVERY entry
+	// is selected — no reordering and no loss under normal load; the round-robin only rations
+	// the budget under a flood.
+	selected := selectFairDecrypts(matured, maxDecryptAttemptsPerBlock)
+
+	// Process the SELECTED entries in the original (decryptHeight, seq) order — the anti-MEV
+	// execution ordering is unchanged; fairness only decides WHICH subset drains this block.
+	order := uint64(0)
+	processed := 0
+	for i := range matured {
+		if !selected[i] {
+			continue // fairness-deferred to a later block (still in state, ref-counts intact)
+		}
+		e := matured[i]
+		processed++
+		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a single
+		// malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an out-of-spec
+		// nonce) would halt the whole chain. Process each ciphertext inside a recover guard;
+		// any panic is contained and reported, and the ciphertext is released below so a bad
+		// entry cannot wedge the chain into a crash loop.
 		func(e types.EncTx) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -166,19 +235,66 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 				}
 			}
 		}(e)
-		// GC the ciphertext + its shares regardless (bounded state).
-		k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
-		k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
-		// HIGH-2 variant: this ciphertext no longer pins its DKG epoch. Drop the ref-count
-		// and, if it was the LAST in-flight ciphertext for a now-superseded epoch, reclaim
-		// that epoch's DkgRound + ActiveThresholdKey. Doing the prune HERE (rather than only
-		// at finalize) is what lets an epoch be GC'd the instant it drains, even if it was
-		// superseded while ciphertexts were still in flight.
-		if e.Epoch > 0 {
-			k.decEpochEncCount(ctx, e.Epoch)
-			k.maybePruneEpoch(ctx, e.Epoch)
+		// Release the ciphertext + shares + ALL ref-counts (global, per-submitter, and — for a
+		// DKG epoch — the epoch ref-count, pruning the epoch the instant it drains). HIGH-2 safe.
+		k.releaseEncTx(ctx, e)
+	}
+
+	// Anything not processed this block (fairness-deferred, or beyond the bounded scan window)
+	// is CARRIED, not dropped — deterministic on every node. Emit a defer signal so operators
+	// can watch a backlog drain.
+	if deferred := len(matured) - processed; truncated || deferred > 0 {
+		ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_deferred",
+			sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
+			sdk.NewAttribute("deferred", strconv.Itoa(deferred)),
+			sdk.NewAttribute("scan_truncated", strconv.FormatBool(truncated))))
+	}
+}
+
+// selectFairDecrypts picks up to `budget` indices of `matured` to decrypt this block,
+// fair-sharing the budget across distinct submitters via a deterministic round-robin
+// (layer 0 = each submitter's first pending ciphertext, layer 1 = each submitter's second,
+// …). When len(matured) <= budget every index is selected (fast path: no rationing under
+// normal load). Deterministic: submitter order is first-appearance within the (decryptHeight,
+// seq)-ordered matured slice, identical on every node. Cost is O(len(matured)) <= O(scan
+// window) = O(cap).
+func selectFairDecrypts(matured []types.EncTx, budget int) []bool {
+	sel := make([]bool, len(matured))
+	if len(matured) <= budget {
+		for i := range sel {
+			sel[i] = true
+		}
+		return sel
+	}
+	order := make([]string, 0)
+	queues := make(map[string][]int)
+	for i, e := range matured {
+		if _, seen := queues[e.Submitter]; !seen {
+			order = append(order, e.Submitter)
+		}
+		queues[e.Submitter] = append(queues[e.Submitter], i)
+	}
+	picked := 0
+	for picked < budget {
+		progressed := false
+		for _, s := range order {
+			q := queues[s]
+			if len(q) == 0 {
+				continue
+			}
+			sel[q[0]] = true
+			queues[s] = q[1:]
+			picked++
+			progressed = true
+			if picked >= budget {
+				break
+			}
+		}
+		if !progressed {
+			break
 		}
 	}
+	return sel
 }
 
 var errNotEnoughShares = errors.New("not enough shares")

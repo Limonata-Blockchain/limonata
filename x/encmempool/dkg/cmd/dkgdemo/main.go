@@ -1,12 +1,12 @@
 // dkgdemo runs an END-TO-END transcript of the joint-Feldman DKG driving the
 // threshold-ElGamal encrypted mempool, printing real values at each step:
 //
-//	1. a 5-node, threshold-3 DKG produces a master public key (no trusted dealer);
-//	2. a message is encrypted to that key with the UNMODIFIED threshold.Encrypt;
-//	3. 3 shares decrypt it (success); 2 shares do not (threshold holds);
-//	4. a tampered partial decryption is rejected by the enforced DLEQ path;
-//	5. a re-run over a CHANGED 5-node set yields an INDEPENDENT key — the old
-//	   shares cannot decrypt the new ciphertext.
+//  1. a 5-node, threshold-3 DKG produces a master public key (no trusted dealer);
+//  2. a message is encrypted to that key with the UNMODIFIED threshold.Encrypt;
+//  3. 3 shares decrypt it (success); 2 shares do not (threshold holds);
+//  4. a tampered partial decryption is rejected by the enforced DLEQ path;
+//  5. a re-run over a CHANGED 5-node set yields an INDEPENDENT key — the old
+//     shares cannot decrypt the new ciphertext.
 //
 // It is a demo, not a test; run: go run ./x/encmempool/dkg/cmd/dkgdemo
 package main

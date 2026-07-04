@@ -105,6 +105,17 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if len(msg.Nonce) != threshold.NonceSize {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "nonce must be %d bytes, got %d", threshold.NonceSize, len(msg.Nonce))
 	}
+	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a
+	// flooder cannot grow EncTx state (nor the per-block decrypt scan) without bound, nor starve
+	// honest ciphertexts. The checks read O(1) maintained counters (never an O(backlog) scan).
+	// A ceiling of 0 is disabled; the keeper's always-on absolute constant ceiling + the
+	// BeginBlock last-resort drop remain the unconditional 'bounded state' backstop.
+	if p.MaxInFlightEncTx > 0 && m.GetGlobalEncCount(goCtx) >= p.MaxInFlightEncTx {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "encrypted mempool full: %d in-flight ciphertexts at the global ceiling", p.MaxInFlightEncTx)
+	}
+	if p.MaxInFlightPerSubmitter > 0 && m.GetSubmitterEncCount(goCtx, msg.Submitter) >= p.MaxInFlightPerSubmitter {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "submitter is at its in-flight ceiling (%d ciphertexts)", p.MaxInFlightPerSubmitter)
+	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
 	// Stamp the ciphertext with the DKG epoch whose active key it was encrypted to,
 	// so decryptMatured decrypts it under the SAME key/members even after a re-key.

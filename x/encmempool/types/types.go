@@ -17,6 +17,14 @@ type Params struct {
 	Keypers      []string `json:"keypers"`       // authorized keyper addrs (bech32); share index = position+1 (LEGACY path)
 	DecryptDelay uint64   `json:"decrypt_delay"` // blocks between submit and decrypt-execute
 
+	// --- ADMISSION CONTROL: bound the in-flight EncTx state a flooder can create.
+	// A SubmitEncrypted whose acceptance would exceed either ceiling is REJECTED at
+	// ingress, so a flood cannot grow EncTx state (or the per-block decrypt scan) without
+	// bound or starve honest ciphertexts. 0 disables the check (the always-on absolute
+	// constant ceiling in the keeper still guarantees bounded state as a last resort). ---
+	MaxInFlightEncTx        uint64 `json:"max_in_flight_enc_tx"`        // global ceiling on un-matured EncTx (0 = disabled)
+	MaxInFlightPerSubmitter uint64 `json:"max_in_flight_per_submitter"` // per-submitter ceiling on un-matured EncTx (0 = disabled)
+
 	// --- on-chain validator DKG (OPT-IN; supersedes the LEGACY trusted setup
 	// above when enabled). The active threshold key is then produced by the
 	// validators' DKG (stored per-epoch), not by params.ThresholdPub. ---
@@ -180,6 +188,11 @@ type GenesisState struct {
 func DefaultParams() Params {
 	return Params{
 		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: false, DecryptDelay: 1,
+		// Admission ceilings sized far above any legitimate per-block volume (the encrypted
+		// path is gas-bounded per block) but low enough to bound worst-case in-flight state.
+		// Governance-tunable per deployment; the keeper's absolute constant ceiling is the
+		// always-on backstop below these.
+		MaxInFlightEncTx: 32768, MaxInFlightPerSubmitter: 2048,
 		// DKG is OFF by default. When enabled, these windows are sized for a REAL
 		// multi-node network (independent validators over p2p + a daemon that must
 		// observe the open, build a dealing, and land the tx) rather than the tiny
@@ -204,6 +217,23 @@ func (gs GenesisState) Validate() error {
 	}
 	if gs.Params.MaxRevealWindow < gs.Params.RevealDelay {
 		return fmt.Errorf("max_reveal_window (%d) must be >= reveal_delay (%d)", gs.Params.MaxRevealWindow, gs.Params.RevealDelay)
+	}
+	// MEDIUM FIX: bound DecryptDelay. It is the submit->decrypt gap and therefore the window
+	// a ciphertext (and, on the DKG path, its stamped epoch's DkgRound + ActiveThresholdKey)
+	// is retained in state; an unbounded governance-set value would let one cheap ciphertext
+	// per rekeyed epoch pin that epoch's key for an arbitrarily long time. Capping it (together
+	// with the global in-flight ceiling, which bounds the COUNT of pinned epochs) keeps the
+	// key-retention window finite.
+	if gs.Params.DecryptDelay > maxDkgWindowBlocks {
+		return fmt.Errorf("decrypt_delay (%d) must be <= %d (it drives the key-retention window)", gs.Params.DecryptDelay, maxDkgWindowBlocks)
+	}
+	// Admission ceilings: a per-submitter ceiling above the global one is meaningless (the
+	// global one binds first), so reject that misconfig; also cap both far below overflow.
+	if gs.Params.MaxInFlightEncTx > maxInFlightCeiling || gs.Params.MaxInFlightPerSubmitter > maxInFlightCeiling {
+		return fmt.Errorf("max_in_flight ceilings must be <= %d", maxInFlightCeiling)
+	}
+	if gs.Params.MaxInFlightEncTx > 0 && gs.Params.MaxInFlightPerSubmitter > gs.Params.MaxInFlightEncTx {
+		return fmt.Errorf("max_in_flight_per_submitter (%d) must be <= max_in_flight_enc_tx (%d)", gs.Params.MaxInFlightPerSubmitter, gs.Params.MaxInFlightEncTx)
 	}
 	if gs.Params.DkgEnabled {
 		if len(gs.Params.DkgMembers) == 0 {
@@ -244,6 +274,9 @@ func (gs GenesisState) Validate() error {
 const (
 	minDkgWindowBlocks uint64 = 1
 	maxDkgWindowBlocks uint64 = 10_000_000
+	// maxInFlightCeiling bounds the admission ceilings so a governance-set value cannot
+	// approach a uint64 overflow in the keeper's ref-count arithmetic.
+	maxInFlightCeiling uint64 = 1 << 40
 )
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.

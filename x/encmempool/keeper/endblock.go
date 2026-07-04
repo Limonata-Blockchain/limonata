@@ -120,6 +120,16 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 				sdk.NewAttribute("last_rekey", u64str(last)),
 				sdk.NewAttribute("min_gap", u64str(p.DkgMinRekeyGap)),
 			))
+			// FLAP-DAMPENER SAFETY (LOW FIX): the dampener must COALESCE the member CHANGE, but
+			// it must NOT freeze a FAILED round's auto-retry. A round that has already FAILED is
+			// dead weight with no active key and nothing referencing it, so leaving it un-retried
+			// for the whole gap is a needless (bounded) liveness stall. Retry it against the OLD
+			// member set: MembersHash stays stable, so this follows the backoff-gated RETRY path
+			// (attempt++), never the member_change path — the flap therefore cannot reset the
+			// backoff via this. The genuine settled change is applied once the gap elapses.
+			if lastRound.Status == types.DkgStatusFailed {
+				k.retryFailedRound(ctx, cur, lastRound, lastRound.Members, lastRound.MembersHash, h, p, "retry")
+			}
 			return
 		}
 		// GC the SUPERSEDED round. If it installed a key (Active) it is the STILL-SERVING
@@ -138,34 +148,38 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		k.openRound(ctx, cur+1, active, hash, h, p, 1, "member_change")
 
 	case lastRound.Status == types.DkgStatusFailed:
-		// AUTO-RETRY / SELF-HEAL. Wait out a backoff measured from the failed round's
-		// complaint deadline, then open a fresh round carrying an incremented attempt
-		// counter. The backoff grows with the attempt count and is CAPPED (HIGH-2), so
-		// a long outage retries less often but never stops.
-		if h < addSat(lastRound.ComplaintDeadline, retryBackoff(p, lastRound.Attempt)) {
-			return
-		}
-		attempt := lastRound.Attempt + 1
-		if p.DkgMaxAttempts > 0 && attempt > p.DkgMaxAttempts {
-			// ALERT past the configured bound — but STILL reopen. Halting retries here
-			// would brick the feature; instead operators get a signal while liveness
-			// is preserved (the round converges the moment >= t members are back).
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
-				"encmempool_dkg_stalled",
-				sdk.NewAttribute("epoch", u64str(cur+1)),
-				sdk.NewAttribute("attempt", u64str(attempt)),
-				sdk.NewAttribute("members", u64str(uint64(len(active)))),
-			))
-		}
-		// HIGH-2: GC the failed round ENTIRELY (dealings, complaints, AND its DkgRound
-		// record) before opening the retry, so sustained sub-quorum retries can never
-		// grow retained round-record state without bound.
-		k.purgeFailedRound(ctx, cur)
-		k.openRound(ctx, cur+1, active, hash, h, p, attempt, "retry")
+		// AUTO-RETRY / SELF-HEAL against the (unchanged) member set. Backoff-gated + capped.
+		k.retryFailedRound(ctx, cur, lastRound, active, hash, h, p, "retry")
 
 	// case Active with an unchanged member set: steady state — nothing to do.
 	default:
 	}
+}
+
+// retryFailedRound reopens a FAILED round as a fresh RETRY against the given member set,
+// once the (capped, geometric) backoff measured from the failed round's complaint deadline
+// has elapsed. It GCs the failed round's record ENTIRELY first (HIGH-2: retained round-record
+// state stays O(1) across an arbitrarily long sub-quorum outage). The attempt counter is
+// incremented (never reset), and DkgMaxAttempts only ALERTS — it never halts retries, so the
+// chain always converges the moment >= t members return. Used by the steady-state Failed
+// branch AND, so self-heal is never frozen, while a member-change flap is being dampened.
+// Returns whether it reopened a round (false = still within the backoff window).
+func (k Keeper) retryFailedRound(ctx sdk.Context, prevEpoch uint64, lastRound types.DkgRound, members []types.RoundMember, hash []byte, h uint64, p types.Params, reason string) bool {
+	if h < addSat(lastRound.ComplaintDeadline, retryBackoff(p, lastRound.Attempt)) {
+		return false
+	}
+	attempt := lastRound.Attempt + 1
+	if p.DkgMaxAttempts > 0 && attempt > p.DkgMaxAttempts {
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_stalled",
+			sdk.NewAttribute("epoch", u64str(prevEpoch+1)),
+			sdk.NewAttribute("attempt", u64str(attempt)),
+			sdk.NewAttribute("members", u64str(uint64(len(members)))),
+		))
+	}
+	k.purgeFailedRound(ctx, prevEpoch)
+	k.openRound(ctx, prevEpoch+1, members, hash, h, p, attempt, reason)
+	return true
 }
 
 // openRound writes a fresh DkgRound and emits dkg_round_opened. The full round

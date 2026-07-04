@@ -293,55 +293,86 @@ func TestOnChainDKG_MemberChangeFlapDampened(t *testing.T) {
 	}
 }
 
-// TestDecryptCapDefersNotDrops locks in the medium fix: when more ciphertexts mature at a
-// height than the per-block crypto cap allows, the surplus is DEFERRED to later blocks
-// (nothing silently dropped) rather than deleted-with-a-skip. Every ciphertext must
-// eventually be processed exactly once.
-func TestDecryptCapDefersNotDrops(t *testing.T) {
-	const n = 5000 // > maxDecryptAttemptsPerBlock so at least one block must defer
+// TestDecryptFloodBoundedAndFair REPLACES the old TestDecryptCapDefersNotDrops. Its former
+// invariant ("nothing is ever dropped; defer everything") was the self-inflicted HIGH: an
+// unbounded DEFER lets a flooder grow EncTx state without bound and starve honest ciphertexts.
+// The corrected invariants are:
+//   - ANTI-STARVATION FAIRNESS: honest ciphertexts submitted BEHIND a flood from another
+//     submitter still decrypt on the very next block (round-robin fair-share), not stuck
+//     behind the whole attacker backlog;
+//   - BOUNDED per-block work: exactly maxDecryptAttemptsPerBlock are drained per block;
+//   - no silent loss under this (sub-ceiling) load: the flood self-heals over later blocks.
+//
+// Pre-fix (strict seq order), the honest ciphertexts (higher seqs, submitted after the flood)
+// were deferred behind the entire 3000-entry attacker backlog and did NOT decrypt on block 12.
+func TestDecryptFloodBoundedAndFair(t *testing.T) {
+	const flood = 3000 // > maxDecryptAttemptsPerBlock, < maxDecryptScanPerBlock (fits the fair window)
+	const honestN = 5
 	k, ctx := newKeeper(t, 10)
 	p := types.Params{
-		RevealDelay: 1, MaxRevealWindow: 100,
+		RevealDelay: 1, MaxRevealWindow: 1_000_000,
 		EncEnabled: true, Threshold: 1, DecryptDelay: 2, // legacy path; 0 shares => decrypt_missed
+		// Admission DISABLED so we can inject the flood directly (models the worst case the
+		// drain path must survive); fairness lives entirely in decryptMatured, independent of it.
+		MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0,
 	}
 	if err := k.SetParams(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-
 	a := make([]byte, 33)
 	nonce := make([]byte, threshold.NonceSize)
 	body := []byte("x")
-	for i := 0; i < n; i++ {
-		// All mature at height 12 (10 + 2).
-		k.SubmitEncTx(ctx, "user", 10, 2, a, nonce, body, 0)
+	// Attacker floods first (LOWEST seqs), honest submits AFTER (highest seqs) — the adversarial
+	// ordering that starves honest under strict seq processing.
+	for i := 0; i < flood; i++ {
+		k.SubmitEncTx(ctx, "attacker", 10, 2, a, nonce, body, 0)
 	}
-	if got := countEncTx(k, ctx); got != n {
-		t.Fatalf("expected %d stored enc txs, got %d", n, got)
+	honestSeq := make([]uint64, 0, honestN)
+	for i := 0; i < honestN; i++ {
+		e := k.SubmitEncTx(ctx, "honest", 10, 2, a, nonce, body, 0)
+		honestSeq = append(honestSeq, e.Seq)
+	}
+	if got := countEncTx(k, ctx); got != flood+honestN {
+		t.Fatalf("want %d stored, got %d", flood+honestN, got)
 	}
 
-	totalMissed := 0
-	sawDeferred := false
-	for h := int64(12); h <= 12+20; h++ {
+	// Block 12: everything matures. Fairness must drain all honest ciphertexts THIS block.
+	b12 := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
+	if err := k.BeginBlock(b12); err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range honestSeq {
+		if _, ok := k.GetEncTx(b12, 12, seq); ok {
+			t.Fatalf("STARVATION: honest ciphertext seq %d not decrypted on block 12 (stuck behind the flood)", seq)
+		}
+	}
+	// Bounded per-block work: exactly the cap drained; the attacker backlog is NOT fully drained.
+	remaining := countEncTx(k, b12)
+	if drained := flood + honestN - remaining; drained != keeper.MaxDecryptAttemptsPerBlock {
+		t.Fatalf("per-block drain must equal the cap %d, got %d", keeper.MaxDecryptAttemptsPerBlock, drained)
+	}
+	if uint64(remaining) != k.GetGlobalEncCount(b12) {
+		t.Fatalf("global in-flight counter (%d) disagrees with stored EncTx (%d)", k.GetGlobalEncCount(b12), remaining)
+	}
+	if !hasEvent(b12, "encmempool_decrypt_deferred") {
+		t.Fatal("expected a deferred event while the flood drains")
+	}
+
+	// No silent loss under this sub-ceiling load: the flood self-heals over later blocks.
+	for h := int64(13); h <= 40; h++ {
 		bctx := ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager())
 		if err := k.BeginBlock(bctx); err != nil {
 			t.Fatal(err)
-		}
-		totalMissed += countEvents(bctx, "encmempool_decrypt_missed")
-		if hasEvent(bctx, "encmempool_decrypt_deferred") {
-			sawDeferred = true
 		}
 		if countEncTx(k, bctx) == 0 {
 			break
 		}
 	}
-	if !sawDeferred {
-		t.Fatal("per-block cap did not DEFER (no encmempool_decrypt_deferred event) — a flood should carry, not drop")
-	}
-	if totalMissed != n {
-		t.Fatalf("DROPPED work: only %d of %d ciphertexts were processed (defer must lose nothing)", totalMissed, n)
-	}
 	if got := countEncTx(k, ctx); got != 0 {
-		t.Fatalf("expected all ciphertexts drained, %d remain", got)
+		t.Fatalf("flood did not fully drain: %d remain", got)
+	}
+	if g := k.GetGlobalEncCount(ctx); g != 0 {
+		t.Fatalf("global in-flight counter leaked: %d (want 0 after full drain)", g)
 	}
 }
 
