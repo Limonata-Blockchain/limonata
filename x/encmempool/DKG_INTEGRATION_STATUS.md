@@ -1,179 +1,204 @@
 # x/encmempool on-chain validator DKG — integration status
 
 **Date:** 2026-07-04
-**Branch:** `limonata-dkg-integration` (HEAD `d9e12408` — HIGH-1/HIGH-2 fix pass)
+**Branch:** `limonata-dkg-integration` (HEAD `a6db7233` — HIGH-2-variant + 2-medium fix pass)
 **Target:** conditional merge into `limonata-v030-release`
 **Decision:** **NO-GO. Not merged into v0.3.0.**
-**Evidence gate:** **NOT PASSED** — one HIGH audit finding SURVIVES the fix pass (an
-unbounded-state HIGH-2 *variant* via the member-change / ActiveThresholdKey path).
+**Evidence gate:** **NOT PASSED** — a NEW HIGH was introduced by this cycle's DROP→DEFER
+medium fix. The decrypt cap now DEFERS (instead of DROPping) the per-block overflow, which
+reintroduced **unbounded EncTx state + an O(backlog) per-block scan + starvation of honest
+ciphertexts (anti-MEV liveness break)**. Reproduced by the re-audit; confirmed by reading
+the tree.
 
-This document supersedes the `1456bd52` NO-GO record. It records the fix pass, the real
-4-node re-proof, the re-audit, and the (still) NO-GO merge decision.
+This document supersedes the `d9e12408` NO-GO record. It records this cycle's fixes (the
+HIGH-2 variant IS genuinely closed and re-proved live), the re-audit, and the (still)
+NO-GO merge decision — now blocked by a *different* HIGH than last cycle.
 
 ---
 
 ## TL;DR
 
-The fix pass is strong and moved the needle: **HIGH-1 is fixed**, the **originally-filed
-HIGH-2 (failed-round retry path) is fixed**, and a real 4-node equal-power re-proof passed
-all five PROVE properties with zero app-hash divergence and both original HIGHs confirmed
-dead live. **But the re-audit found that HIGH-2 was only half-closed.** The same
-unbounded-state class survives through the *other* state-growth path — legitimate/induced
-**member changes** — which retain the superseded epoch's `DkgRound` record AND leak a
-never-deleted `ActiveThresholdKey`, and additionally reset the retry backoff. There is no
-delete of an `ActiveThresholdKey` **anywhere** in the module. That is a surviving
-validator-inducible unbounded-state HIGH, so the gate does **not** pass and the DKG is
-**not** merged into v0.3.0. The v0.3.0 release dir was **not touched**.
+The HIGH-2 variant (member-change / `ActiveThresholdKey` unbounded state) is **genuinely
+and well closed** this cycle — prune-on-mature GC with a per-epoch in-flight ref-count, the
+missing `DeleteActiveKey` added, a flap dampener, `ValidateDkgWindows` param bounds — and a
+fresh 4-node re-proof confirmed retained DKG state stays **bounded (peak 2, steady 1)**
+across 10 real member-change rekeys with byte-identical app-hash and in-flight decrypt
+surviving 2 intervening rekeys. **But the re-audit caught a self-inflicted regression:** the
+*other* medium fix — changing the per-block decrypt cap from **DROP** to **DEFER** — removed
+the only mechanism that bounded EncTx accumulation under flood, and did so in a way that (a)
+lets state grow without bound, (b) forces every block to materialize the entire matured
+backlog before doing any work, and (c) lets one flooder indefinitely starve honest
+ciphertexts out of decryption — a direct defeat of the module's anti-MEV timed-decryption
+property. Any user can trigger it permissionlessly (submission is only gas-gated; there is
+no admission cap). That is a fresh, exploitable HIGH in the code proposed for merge, so the
+gate does **not** pass and the DKG is **not** merged into v0.3.0. The v0.3.0 release dir was
+**not touched**.
 
 ---
 
-## Fix pass — what got fixed (verified)
+## This cycle — what got fixed (verified in tree, HEAD `a6db7233`)
 
-Committed on `limonata-dkg-integration` as `Limonata <noreply@limonata.xyz>` (commit
-`d9e12408`, no Claude attribution). `go build ./cmd/evmd` => exit 0; `go vet` + `gofmt`
-clean; `go test ./x/encmempool/...` passes.
+`go build ./x/encmempool/...` => **exit 0**; `go test ./x/encmempool/...` => **ok**
+(keeper suite ~14.7s). Committed as `Limonata <noreply@limonata.xyz>` (no Claude
+attribution).
 
-- **HIGH-1 (FIXED).** `DkgDeal` now validates EVERY enc-share field at ingress and rejects
-  the whole dealing if any is malformed: each Feldman commitment must parse as a compressed
-  on-curve secp256k1 point (`dkg.ParseCommitmentPoints`), each enc-share `A` must be a valid
-  compressed point (`dkg.ValidCompressedPoint`), each nonce must be exactly
-  `threshold.NonceSize`, body non-empty — so a bad dealing can never enter QUAL.
-  Defense-in-depth: `VerifyJustifiedComplaint` now treats a structurally-unopenable
-  enc-share as a public, unframeable, justify-disqualifiable fault (`cheated=true,
-  proofValid=true`). Regression probes in `dkg_soundness_probe_test.go`
-  (`RejectedAtIngress`, `JustifyDisqualifiable` unit+e2e, `LivenessPreserved`) verified to
-  FAIL pre-fix. **Re-audit: closed. Confirmed dead live on 4 nodes (malformed A / nonce /
-  commitment deals rejected at ingress, code 18; finalized key correct on all nodes).**
+- **HIGH-2 variant — member-change / ACTIVE-epoch unbounded state (CLOSED, verified good).**
+  - New per-epoch ref-count of in-flight (un-matured) EncTx: `EpochEncCountPrefix` (`0x16`,
+    `types/keys.go:36`); `incEpochEncCount` on submit (`keeper.go:131`), `decEpochEncCount`
+    at maturity (`abci.go:178`).
+  - The missing delete now exists: `DeleteActiveKey` (`dkg.go:193`).
+  - `maybePruneEpoch` (`dkg.go:243`) deletes BOTH the superseded `DkgRound` record AND its
+    `ActiveThresholdKey` — but only when the epoch is **neither** the serving `ActiveEpoch`
+    **nor** the in-flight `CurrentEpoch` **AND** its ref-count is 0. So an epoch pinned by
+    any un-matured EncTx is never pruned early: `SubmitDecryptionShare` still reads
+    `GetDkgRound(epoch)` and recovery still reads `GetActiveKey(epoch)` for in-flight
+    ciphertexts. Prune fires at `finalizeRound` for the just-superseded `prevActive`
+    (`dkg.go:394`) if already drained, else the instant its last stamped ciphertext matures
+    (`abci.go:179`). Retained state is now **O(pending epochs)**, not O(total rekeys).
+  - **Re-audit: closed. Re-proved live** — bounded (peak 2 / steady 1) across 10 real
+    member-change rekeys on 4 p2p nodes; a ciphertext pinned to epoch E survived 2
+    intervening rekeys and decrypted correctly on all 4 at maturity, then E was reclaimed
+    exactly at maturity; app-hash byte-identical at every sampled height, zero panics/halts.
 
-- **HIGH-2, failed-round path (FIXED).** `purgeRoundData` split into `purgeDealings`
-  (deal/complaint bulk only) and `purgeFailedRound` (also deletes the `DkgRound` record);
-  the auto-retry branch now calls `purgeFailedRound`, bounding retained failed-round state
-  to O(1) under a sustained sub-quorum. Capped geometric backoff (`retryBackoff`, ceiling
-  `dkgBackoffCeilingBlocks=1000`) added; `CountDkgRounds` added.
-  `TestOnChainDKG_SustainedSubQuorumBoundedAndRecovers` asserts record count stays <=2
-  across ~16 retries then recovers; verified to FAIL pre-fix (peak=16). **Re-audit: this
-  specific (failed-round) path is closed and confirmed bounded live (failed epochs 9–11
-  purged on retry).**
+- **Flap dampener (CLOSED).** `LastRekeyHeightKey` (`0x17`); `DkgMinRekeyGap` (default 30,
+  `types.go:193`). `endblock.go:116` holds a member-change arriving within `DkgMinRekeyGap`
+  of the last rekey, while a genuine settled change (preceded by stability) rekeys
+  immediately. A superseded FAILED round's record is now fully GC'd on member change (was
+  leaking one record per churn); an Active superseded round is kept (pinned) and pruned by
+  the GC above. Unit-covered by `TestOnChainDKG_MemberChangeFlapDampened`.
 
-- **Triage (cheap/adjacent, FIXED):** member_change purges the superseded epoch's dealing
-  bulk; complaint window floored >=1 (`max64`); saturating deadline arithmetic (`addSat`)
-  guards overflow; `EndBlockDKG` wrapped in a deterministic panic-guard (recover -> event,
-  no chain halt); `decryptMatured` bounds crypto work at `maxDecryptAttemptsPerBlock=2048`,
-  GCing overflow with an event.
-
----
-
-## Multi-node re-proof (real 4-node p2p, equal power)
-
-**Result: worked, no divergence, both ORIGINAL highs dead — verdict GO for those two.**
-
-Re-proof succeeded on a realistic 4-node equal-power (100 each) p2p network with normal
-unbonding (`1814400s`). All 5 PROVE properties passed with raw evidence: (1) identical
-app-hash network formed; (2) DKG finalized to the SAME pub on all 4, no master secret on
-chain; (3) encrypt->decrypt identical on all 4; (4) member-change rekey produced a NEW
-independent key identical across nodes, and a 2-of-4 rotation under normal unbonding caused
-NO `x/distribution` halt; (5) auto-retry recovered a forced sub-quorum failure with state
-that stayed strictly bounded. App-hash identical across all 4 nodes at 16 heights spanning
-the run — zero divergence, zero halts.
-
-Residual note the re-proof itself flagged **by design**: *superseded ACTIVE-epoch
-`DkgRound` records are retained and grow with member changes.* The re-proof treated this as
-acceptable ("grows only with legitimate member changes"). **The re-audit disagrees** — see
-the surviving HIGH below.
+- **Medium (b) — param bounds (CLOSED).** `Params.ValidateDkgWindows` (`types.go:250`)
+  wired into `GenesisState.Validate` (`types.go:228`) — the only governance/genesis param
+  entry point (encmempool exposes no `MsgUpdateParams`). Deal/complaint/backoff windows must
+  be in `[1, 10_000_000]`; `DkgMinRekeyGap`/`DkgMaxAttempts` upper-capped; `DkgMaxAttempts=0`
+  still allowed (never-alert). Nonsensical values rejected at ingress instead of silently
+  clamped.
 
 ---
 
-## Re-audit — 14 findings, **one SURVIVING HIGH (merge-blocker)**, 0 critical
+## Medium (a) — DROP→DEFER — is where this cycle broke: the surviving HIGH
 
-### SURVIVING HIGH — HIGH-2 variant: member-change / ActiveThresholdKey unbounded state (+ backoff reset)
+### SURVIVING HIGH — DROP→DEFER reintroduced unbounded EncTx state + O(backlog) per-block scan + honest-ciphertext starvation (anti-MEV liveness break)
 
-- **Where (verified in tree, HEAD `d9e12408`):**
-  - `keeper/endblock.go:108-114` — the `member_change` branch calls `purgeDealings(cur)`
-    (drops dealing/complaint bulk but **KEEPS** the `DkgRound` record) then
-    `openRound(..., attempt=1, "member_change")`.
-  - `keeper/dkg.go:83-110` — `purgeDealings` **deliberately retains** the `DkgRound`
-    record. The only path that deletes a record is `purgeFailedRound` (`dkg.go:123-126`),
-    which is called **only** from the retry branch (`endblock.go:139`). No ACTIVE-epoch
-    record is ever GC'd.
-  - **No `ActiveThresholdKey` delete exists anywhere in the module.** Grep of
-    `x/encmempool/**` for any delete/prune of `ActiveThresholdKey` returns nothing; only
-    `SetActiveKey` (`dkg.go:160`) and `GetActiveKey` (`dkg.go:164`) exist. Every successful
-    rekey writes a new `ActiveThresholdKey` at the new epoch and none is ever reclaimed.
-- **Why it is a HIGH, not "by design":**
-  1. **Monotonic unbounded growth with no prune-on-mature.** ACTIVE-epoch records are only
-     needed to authorize decryption shares for in-flight ciphertexts stamped with that
-     epoch. Those ciphertexts have a bounded reveal horizon and are consumed by BeginBlock
-     `decryptMatured`. Once an old epoch has zero pending ciphertexts, its `DkgRound` record
-     **and** its `ActiveThresholdKey` are dead weight — but nothing reference-counts or
-     prunes them. State grows O(total successful rekeys over chain lifetime), forever.
-  2. **Inducible, not merely "legitimate."** `ActiveMembers` (`dkg.go:206`) is
-     `IterateBondedValidatorsByPower` ∩ `p.DkgMembers`, and the re-key trigger is a change
-     in `MembersHash`. A declared member flapping its bonded status (bond/unbond, or
-     crossing the bonded-set boundary) induces a member_change **each time** — so the growth
-     is griefable, not bounded by honest churn.
-  3. **Backoff reset.** `member_change` opens `attempt=1`, resetting the HIGH-2 geometric
-     backoff. An attacker who flaps membership both bloats state and defeats the retry
-     backoff ceiling that HIGH-2 added for the failed path.
-- **Net:** the fix closed the *failed-round* unbounded-state path but left the
-  *active-epoch/member-change* unbounded-state path (plus a never-deleted `ActiveThresholdKey`
-  and a griefable backoff reset) open. Same HIGH-2 class, different door. **Merge-blocking.**
+- **Where (verified in tree, HEAD `a6db7233`):**
+  - `keeper/abci.go:106-107` — `decryptMatured` now materializes the WHOLE matured backlog:
+    `k.IterateEncTxUpTo(ctx, cur, func(e) { matured = append(matured, e) })`.
+  - `keeper/abci.go:118-123` — at `attempts >= maxDecryptAttemptsPerBlock (2048)` the loop
+    `break`s and leaves the surplus in state. **The break caps only the crypto loop — the
+    O(backlog) materialization at line 107 already ran.**
+  - `keeper/keeper.go:178-198` — `IterateEncTxUpTo` range-scans `[EncTxPrefix, be(h+1))`,
+    i.e. every EncTx with `decryptHeight <= cur` (the cumulative backlog), not just this
+    height's arrivals.
+  - `keeper/msg_server.go:93-119` — `SubmitEncrypted` has **no admission cap**: the only
+    ingress checks are `EncEnabled`, non-empty `A`/`Body`, and nonce length. Nothing bounds
+    the number of in-flight / pending EncTx. Submission is permissionless, gas-gated only.
 
-### The other 13 (medium/low)
+- **Why it is a HIGH:**
+  1. **Unbounded EncTx state.** Pre-fix, the cap DELETED (dropped) the per-block overflow, so
+     EncTx state was bounded — that was the *entire stated purpose* of the cap ("so no flood
+     of ciphertexts can stall block production", `abci.go:96-99`). DEFER removed that
+     enforcement. With no admission cap and a drain fixed at 2048/block, any arrival rate
+     above 2048/block — reachable with cheap minimal-body submits under a normal EVM block
+     gas limit — accumulates in state without bound. The prune/ref-count fix bounded
+     *active-epoch* state; this fix un-bounded *ciphertext* state through a different door.
+  2. **O(backlog) per-block scan.** Line 107 walks + JSON-unmarshals + appends the ENTIRE
+     matured backlog into `matured` every block, regardless of the 2048 cap (the cap gates
+     the loop *after* materialization). Per-block cost is O(total backlog) — and by (1) the
+     backlog is itself unbounded — so block processing time grows with the flood: a
+     slowdown/OOM/halt DoS.
+  3. **Starvation / anti-MEV liveness break.** `matured` is in `(decryptHeight, seq)` order
+     and the loop DEFERS the SUFFIX. An attacker who floods the OLDEST maturing height with
+     >2048 ciphertexts occupies the entire per-block decrypt budget every block; every honest
+     ciphertext behind them in key order is deferred indefinitely and never decrypts. Since
+     timed decryption *is* the anti-MEV mechanism, an attacker can thereby indefinitely
+     delay/censor honest reveals and choose when they surface — defeating the module's core
+     property. **Secondary:** a permanently-deferred ciphertext keeps `getEpochEncCount > 0`,
+     so `maybePruneEpoch` can never reclaim its epoch — the starvation quietly re-opens the
+     very unbounded active-epoch state the HIGH-2-variant fix just closed.
 
-Not merge-blocking on their own; several cheap ones were fixed in this pass (see Triage).
-The remainder (infinity-aggregate stuck key from 2 colluding dealers; Gap #4 EVM
-re-injection; Gap #5 enc-key derivation; base-layer exiting-validator lookup review) are
-documented as deferred, out of the minimal fix scope.
+- **Net:** the medium (a) fix traded a MEDIUM ("silently drops overflow work") for a HIGH
+  ("unbounded state + O(backlog) scan + honest-ciphertext starvation"). **Merge-blocking.**
+
+### The rest of the 17 findings (medium/low)
+
+Not merge-blocking on their own. The two mediums this cycle set out to fix — param bounds
+(b) and the decrypt-cap behavior (a) — are respectively CLOSED and the source of the HIGH
+above. Remaining lows/mediums (infinity-aggregate stuck key from 2 colluding dealers; Gap #4
+EVM re-injection; Gap #5 enc-key derivation; base-layer exiting-validator lookup review) are
+documented as deferred, out of the minimal fix scope. Triage those in the same cycle that
+closes the HIGH.
 
 ---
 
 ## Remaining fix to flip the gate to GO
 
-1. **Prune superseded ACTIVE-epoch state.** Add reference-counted / prune-on-mature GC:
-   track pending EncTx/EncShare count per epoch (or scan at maturation) and, once a
-   superseded epoch has **zero** pending ciphertexts, delete BOTH `dkgRoundKey(epoch)` AND
-   its `ActiveThresholdKey(epoch)`. Add the missing `DeleteActiveKey`. Alternatively
-   ring-buffer the last N ACTIVE epochs and refuse to prune any epoch still referenced by a
-   pending ciphertext (safe — reveal horizon is bounded). Must preserve in-flight-ciphertext
-   share authorization for any epoch that still has pending ciphertexts.
-2. **Do not let an induced member-change flap reset the backoff or force unbounded fresh
-   rounds.** Carry/dampen the backoff across member-change churn, or rate-limit re-genesis so
-   membership flapping cannot reset the backoff and cannot mint unbounded retained rounds —
-   while still rekeying promptly on a genuine, settled member change (preserve liveness).
-3. **Extend the HIGH-2 bounded-state probe to the MEMBER_CHANGE path:** many induced rekeys
-   => retained `DkgRound` record count AND `ActiveThresholdKey` count must stay
-   O(pending-epochs), not O(total rekeys). Verify it FAILS pre-fix.
-4. Then a **fresh 4-node re-proof + re-audit**. Only if that audit returns no surviving
-   critical/high does the gate pass.
+The DEFER intent (don't silently lose share-carrying work) is right; the implementation must
+be **bounded** in all three dimensions:
+
+1. **Bounded scan.** Stop materializing the whole backlog. Cap the iterator at
+   `maxDecryptAttemptsPerBlock` — add a limited variant (or `break` inside the
+   `IterateEncTxUpTo` callback after collecting `cap` items) so per-block cost is O(cap), not
+   O(backlog).
+2. **Bounded state (admission control + hard ceiling).** Cap in-flight / pending EncTx at
+   `SubmitEncrypted` ingress — globally and/or per-submitter and/or per decrypt-height — and
+   reject new submissions when full, so the DEFER backlog is hard-bounded. Keep an absolute
+   state ceiling with a LOUD, deterministic DROP (event) as the last resort, so both "no
+   silent loss under normal load" AND "bounded state under flood" hold. **Any DROP path MUST
+   call `decEpochEncCount` + `maybePruneEpoch`** for the dropped ciphertext — otherwise the
+   drop re-leaks its epoch and regresses the HIGH-2-variant fix.
+3. **Anti-starvation fairness.** Fair-share the per-block decrypt budget across submitters
+   (per-submitter cap per block, or round-robin over submitters) so one flooder cannot
+   monopolize the front of the ordered queue and starve honest ciphertexts — preserving the
+   anti-MEV liveness property. Must stay deterministic (ordered store + a deterministic
+   fair-share rule so every node selects the identical set).
+4. **Regression probe.** A sustained >2048/block flood must keep EncTx state AND per-block
+   scan cost bounded, and honest ciphertexts must still decrypt at/near their scheduled
+   height (no indefinite starvation). Verify it FAILS pre-fix (today: unbounded `matured`,
+   no `encmempool_decrypt_deferred` fairness, epoch never reclaimed).
+5. Then a **fresh 4-node re-proof + re-audit**. Gate passes only if that audit returns no
+   surviving critical/high. The HIGH-2-variant closure and flap dampener from this cycle
+   carry forward (re-proved good) and do not need re-litigating unless the fix touches them.
 
 ---
 
-## Build / test evidence
+## Build / test evidence (this cycle)
 
-- `go build ./cmd/evmd` => **exit 0**; `go vet` + `gofmt` clean.
-- `go test ./x/encmempool/...` => **ok** (auto-retry, determinism, soundness, and
-  bounded-state probes). NOTE: the passing suite does **not** yet cover the surviving
-  member-change unbounded-state path — that probe is item 3 above and does not exist yet.
-- Live chain never touched; no throwaway listeners left; v0.3.0 release dir NOT touched.
+- `go build ./x/encmempool/...` => **exit 0**.
+- `go test ./x/encmempool/...` => **ok** (keeper ~14.7s; dkg/threshold cached). Includes the
+  cycle's new probes: `TestOnChainDKG_ActiveEpochBoundedUnderRekeys`,
+  `TestOnChainDKG_InFlightCiphertextSurvivesRekey`, `TestOnChainDKG_MemberChangeFlapDampened`,
+  `TestDecryptCapDefersNotDrops`. **NOTE:** `TestDecryptCapDefersNotDrops` asserts nothing is
+  dropped — it does NOT assert bounded state, bounded scan, or fairness, which is exactly the
+  gap the surviving HIGH lives in. The remaining-fix probe (item 4) does not exist yet.
+- Multi-node re-proof: GO on the HIGH-2 variant (bounded active-epoch state, in-flight
+  decrypt survives rekeys, byte-identical app-hash, zero halts). The re-proof did NOT stress
+  a >2048/block decrypt flood at live scale, so it did not exercise the surviving HIGH.
+- Live chain never touched (26657 advancing, height ~714163 during this review); no throwaway
+  listeners left; **v0.3.0 release dir NOT touched.**
 
 ---
 
 ## Safe-default note (informational — NOT a substitute for the fix)
 
-`DefaultParams` ships `DkgEnabled: false`. The DKG state machine, daemon handlers, and the
-new EndBlocker are inert until governance flips it on with a declared `DkgMembers` set. That
-is the correct ship posture, and it is why the surviving HIGH is not an *active* risk to a
-v0.3.0 that ships it dormant. It is **not**, however, grounds to merge with a known
-unbounded-state HIGH still open: the gate rule is "no surviving critical/high," and one
-survives. Merge only after the fix + fresh re-proof + clean re-audit.
+`DefaultParams` ships BOTH `EncEnabled: false` and `DkgEnabled: false`
+(`types.go:181-192`) — the entire encrypt/decrypt/DKG path is dormant at genesis until
+governance flips it on. That is the correct ship posture and is why the surviving HIGH is not
+an *active* risk to a v0.3.0 that ships it dormant. It is **not**, however, grounds to merge
+with a known unbounded-state / liveness HIGH still in the code: the gate rule is "no
+surviving critical/high," and one survives, and it activates the moment governance enables
+`EncEnabled`. Merge only after the fix + fresh re-proof + clean re-audit.
 
 ---
 
 ## Go / No-Go
 
-**NO-GO for v0.3.0.** Gate NOT PASSED: one surviving HIGH (member-change /
-`ActiveThresholdKey` unbounded state + backoff reset). HIGH-1 and the failed-round HIGH-2
-are genuinely fixed and the 4-node re-proof is clean, but the code's verdict is that the
-unbounded-state class is not fully closed. Fix item 1–3 above, re-prove on 4 equal-power
-nodes, re-audit; merge into `limonata-v030-release` (with `DkgEnabled=false` at genesis)
-only when the re-audit shows no surviving critical/high.
+**NO-GO for v0.3.0.** Gate NOT PASSED: one surviving HIGH (DROP→DEFER reintroduced unbounded
+EncTx state + O(backlog) per-block scan + honest-ciphertext starvation / anti-MEV liveness
+break). The HIGH-2 variant (member-change / `ActiveThresholdKey` unbounded state) is
+genuinely closed and re-proved bounded live, the flap dampener and param bounds are in, and
+the build + suite are green — but the code's verdict is that this cycle's decrypt-cap medium
+fix opened a new HIGH of the same unbounded-state / liveness class. Apply remaining-fix items
+1–4 above (bounded scan + admission control with a hard-ceiling drop + fair-share drain +
+regression probe), re-prove on 4 equal-power nodes under a decrypt flood, re-audit; merge
+into `limonata-v030-release` (with `DkgEnabled=false` and `EncEnabled=false` at genesis) only
+when the re-audit shows no surviving critical/high.
