@@ -40,6 +40,13 @@ service Msg {
   // share inconsistent with its public commitments; a valid complaint disqualifies
   // the dealer at finalize.
   rpc DkgComplaint(MsgDkgComplaint) returns (MsgDkgComplaintResponse);
+
+  // UpdateParams atomically replaces the x/encmempool params (the governance
+  // KILL-SWITCH). Gov-gated: only the x/gov module account (authority) may call
+  // it. This is what makes activating the encrypted path / validator DKG
+  // REVERSIBLE — a bad activation of EncEnabled or DkgEnabled can be toggled back
+  // OFF by a vote, with no coordinated chain upgrade.
+  rpc UpdateParams(MsgUpdateParams) returns (MsgUpdateParamsResponse);
 }
 
 // MsgCommitTx records sha256(reveal_tx || salt) at the current block height.
@@ -161,3 +168,28 @@ message MsgDkgComplaint {
 }
 
 message MsgDkgComplaintResponse {}
+
+// MsgUpdateParams atomically REPLACES the x/encmempool params. Gov-gated: only the
+// x/gov module account (authority) may call it.
+//
+// params carries the JSON encoding of the module's Params struct — the module stores
+// params as JSON-in-store (not proto), so the whole struct is passed opaquely and
+// re-decoded on chain. Before it is applied the handler runs the SAME Params.Validate
+// used at genesis (bounds DecryptDelay / thresholds / DKG windows, and requires a
+// well-formed member/keyper set whenever DkgEnabled/EncEnabled are true), so an update
+// can NEVER install a config that would strand EncTx state or panic BeginBlock/EndBlock.
+//
+// This is the on-chain KILL-SWITCH: it lets governance toggle DkgEnabled / EncEnabled
+// (and the safety-bounded DKG params) so that ACTIVATING the dormant DKG is reversible
+// by a vote rather than a one-way door needing another coordinated upgrade.
+message MsgUpdateParams {
+  option (cosmos.msg.v1.signer) = "authority";
+  option (amino.name) = "cosmos/evm/encmempool/MsgUpdateParams";
+
+  // authority must be the x/gov module account.
+  string authority = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // params is the JSON-encoded replacement Params (see x/encmempool/types.Params).
+  bytes params = 2;
+}
+
+message MsgUpdateParamsResponse {}
