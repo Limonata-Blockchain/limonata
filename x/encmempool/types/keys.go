@@ -29,4 +29,14 @@ var (
 	ActiveKeyPrefix    = []byte{0x13} // 0x13 | be(epoch) -> JSON ActiveThresholdKey
 	CurrentEpochKey    = []byte{0x14} // -> uint64 (be): latest round opened
 	ActiveEpochKey     = []byte{0x15} // -> uint64 (be): epoch of the currently-serving active key
+	// EpochEncCountPrefix ref-counts the in-flight (un-matured) EncTx stamped to an
+	// epoch, so a superseded active epoch's DkgRound + ActiveThresholdKey can be GC'd
+	// the instant it has ZERO pending ciphertexts — bounding retained active-epoch
+	// state to O(pending epochs) instead of O(total rekeys) (HIGH-2 variant fix).
+	EpochEncCountPrefix = []byte{0x16} // 0x16 | be(epoch) -> uint64 (be): # of un-matured EncTx for the epoch
+	// LastRekeyHeightKey records the height of the last member-change re-genesis, so a
+	// rapid membership FLAP cannot mint fresh rounds / reset the retry backoff faster
+	// than DkgMinRekeyGap blocks (a genuine settled change is preceded by stability and
+	// is therefore never delayed).
+	LastRekeyHeightKey = []byte{0x17} // -> uint64 (be): height of the last member-change rekey
 )

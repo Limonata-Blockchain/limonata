@@ -31,6 +31,15 @@ type Params struct {
 	// chain permanently keyless; the EndBlocker reopens a fresh round automatically). ---
 	DkgRetryBackoff uint64 `json:"dkg_retry_backoff"` // blocks to wait after a failed round before auto-reopening (>=1 enforced)
 	DkgMaxAttempts  uint64 `json:"dkg_max_attempts"`  // consecutive-failure attempts before emitting a dkg_stalled ALERT (0 = never). NOT a hard stop: retries continue so the chain always converges once >= t members return.
+
+	// DkgMinRekeyGap is the minimum number of blocks between successive MEMBER-CHANGE
+	// re-genesis rounds. It DAMPENS an induced membership FLAP (a validator toggling
+	// its bond to force endless rekeys / reset the retry backoff): a change arriving
+	// within this many blocks of the last rekey is coalesced, so re-genesis happens at
+	// most once per gap. A genuine SETTLED change is never delayed — it is preceded by
+	// a stable period, so the gap has already elapsed and it rekeys immediately. 0
+	// disables the dampener (rekey on every change). (HIGH-2 variant fix.)
+	DkgMinRekeyGap uint64 `json:"dkg_min_rekey_gap"`
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -178,6 +187,10 @@ func DefaultParams() Params {
 		// retry backoff ~10s. All are governance-tunable per deployment.
 		DkgEnabled: false, DkgDealWindow: 20, DkgComplaintWindow: 10,
 		DkgRetryBackoff: 5, DkgMaxAttempts: 8,
+		// Dampen a membership FLAP: never re-genesis on member change more than once per
+		// ~30 blocks (~60s at 2s blocks — roughly one deal+complaint window). Governance
+		// tunable; 0 disables. A genuine settled change is not delayed (see field doc).
+		DkgMinRekeyGap: 30,
 	}
 }
 
@@ -212,6 +225,49 @@ func (gs GenesisState) Validate() error {
 		if n := len(gs.Params.DkgMembers); gs.Params.DkgThreshold != 0 && int(gs.Params.DkgThreshold) > n {
 			return fmt.Errorf("dkg_threshold (%d) must be <= number of members (%d)", gs.Params.DkgThreshold, n)
 		}
+		if err := gs.Params.ValidateDkgWindows(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DKG window bounds. MEDIUM FIX: without these, governance (or a hand-built genesis)
+// could set a nonsensical window that degenerates or wedges the round machine — a
+// zero deal/complaint window (finalize would run before anyone can deal/complain, or
+// a bad dealer could finalize uncontestable) or a zero retry backoff (a failed round
+// would busy-reopen every block). The upper cap keeps every deadline far below the
+// uint64 saturation point so a mis-set window can never approach an overflow. These
+// mirror the runtime floors openRound already applies (max(window,1)), promoted to an
+// up-front validation so a bad param is rejected at ingress instead of silently
+// clamped. DkgMaxAttempts=0 is intentionally allowed (it means "never alert").
+const (
+	minDkgWindowBlocks uint64 = 1
+	maxDkgWindowBlocks uint64 = 10_000_000
+)
+
+// ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
+func (p Params) ValidateDkgWindows() error {
+	for _, f := range []struct {
+		name string
+		v    uint64
+	}{
+		{"dkg_deal_window", p.DkgDealWindow},
+		{"dkg_complaint_window", p.DkgComplaintWindow},
+		{"dkg_retry_backoff", p.DkgRetryBackoff},
+	} {
+		if f.v < minDkgWindowBlocks || f.v > maxDkgWindowBlocks {
+			return fmt.Errorf("%s (%d) must be in [%d, %d]", f.name, f.v, minDkgWindowBlocks, maxDkgWindowBlocks)
+		}
+	}
+	// DkgMinRekeyGap may be 0 (disabled) but not absurdly large.
+	if p.DkgMinRekeyGap > maxDkgWindowBlocks {
+		return fmt.Errorf("dkg_min_rekey_gap (%d) must be <= %d", p.DkgMinRekeyGap, maxDkgWindowBlocks)
+	}
+	// DkgMaxAttempts=0 means "never alert" (retries continue regardless); only guard
+	// against an absurd upper bound.
+	if p.DkgMaxAttempts > maxDkgWindowBlocks {
+		return fmt.Errorf("dkg_max_attempts (%d) must be <= %d", p.DkgMaxAttempts, maxDkgWindowBlocks)
 	}
 	return nil
 }

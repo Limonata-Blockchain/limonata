@@ -100,22 +100,26 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 const maxDecryptAttemptsPerBlock = 2048
 
 func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
+	// Process everything matured by `cur` (decrypt height <= cur), which INCLUDES any
+	// ciphertext DEFERRED from a prior height when the per-block cap was hit — so nothing
+	// is silently lost. Deterministic (decryptHeight, seq) order on every node.
 	var matured []types.EncTx
-	k.IterateEncTxAtHeight(ctx, cur, func(e types.EncTx) { matured = append(matured, e) })
+	k.IterateEncTxUpTo(ctx, cur, func(e types.EncTx) { matured = append(matured, e) })
 
 	order := uint64(0)
 	attempts := 0
-	for _, e := range matured {
-		// BOUNDED CRYPTO WORK: once the per-block attempt cap is hit, GC the remaining
-		// matured ciphertexts (keeping state bounded) with an event instead of running
-		// their expensive recovery. Deterministic — `matured` is in seq order on every
-		// node, so all nodes skip the identical suffix.
+	for i, e := range matured {
+		// BOUNDED CRYPTO WORK: once the per-block attempt cap is hit, DEFER the remaining
+		// matured ciphertexts to a later block rather than DROPPING them (MEDIUM FIX). They
+		// stay in state (still ref-counted against their epoch) and are picked up next block
+		// by IterateEncTxUpTo, so no share-carrying work is silently lost — only spread
+		// across blocks. Deterministic: `matured` is in (decryptHeight, seq) order on every
+		// node, so all nodes defer the identical suffix.
 		if attempts >= maxDecryptAttemptsPerBlock {
-			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_skipped_overflow",
-				sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10))))
-			k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
-			k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
-			continue
+			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_deferred",
+				sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
+				sdk.NewAttribute("deferred", strconv.Itoa(len(matured)-i))))
+			break
 		}
 		attempts++
 		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a
@@ -165,6 +169,15 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		// GC the ciphertext + its shares regardless (bounded state).
 		k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
 		k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
+		// HIGH-2 variant: this ciphertext no longer pins its DKG epoch. Drop the ref-count
+		// and, if it was the LAST in-flight ciphertext for a now-superseded epoch, reclaim
+		// that epoch's DkgRound + ActiveThresholdKey. Doing the prune HERE (rather than only
+		// at finalize) is what lets an epoch be GC'd the instant it drains, even if it was
+		// superseded while ciphertexts were still in flight.
+		if e.Epoch > 0 {
+			k.decEpochEncCount(ctx, e.Epoch)
+			k.maybePruneEpoch(ctx, e.Epoch)
+		}
 	}
 }
 

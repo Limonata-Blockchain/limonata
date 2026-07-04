@@ -129,7 +129,18 @@ func (k Keeper) purgeFailedRound(ctx context.Context, epoch uint64) {
 // bounded-state regression test: a sustained sub-quorum must NOT grow round-record state
 // without bound.
 func (k Keeper) CountDkgRounds(ctx context.Context) int {
-	it, err := k.store(ctx).Iterator(types.DkgRoundPrefix, prefixEnd(types.DkgRoundPrefix))
+	return k.countPrefix(ctx, types.DkgRoundPrefix)
+}
+
+// CountActiveKeys returns the number of retained ActiveThresholdKey records. It backs
+// the HIGH-2 VARIANT regression test: endless member-change rekeys must NOT grow retained
+// active-epoch key state without bound (it stays O(epochs with pending ciphertexts)).
+func (k Keeper) CountActiveKeys(ctx context.Context) int {
+	return k.countPrefix(ctx, types.ActiveKeyPrefix)
+}
+
+func (k Keeper) countPrefix(ctx context.Context, pfx []byte) int {
+	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
 	if err != nil {
 		return 0
 	}
@@ -171,6 +182,83 @@ func (k Keeper) GetActiveKey(ctx context.Context, epoch uint64) (types.ActiveThr
 		return types.ActiveThresholdKey{}, false
 	}
 	return a, true
+}
+
+// DeleteActiveKey removes a superseded epoch's ActiveThresholdKey. HIGH-2 variant:
+// the previous code had NO deleter, so every successful rekey retained its active key
+// forever — a validator inducing member-change flaps could mint unbounded active-epoch
+// records. This is only ever called by maybePruneEpoch, which first proves the epoch
+// is superseded AND drained (no un-matured EncTx references it), so no in-flight
+// decryption can lose its key.
+func (k Keeper) DeleteActiveKey(ctx context.Context, epoch uint64) {
+	_ = k.store(ctx).Delete(activeKeyKey(epoch))
+}
+
+// ---- epoch in-flight ciphertext ref-count (pins an epoch's records until drained) ----
+
+func epochEncCountKey(epoch uint64) []byte { return concat(types.EpochEncCountPrefix, u64(epoch)) }
+
+// getEpochEncCount returns the number of un-matured EncTx stamped to an epoch.
+func (k Keeper) getEpochEncCount(ctx context.Context, epoch uint64) uint64 {
+	return k.readU64(ctx, epochEncCountKey(epoch))
+}
+
+// incEpochEncCount is called when a ciphertext is submitted for an epoch.
+func (k Keeper) incEpochEncCount(ctx context.Context, epoch uint64) {
+	_ = k.store(ctx).Set(epochEncCountKey(epoch), u64(k.getEpochEncCount(ctx, epoch)+1))
+}
+
+// decEpochEncCount is called when a ciphertext matures (is deleted). It deletes the
+// counter record when it returns to zero so the ref-count map stays O(live epochs).
+func (k Keeper) decEpochEncCount(ctx context.Context, epoch uint64) {
+	c := k.getEpochEncCount(ctx, epoch)
+	if c > 0 {
+		c--
+	}
+	if c == 0 {
+		_ = k.store(ctx).Delete(epochEncCountKey(epoch))
+		return
+	}
+	_ = k.store(ctx).Set(epochEncCountKey(epoch), u64(c))
+}
+
+// ---- last member-change rekey height (flap dampener) ----
+
+func (k Keeper) GetLastRekeyHeight(ctx context.Context) uint64 {
+	return k.readU64(ctx, types.LastRekeyHeightKey)
+}
+func (k Keeper) SetLastRekeyHeight(ctx context.Context, h uint64) {
+	_ = k.store(ctx).Set(types.LastRekeyHeightKey, u64(h))
+}
+
+// maybePruneEpoch GCs a SUPERSEDED DKG epoch's DkgRound record + ActiveThresholdKey
+// once it is safe — the HIGH-2 variant fix. GC-SAFETY RULE: an epoch is prunable ONLY
+// when it is neither the currently-serving active epoch NOR the in-flight open round,
+// AND no un-matured EncTx still references it (ref-count == 0). This preserves in-flight
+// decryption: a ciphertext stamped to epoch E authorizes its decryption shares against
+// GetDkgRound(E) and is recovered under GetActiveKey(E); both survive until E's last
+// ciphertext matures, at which point the count hits zero and the epoch is reclaimed.
+// It is deterministic (a pure function of committed state) so every node prunes
+// identically. No-op when the epoch is not (yet) prunable.
+func (k Keeper) maybePruneEpoch(ctx sdk.Context, epoch uint64) {
+	if epoch == 0 {
+		return // legacy trusted-setup path has no per-epoch DKG record
+	}
+	if epoch == k.GetActiveEpoch(ctx) || epoch == k.GetCurrentEpoch(ctx) {
+		return // never prune the serving key or the in-flight open round
+	}
+	if k.getEpochEncCount(ctx, epoch) != 0 {
+		return // still referenced by an un-matured ciphertext — keep for in-flight decrypt
+	}
+	// Superseded AND drained: reclaim the round record, the active key, and any residual
+	// dealing bulk (defensive — member_change already purges dealings on a live rekey).
+	k.purgeDealings(ctx, epoch)
+	k.DeleteActiveKey(ctx, epoch)
+	_ = k.store(ctx).Delete(dkgRoundKey(epoch))
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_dkg_epoch_pruned",
+		sdk.NewAttribute("epoch", u64str(epoch)),
+	))
 }
 
 func (k Keeper) GetCurrentEpoch(ctx context.Context) uint64 {
@@ -293,9 +381,18 @@ func (k Keeper) finalizeRound(ctx sdk.Context, round types.DkgRound) {
 		Threshold: round.Threshold, Qual: res.Qual,
 	}
 	_ = k.SetActiveKey(ctx, ak)
+	// Capture the epoch this finalize SUPERSEDES before advancing the active pointer.
+	prevActive := k.GetActiveEpoch(ctx)
 	k.SetActiveEpoch(ctx, round.Epoch)
 	round.Status = types.DkgStatusActive
 	_ = k.SetDkgRound(ctx, round)
+	// HIGH-2 variant: the just-superseded active epoch is now GC-eligible. Prune it
+	// immediately if it holds ZERO in-flight ciphertexts; otherwise it stays pinned and
+	// is reclaimed by decryptMatured when its last stamped ciphertext matures. This is
+	// what bounds retained active-epoch state to O(pending epochs) across endless rekeys.
+	if prevActive != 0 && prevActive != round.Epoch {
+		k.maybePruneEpoch(ctx, prevActive)
+	}
 
 	qualJSON, _ := json.Marshal(res.Qual)
 	ctx.EventManager().EmitEvent(sdk.NewEvent(

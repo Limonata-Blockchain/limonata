@@ -123,6 +123,13 @@ func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight,
 		A: a, Nonce: nonce, Body: body, Epoch: epoch,
 	}
 	_ = k.store(ctx).Set(encTxKey(e.DecryptHeight, e.Seq), mustJSON(e))
+	// Ref-count this in-flight ciphertext against its DKG epoch so the epoch's
+	// DkgRound + ActiveThresholdKey are pinned in state until it matures, and become
+	// GC-eligible the instant the count returns to zero (HIGH-2 variant). Epoch 0 is
+	// the legacy trusted-setup path (no per-epoch DKG record to prune).
+	if epoch > 0 {
+		k.incEpochEncCount(ctx, epoch)
+	}
 	return e
 }
 
@@ -156,6 +163,28 @@ func (k Keeper) DeleteSharesFor(ctx context.Context, decryptHeight, seq uint64) 
 func (k Keeper) IterateEncTxAtHeight(ctx context.Context, h uint64, fn func(types.EncTx)) {
 	pfx := concat(types.EncTxPrefix, u64(h))
 	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
+	if err != nil {
+		return
+	}
+	defer it.Close()
+	for ; it.Valid(); it.Next() {
+		var e types.EncTx
+		if json.Unmarshal(it.Value(), &e) == nil {
+			fn(e)
+		}
+	}
+}
+
+// IterateEncTxUpTo visits every EncTx whose decrypt height <= h, in (decryptHeight,
+// seq) order — i.e. everything MATURED by height h, including any ciphertexts DEFERRED
+// from an earlier height when the per-block decrypt cap was reached. Store keys are
+// EncTxPrefix|be(decryptHeight)|be(seq), so a single ordered range scan [prefix,
+// prefix|be(h+1)) yields exactly those in deterministic order on every node.
+func (k Keeper) IterateEncTxUpTo(ctx context.Context, h uint64, fn func(types.EncTx)) {
+	start := types.EncTxPrefix
+	// Upper bound is EXCLUSIVE at be(h+1); saturate so h == MaxUint64 cannot wrap.
+	end := concat(types.EncTxPrefix, u64(addSat(h, 1)))
+	it, err := k.store(ctx).Iterator(start, end)
 	if err != nil {
 		return
 	}

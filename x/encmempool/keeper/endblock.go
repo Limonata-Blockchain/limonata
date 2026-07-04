@@ -105,12 +105,36 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		// takes priority over retry: a failed round whose set has since changed should
 		// re-genesis against the new set, not retry the stale one.
 		//
-		// MEDIUM FIX: purge the SUPERSEDED epoch's dealing bulk (deal/complaint state)
-		// so a re-key does not leave the old epoch's point-to-point shares in state
-		// indefinitely. Only the DEALINGS are dropped, not the DkgRound record: an
-		// in-flight ciphertext stamped with the old (active) epoch still needs that
-		// record to authorize its decryption shares until it matures.
-		k.purgeDealings(ctx, cur)
+		// FLAP DAMPENING (HIGH-2 variant): a validator can induce a membership FLAP
+		// (toggling its bond) to force endless re-genesis and RESET the retry backoff on
+		// every churn. Rate-limit member-change re-genesis to at most once per
+		// DkgMinRekeyGap blocks. A change arriving within the gap of the last rekey is
+		// HELD (the current round keeps running); it is applied once the gap elapses if
+		// the set is still different. A GENUINE settled change is NOT delayed: it follows
+		// a stable period, so `h - last` already exceeds the gap and it rekeys immediately.
+		last := k.GetLastRekeyHeight(ctx)
+		if p.DkgMinRekeyGap > 0 && last != 0 && h < addSat(last, p.DkgMinRekeyGap) {
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_rekey_dampened",
+				sdk.NewAttribute("height", u64str(h)),
+				sdk.NewAttribute("last_rekey", u64str(last)),
+				sdk.NewAttribute("min_gap", u64str(p.DkgMinRekeyGap)),
+			))
+			return
+		}
+		// GC the SUPERSEDED round. If it installed a key (Active) it is the STILL-SERVING
+		// key until the new round finalizes, and in-flight ciphertexts stamped to it still
+		// need its record to authorize shares — so keep it (only drop its now-dead dealing
+		// bulk); it is reclaimed later by maybePruneEpoch once superseded AND drained. If it
+		// never installed a key (Open/Failed) it is dead weight nothing references — delete
+		// its record entirely, so a member-change FLAP that keeps interrupting rounds cannot
+		// mint unbounded orphaned round records.
+		if lastRound.Status == types.DkgStatusActive {
+			k.purgeDealings(ctx, cur)
+		} else {
+			k.purgeFailedRound(ctx, cur)
+		}
+		k.SetLastRekeyHeight(ctx, h)
 		k.openRound(ctx, cur+1, active, hash, h, p, 1, "member_change")
 
 	case lastRound.Status == types.DkgStatusFailed:
