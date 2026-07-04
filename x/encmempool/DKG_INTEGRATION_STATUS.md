@@ -3,16 +3,119 @@
 **Date:** 2026-07-04
 **Source branch:** `limonata-dkg-integration` (HEAD `53e1eb76` — bounded-defer + admission + fairness)
 **Merged into:** `limonata-v030-release`
-**Decision:** **GO — merged into v0.3.0, present-but-DORMANT.**
+**Follow-on merge:** `limonata-killswitch` → `limonata-v030-release` — the governance
+**KILL-SWITCH** (`MsgUpdateParams`) that makes activating the dormant DKG **reversible by a
+vote** (see the dedicated section below).
+**Decision:** **GO — merged into v0.3.0, present-but-DORMANT, now with a reversible gov toggle.**
 **Evidence gate:** **PASSED** — the self-inflicted DROP→DEFER HIGH is closed; build green;
 encmempool + all touched modules test-green; genesis validates in both modes; the DKG ships
-`DkgEnabled=false` (dormant).
+`DkgEnabled=false` **and** `EncEnabled=false` in `DefaultParams` (dormant). The kill-switch was
+**proven on a 4-node p2p network**: dormant→activate→disable→re-enable, app-hash identical
+across all 4 nodes at every one of 454 sampled heights, clean disable (in-flight EncTx drained,
+not stranded), no halt, authority + full validation enforced.
 
 This supersedes the prior `a6db7233` NO-GO record. The regression that blocked the last
 cycle (changing the per-block decrypt cap from DROP to an *unbounded* DEFER, which
 reintroduced unbounded EncTx state + an O(backlog) per-block re-scan + honest-ciphertext
 starvation) has been fixed with **bounded-defer + admission control + fairness**, all
 deterministic and preserving the HIGH-2 GC and in-flight-decryption safety.
+
+---
+
+## Governance KILL-SWITCH — `MsgUpdateParams` (this follow-on merge)
+
+**Why it exists.** Before this merge x/encmempool had **no params-mutation path** — `Params`
+(including `DkgEnabled` / `EncEnabled`) were settable **only at genesis or a coordinated
+chain upgrade**. Activating the dormant DKG on a live chain was therefore a **one-way door**:
+a bad activation could not be undone without *another* coordinated upgrade. The kill-switch
+closes that door by adding a gov-gated `MsgUpdateParams` so activation is **reversible by a
+single vote**.
+
+**Wiring (minimal blast radius).** A new `UpdateParams` rpc + `MsgUpdateParams{authority,
+params}` was added to `proto/.../encmempool/v1/tx.proto` (only `tx.proto` + its `tx.pb.go`
+regenerated), registered in `types/codec.go`. Because module params are stored as
+**JSON-in-store** (not proto), `MsgUpdateParams.params` carries the **JSON encoding of
+`types.Params`**; the handler decodes it opaquely. No `app.go` / keeper-constructor change.
+
+**Three safety gates, in order (`keeper/msg_server.go: UpdateParams`):**
+1. **Authority-gated.** `msg.Authority` must equal the x/gov module account
+   (`authtypes.NewModuleAddress(govtypes.ModuleName)`, computed at runtime — mirrors
+   `x/valgrant`; `x/gassponsor`/`x/squeeze` have no `UpdateParams`). Any other signer →
+   `ErrUnauthorized`, no mutation.
+2. **Fully validated.** The decoded params must pass the **same `Params.Validate` /
+   `ValidateDkgWindows` used at genesis** — bounding `RevealDelay`/`DecryptDelay`/thresholds/
+   DKG windows/in-flight ceilings and requiring a well-formed member set (`DkgEnabled`) or
+   keyper + `ThresholdPub` set (`EncEnabled`). Malformed JSON and every invalid config are
+   rejected **before** `SetParams`; the stored params are left untouched. An update can
+   therefore **never** install a config that would strand EncTx state or panic
+   BeginBlock/EndBlock.
+3. **Applied atomically** with a loud `encmempool_params_updated` event
+   (`enc_enabled` / `dkg_enabled`).
+
+### Safe-DISABLE semantics (the whole point)
+
+Turning the path **off** (`EncEnabled=false`, or `DkgEnabled=false` with no legacy trusted
+key) stops new-round opening (`EndBlockDKG` returns on `!DkgEnabled`) and new-ciphertext
+admission (`SubmitEncrypted` requires `EncEnabled`). The **strand risk** it must avoid:
+`decryptMatured` is the *only* remover of an `EncTx` and is gated on the path being live, so a
+naïve disable would leave already-submitted `EncTx` **never decrypted AND never GC'd** —
+leaking `EncTx` state, the global/per-submitter ref-counts, and the pinned per-epoch
+`DkgRound` + `ActiveThresholdKey` forever.
+
+**Fix (`keeper/abci.go`).** `BeginBlock` now branches:
+- **Path live** (`EncEnabled && (Threshold>0 || DkgEnabled)`) → `decryptMatured` as before.
+  A *partial* disable (e.g. `DkgEnabled=false` but a valid legacy `Threshold>0`) still
+  **decrypts** DKG-epoch ciphertexts via `GetActiveKey`.
+- **Path off but `GetGlobalEncCount>0`** → the new **`drainDisabledEncTx`** GC's matured
+  in-flight ciphertexts through the **existing `releaseEncTx` path** (delete EncTx + shares,
+  dec every ref-count, `maybePruneEpoch`), using the **same bounded scan**
+  (`CollectMaturedUpTo(maxDecryptScanPerBlock)`). Result: **no strand, no halt, bounded
+  O(cap)/block work, deterministic**, and the `O(1)` count guard makes it **zero-overhead in
+  the default/dormant config**.
+- **Path off and no in-flight state** (the dormant default) → the `O(1)` `GetGlobalEncCount`
+  guard short-circuits; nothing runs.
+
+GC (drop-with-event `encmempool_enc_drained_disabled`), not decrypt, is the correct
+kill-switch semantics: the module is being turned OFF and the PoC never re-injects decrypted
+bodies into the EVM, so shedding the finite in-flight set cleanly is the non-stranding
+outcome. Because no new EncTx are admitted while disabled and `DecryptDelay` is bounded, the
+in-flight set fully drains within a bounded number of blocks. **Re-enabling** opens a fresh
+DKG round via the unchanged `EndBlock` state machine and restores encrypt/decrypt. No existing
+HIGH-fix (admission control, bounded scan, H2 GC / epoch ref-count, ingress validation) is
+weakened.
+
+### Tests
+
+`keeper/updateparams_test.go` + `keeper/killswitch_probe_test.go` (all green under
+`go test -tags test`): authority-only (non-gov rejected + no mutation; gov applies); invalid
+params rejected across `reveal_delay=0` / enc-without-keypath / dkg-without-members /
+dkg-zero-window / malformed-JSON with **state unchanged**; enable→disable→re-enable cycle;
+disable **drains** an in-flight legacy epoch-0 ciphertext with **no strand** (EncTx gone,
+global + submitter counts 0, no decrypt, no BeginBlock error); disable drains a **superseded
+DKG epoch** and prunes its `DkgRound` + `ActiveThresholdKey` via the ref-count path; plus 19
+adversarial probes (DKG↔legacy transitions, epoch ref-count integrity, determinism,
+authority edges).
+
+### Recommended MAINNET hardening (governance-process, not code)
+
+The kill-switch is a **double-edged** primitive: the same `MsgUpdateParams` that lets a good
+gov *disable* a bad activation also lets a **captured** gov *strip the anti-MEV protection*
+(flip `EncEnabled=false`) to enable front-running. Mitigate at the governance-process layer,
+**not** by removing the toggle (an irreversible activation is strictly worse):
+- **Timelock the disable.** Route `MsgUpdateParams` that *reduce* protection (any
+  `EncEnabled true→false` or `DkgEnabled true→false`) through a longer voting + **execution
+  delay** than ordinary params, so the network can react to a capture attempt before anti-MEV
+  drops. (An *enable* or a pure safety-tightening can keep the normal timeline.)
+- **High quorum / super-majority** for protection-reducing updates.
+- **Guardian veto.** A time-boxed security-council / guardian able to **veto** (not enact) a
+  protection-reducing update, expiring after audit maturity — veto-only keeps it from becoming
+  a second capture surface.
+- **On-chain alerting.** The `encmempool_params_updated` event should page an off-chain
+  monitor on any `enc_enabled`/`dkg_enabled` transition.
+
+These are deployment/gov-config choices (gov `params`, a custom ante/decorator, or an
+authz/group policy in front of gov) and are intentionally **not** baked into the module, which
+keeps the authority a single well-known account (`x/gov`) and the blast radius minimal.
 
 ---
 
@@ -180,12 +283,15 @@ bounded/admission/fairness decrypt path, but ships them **off**:
 - `DefaultParams`: `DkgEnabled=false`, `EncEnabled=false`,
   `MaxInFlightEncTx=32768`, `MaxInFlightPerSubmitter=2048`.
 
-**To enable the DKG path**, a `MsgUpdateParams` (governance) sets `DkgEnabled=true` with a
-valid `DkgMembers` set (33-byte compressed enc-pubkeys, unique operator/account addrs),
-`DkgThreshold` ≤ members, and sane `DkgDealWindow` / `DkgComplaintWindow` /
-`DkgRetryBackoff` (all validated by `Params.Validate` / `ValidateDkgWindows`). When the DKG
-is on, the trusted-setup `ThresholdPub`/`Threshold`/`Keypers` become the epoch-0 fallback and
-need not be populated.
+**To enable the DKG path**, a `MsgUpdateParams` (governance — the kill-switch added by this
+merge; see the section above) sets `DkgEnabled=true` with a valid `DkgMembers` set (33-byte
+compressed enc-pubkeys, unique operator/account addrs), `DkgThreshold` ≤ members, and sane
+`DkgDealWindow` / `DkgComplaintWindow` / `DkgRetryBackoff` (all validated by `Params.Validate`
+/ `ValidateDkgWindows`). When the DKG is on, the trusted-setup `ThresholdPub`/`Threshold`/
+`Keypers` become the epoch-0 fallback and need not be populated. Crucially, because
+`MsgUpdateParams` now exists, this activation is **REVERSIBLE**: if the activation misbehaves,
+a second `MsgUpdateParams` flips `DkgEnabled`/`EncEnabled` back to `false` and the in-flight
+EncTx drain cleanly (no strand, no halt) — no coordinated chain upgrade required.
 
 ### Genesis-script note (enc_enabled vs the dormant default)
 
