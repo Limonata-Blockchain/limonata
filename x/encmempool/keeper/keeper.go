@@ -3,19 +3,28 @@ package keeper
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"strconv"
 
 	corestore "cosmossdk.io/core/store"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
 // Keeper for x/encmempool. State is plain JSON-in-store (no proto), like x/contest.
+// stakingKeeper is read-only and only consulted by the DKG EndBlocker to learn the
+// bonded validator set (may be nil in unit tests that never exercise that path).
 type Keeper struct {
-	storeService corestore.KVStoreService
+	storeService  corestore.KVStoreService
+	stakingKeeper types.StakingKeeper
 }
 
-func NewKeeper(ss corestore.KVStoreService) Keeper { return Keeper{storeService: ss} }
+func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper) Keeper {
+	return Keeper{storeService: ss, stakingKeeper: sk}
+}
 
 func (k Keeper) store(ctx context.Context) corestore.KVStore { return k.storeService.OpenKVStore(ctx) }
 
@@ -109,14 +118,56 @@ func (k Keeper) nextEncSeq(ctx context.Context) uint64 {
 
 // SubmitEncTx assigns a seq + decrypt height and stores the ciphertext, ordered by
 // (decryptHeight, seq). The order is fixed here, before any body can be read.
-func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight, decryptDelay uint64, a, nonce, body []byte) types.EncTx {
+func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight, decryptDelay uint64, a, nonce, body []byte, epoch uint64) types.EncTx {
 	e := types.EncTx{
 		Submitter: submitter, SubmitHeight: submitHeight,
 		DecryptHeight: submitHeight + decryptDelay, Seq: k.nextEncSeq(ctx),
-		A: a, Nonce: nonce, Body: body,
+		A: a, Nonce: nonce, Body: body, Epoch: epoch,
 	}
 	_ = k.store(ctx).Set(encTxKey(e.DecryptHeight, e.Seq), mustJSON(e))
+	// Ref-count this in-flight ciphertext against its DKG epoch so the epoch's
+	// DkgRound + ActiveThresholdKey are pinned in state until it matures, and become
+	// GC-eligible the instant the count returns to zero (HIGH-2 variant). Epoch 0 is
+	// the legacy trusted-setup path (no per-epoch DKG record to prune).
+	if epoch > 0 {
+		k.incEpochEncCount(ctx, epoch)
+	}
+	// Admission-control ref-counts: total + per-submitter in-flight. These back the
+	// ingress ceiling (SubmitEncrypted rejects when full) and the last-resort drop, and
+	// are decremented by releaseEncTx when the ciphertext leaves state.
+	k.incGlobalEncCount(ctx)
+	k.incSubmitterEncCount(ctx, submitter)
 	return e
+}
+
+// releaseEncTx removes an EncTx + its decryption shares from state and releases ALL of
+// its ref-counts: the global + per-submitter in-flight admission counters and — for a
+// DKG epoch — the epoch ref-count (pruning the epoch's DkgRound + ActiveThresholdKey if
+// this was its last pending ciphertext). EVERY path that removes an EncTx (matured decrypt
+// OR the last-resort ceiling drop) MUST go through here: a delete that skipped the epoch
+// dec+prune would re-leak the epoch ref-count and REGRESS the HIGH-2 variant fix. It is
+// deterministic (a pure function of committed state) so every node reclaims identically.
+func (k Keeper) releaseEncTx(ctx sdk.Context, e types.EncTx) {
+	k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
+	k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
+	k.decGlobalEncCount(ctx)
+	k.decSubmitterEncCount(ctx, e.Submitter)
+	if e.Epoch > 0 {
+		k.decEpochEncCount(ctx, e.Epoch)
+		k.maybePruneEpoch(ctx, e.Epoch)
+	}
+}
+
+func (k Keeper) GetEncTx(ctx context.Context, decryptHeight, seq uint64) (types.EncTx, bool) {
+	bz, err := k.store(ctx).Get(encTxKey(decryptHeight, seq))
+	if err != nil || bz == nil {
+		return types.EncTx{}, false
+	}
+	var e types.EncTx
+	if json.Unmarshal(bz, &e) != nil {
+		return types.EncTx{}, false
+	}
+	return e, true
 }
 
 func (k Keeper) DeleteEncTx(ctx context.Context, decryptHeight, seq uint64) {
@@ -147,6 +198,105 @@ func (k Keeper) IterateEncTxAtHeight(ctx context.Context, h uint64, fn func(type
 			fn(e)
 		}
 	}
+}
+
+// IterateEncTxUpTo visits every EncTx whose decrypt height <= h, in (decryptHeight,
+// seq) order — i.e. everything MATURED by height h, including any ciphertexts DEFERRED
+// from an earlier height when the per-block decrypt cap was reached. Store keys are
+// EncTxPrefix|be(decryptHeight)|be(seq), so a single ordered range scan [prefix,
+// prefix|be(h+1)) yields exactly those in deterministic order on every node.
+func (k Keeper) IterateEncTxUpTo(ctx context.Context, h uint64, fn func(types.EncTx)) {
+	start := types.EncTxPrefix
+	// Upper bound is EXCLUSIVE at be(h+1); saturate so h == MaxUint64 cannot wrap.
+	end := concat(types.EncTxPrefix, u64(addSat(h, 1)))
+	it, err := k.store(ctx).Iterator(start, end)
+	if err != nil {
+		return
+	}
+	defer it.Close()
+	for ; it.Valid(); it.Next() {
+		var e types.EncTx
+		if json.Unmarshal(it.Value(), &e) == nil {
+			fn(e)
+		}
+	}
+}
+
+// CollectMaturedUpTo returns up to `limit` EncTx whose decrypt height <= h, in
+// (decryptHeight, seq) order, and reports whether the scan was TRUNCATED (more matured
+// entries exist beyond the limit). BOUNDED-SCAN GUARANTEE: it visits at most `limit`
+// entries, so the per-block decrypt cost is O(limit), NOT O(backlog) — this is what makes
+// a flood of ciphertexts unable to impose an unbounded per-block re-scan on every node.
+// The truncated tail stays in state and is picked up on a later block (deterministic
+// suffix on every node).
+func (k Keeper) CollectMaturedUpTo(ctx context.Context, h uint64, limit int) (out []types.EncTx, truncated bool) {
+	start := types.EncTxPrefix
+	end := concat(types.EncTxPrefix, u64(addSat(h, 1))) // EXCLUSIVE upper bound at be(h+1)
+	it, err := k.store(ctx).Iterator(start, end)
+	if err != nil {
+		return nil, false
+	}
+	defer it.Close()
+	for ; it.Valid(); it.Next() {
+		if len(out) >= limit {
+			return out, true // more remain beyond the bounded window
+		}
+		var e types.EncTx
+		if json.Unmarshal(it.Value(), &e) == nil {
+			out = append(out, e)
+		}
+	}
+	return out, false
+}
+
+// --- in-flight EncTx admission ref-counts (global + per-submitter) ---
+
+func submitterEncCountKey(submitter string) []byte {
+	return concat(types.SubmitterEncCountPrefix, []byte(submitter))
+}
+
+// GetGlobalEncCount returns the number of un-matured EncTx across all submitters. It is
+// the O(1) admission gauge (never an O(backlog) scan) and backs the flood regression test.
+func (k Keeper) GetGlobalEncCount(ctx context.Context) uint64 {
+	return k.readU64(ctx, types.GlobalEncCountKey)
+}
+
+func (k Keeper) incGlobalEncCount(ctx context.Context) {
+	_ = k.store(ctx).Set(types.GlobalEncCountKey, u64(k.GetGlobalEncCount(ctx)+1))
+}
+
+func (k Keeper) decGlobalEncCount(ctx context.Context) {
+	c := k.GetGlobalEncCount(ctx)
+	if c > 0 {
+		c--
+	}
+	if c == 0 {
+		_ = k.store(ctx).Delete(types.GlobalEncCountKey)
+		return
+	}
+	_ = k.store(ctx).Set(types.GlobalEncCountKey, u64(c))
+}
+
+// GetSubmitterEncCount returns a submitter's un-matured EncTx count. The record is deleted
+// at zero so live per-submitter counters stay O(submitters with pending ct).
+func (k Keeper) GetSubmitterEncCount(ctx context.Context, submitter string) uint64 {
+	return k.readU64(ctx, submitterEncCountKey(submitter))
+}
+
+func (k Keeper) incSubmitterEncCount(ctx context.Context, submitter string) {
+	_ = k.store(ctx).Set(submitterEncCountKey(submitter), u64(k.GetSubmitterEncCount(ctx, submitter)+1))
+}
+
+func (k Keeper) decSubmitterEncCount(ctx context.Context, submitter string) {
+	c := k.GetSubmitterEncCount(ctx, submitter)
+	if c > 0 {
+		c--
+	}
+	if c == 0 {
+		_ = k.store(ctx).Delete(submitterEncCountKey(submitter))
+		return
+	}
+	_ = k.store(ctx).Set(submitterEncCountKey(submitter), u64(c))
 }
 
 // CollectShares returns all decryption shares for a given (decryptHeight, seq).
@@ -219,6 +369,10 @@ func mustJSON(v any) []byte {
 	bz, _ := json.Marshal(v)
 	return bz
 }
+
+func u64str(v uint64) string { return strconv.FormatUint(v, 10) }
+
+func hexstr(b []byte) string { return hex.EncodeToString(b) }
 
 func concat(parts ...[]byte) []byte {
 	n := 0

@@ -63,7 +63,7 @@ func TestRegression_NonceLengthNoHalt(t *testing.T) {
 		if err := k.SetParams(ctx, enableParams(pub, 2, 2, keypers)); err != nil {
 			t.Fatal(err)
 		}
-		e := k.SubmitEncTx(ctx, "attacker", 10, 2, ct.A, make([]byte, nlen), ct.Body)
+		e := k.SubmitEncTx(ctx, "attacker", 10, 2, ct.A, make([]byte, nlen), ct.Body, 0)
 		for _, i := range []int{0, 2} { // honest quorum of shares (share depends only on A)
 			ds, err := threshold.ComputeShare(shares[i], ct)
 			if err != nil {

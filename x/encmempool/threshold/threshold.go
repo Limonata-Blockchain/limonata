@@ -122,7 +122,7 @@ func Encrypt(pub, msg []byte) (*Ciphertext, error) {
 		return nil, err
 	}
 	var A, shared secp256k1.JacobianPoint
-	secp256k1.ScalarBaseMultNonConst(r, &A) // A = r*G
+	secp256k1.ScalarBaseMultNonConst(r, &A)      // A = r*G
 	secp256k1.ScalarMultNonConst(r, &Y, &shared) // shared = r*Y
 	key := kdf(&shared)
 
@@ -201,6 +201,10 @@ func Recover(shares []*DecryptShare) (*secp256k1.JacobianPoint, error) {
 
 // Decrypt recovers msg from the combined shared secret + ciphertext. Returns an
 // error if the shared secret is wrong (e.g. < t shares) — AES-GCM authentication.
+//
+// It NEVER panics on attacker-controlled ciphertext: an out-of-spec nonce length is
+// rejected up front, because gcm.Open panics (not errors) on a wrong-length nonce and
+// this function is invoked from the deterministic BeginBlock decrypt path.
 func Decrypt(shared *secp256k1.JacobianPoint, ct *Ciphertext) ([]byte, error) {
 	// AUDIT FIX (consensus halt): crypto/cipher's gcm.Open PANICS for any nonce whose
 	// length != NonceSize. On the BeginBlock decrypt path the nonce is

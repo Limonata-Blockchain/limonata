@@ -29,6 +29,7 @@ var (
 	_ module.HasABCIGenesis     = AppModule{}
 	_ appmodule.AppModule       = AppModule{}
 	_ appmodule.HasBeginBlocker = AppModule{}
+	_ appmodule.HasEndBlocker   = AppModule{}
 )
 
 type AppModuleBasic struct{}
@@ -88,6 +89,12 @@ func (am AppModule) ExportGenesis(ctx sdk.Context, _ codec.JSONCodec) json.RawMe
 // BeginBlock executes matured reveals deterministically (see keeper.BeginBlock).
 func (am AppModule) BeginBlock(ctx context.Context) error {
 	return am.keeper.BeginBlock(sdk.UnwrapSDKContext(ctx))
+}
+
+// EndBlock drives the on-chain validator DKG (open/finalize/re-run). Deterministic.
+func (am AppModule) EndBlock(ctx context.Context) error {
+	am.keeper.EndBlockDKG(sdk.UnwrapSDKContext(ctx))
+	return nil
 }
 
 func (am AppModule) IsAppModule()        {}

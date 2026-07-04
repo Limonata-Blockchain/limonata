@@ -28,46 +28,46 @@ import (
 	cosmosevmserver "github.com/cosmos/evm/server"
 	srvflags "github.com/cosmos/evm/server/flags"
 	"github.com/cosmos/evm/utils"
-	"github.com/cosmos/evm/x/erc20"
-	erc20keeper "github.com/cosmos/evm/x/erc20/keeper"
-	erc20types "github.com/cosmos/evm/x/erc20/types"
-	erc20v2 "github.com/cosmos/evm/x/erc20/v2"
-	"github.com/cosmos/evm/x/squeeze"
-	squeezekeeper "github.com/cosmos/evm/x/squeeze/keeper"
-	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
-	"github.com/cosmos/evm/x/paymaster"
-	paymasterkeeper "github.com/cosmos/evm/x/paymaster/keeper"
-	paymastertypes "github.com/cosmos/evm/x/paymaster/types"
 	"github.com/cosmos/evm/x/contest"
 	contestkeeper "github.com/cosmos/evm/x/contest/keeper"
 	contestpost "github.com/cosmos/evm/x/contest/post"
 	contesttypes "github.com/cosmos/evm/x/contest/types"
-	"github.com/cosmos/evm/x/valgrant"
-	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
-	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
-	"github.com/cosmos/evm/x/vpcap"
-	vpcapkeeper "github.com/cosmos/evm/x/vpcap/keeper"
-	vpcaptypes "github.com/cosmos/evm/x/vpcap/types"
 	"github.com/cosmos/evm/x/encmempool"
 	encmempoolkeeper "github.com/cosmos/evm/x/encmempool/keeper"
 	encmempooltypes "github.com/cosmos/evm/x/encmempool/types"
-	"github.com/cosmos/evm/x/gassponsor"
-	gassponsorkeeper "github.com/cosmos/evm/x/gassponsor/keeper"
-	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
-	"github.com/cosmos/evm/x/sponsorpool"
-	sponsorpoolkeeper "github.com/cosmos/evm/x/sponsorpool/keeper"
-	sponsorpooltypes "github.com/cosmos/evm/x/sponsorpool/types"
-	"github.com/cosmos/evm/x/netcap"
-	netcapkeeper "github.com/cosmos/evm/x/netcap/keeper"
-	netcaptypes "github.com/cosmos/evm/x/netcap/types"
+	"github.com/cosmos/evm/x/erc20"
+	erc20keeper "github.com/cosmos/evm/x/erc20/keeper"
+	erc20types "github.com/cosmos/evm/x/erc20/types"
+	erc20v2 "github.com/cosmos/evm/x/erc20/v2"
 	"github.com/cosmos/evm/x/feemarket"
 	feemarketkeeper "github.com/cosmos/evm/x/feemarket/keeper"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
+	"github.com/cosmos/evm/x/gassponsor"
+	gassponsorkeeper "github.com/cosmos/evm/x/gassponsor/keeper"
+	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
 	ibccallbackskeeper "github.com/cosmos/evm/x/ibc/callbacks/keeper"
+	"github.com/cosmos/evm/x/netcap"
+	netcapkeeper "github.com/cosmos/evm/x/netcap/keeper"
+	netcaptypes "github.com/cosmos/evm/x/netcap/types"
+	"github.com/cosmos/evm/x/paymaster"
+	paymasterkeeper "github.com/cosmos/evm/x/paymaster/keeper"
+	paymastertypes "github.com/cosmos/evm/x/paymaster/types"
+	"github.com/cosmos/evm/x/sponsorpool"
+	sponsorpoolkeeper "github.com/cosmos/evm/x/sponsorpool/keeper"
+	sponsorpooltypes "github.com/cosmos/evm/x/sponsorpool/types"
+	"github.com/cosmos/evm/x/squeeze"
+	squeezekeeper "github.com/cosmos/evm/x/squeeze/keeper"
+	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
+	"github.com/cosmos/evm/x/valgrant"
+	valgrantkeeper "github.com/cosmos/evm/x/valgrant/keeper"
+	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
 	"github.com/cosmos/evm/x/vm"
 	evmkeeper "github.com/cosmos/evm/x/vm/keeper"
 	vmrunner "github.com/cosmos/evm/x/vm/runner"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
+	"github.com/cosmos/evm/x/vpcap"
+	vpcapkeeper "github.com/cosmos/evm/x/vpcap/keeper"
+	vpcaptypes "github.com/cosmos/evm/x/vpcap/types"
 	"github.com/cosmos/gogoproto/proto"
 	ibccallbacks "github.com/cosmos/ibc-go/v11/modules/apps/callbacks"
 	transfer "github.com/cosmos/ibc-go/v11/modules/apps/transfer"
@@ -208,19 +208,19 @@ type EVMD struct {
 	CallbackKeeper ibccallbackskeeper.ContractKeeper
 
 	// Cosmos EVM keepers
-	FeeMarketKeeper feemarketkeeper.Keeper
-	EVMKeeper       *evmkeeper.Keeper
-	Erc20Keeper     erc20keeper.Keeper
-	PaymasterKeeper paymasterkeeper.Keeper
-	ContestKeeper   contestkeeper.Keeper
-	ValGrantKeeper  valgrantkeeper.Keeper
-	VPCapKeeper     vpcapkeeper.Keeper
-	EncMempoolKeeper encmempoolkeeper.Keeper
-	GasSponsorKeeper gassponsorkeeper.Keeper
-	SqueezeKeeper    squeezekeeper.Keeper
+	FeeMarketKeeper   feemarketkeeper.Keeper
+	EVMKeeper         *evmkeeper.Keeper
+	Erc20Keeper       erc20keeper.Keeper
+	PaymasterKeeper   paymasterkeeper.Keeper
+	ContestKeeper     contestkeeper.Keeper
+	ValGrantKeeper    valgrantkeeper.Keeper
+	VPCapKeeper       vpcapkeeper.Keeper
+	EncMempoolKeeper  encmempoolkeeper.Keeper
+	GasSponsorKeeper  gassponsorkeeper.Keeper
+	SqueezeKeeper     squeezekeeper.Keeper
 	SponsorPoolKeeper sponsorpoolkeeper.Keeper
-	NetCapKeeper     netcapkeeper.Keeper
-	EVMMempool      sdkmempool.ExtMempool
+	NetCapKeeper      netcapkeeper.Keeper
+	EVMMempool        sdkmempool.ExtMempool
 
 	// the module manager
 	ModuleManager      *module.Manager
@@ -636,7 +636,9 @@ func NewExampleApp(
 	app.ContestKeeper = contestkeeper.NewKeeper(runtime.NewKVStoreService(keys[contesttypes.StoreKey]))
 	// NOTE: app.ValGrantKeeper is instantiated earlier (before the EVM keeper) so
 	// it can be injected into the valgrant precompile via DefaultStaticPrecompiles.
-	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]))
+	// StakingKeeper (read-only) lets the encmempool DKG EndBlocker learn the bonded
+	// validator set (the keyper set) and re-run the DKG when it changes.
+	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]), app.StakingKeeper)
 	app.GasSponsorKeeper = gassponsorkeeper.NewKeeper(
 		runtime.NewKVStoreService(keys[gassponsortypes.StoreKey]),
 		app.ContestKeeper,
