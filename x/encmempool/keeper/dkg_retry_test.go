@@ -207,4 +207,76 @@ func TestOnChainDKG_RetryPurgesStaleDeals(t *testing.T) {
 	if _, ok := k.GetDealing(ctx, 1, dealer.index); ok {
 		t.Fatal("failed round's dealing was not GC'd on retry")
 	}
+	// HIGH-2: the failed round's DkgRound RECORD must also be GC'd on retry.
+	if _, ok := k.GetDkgRound(ctx, 1); ok {
+		t.Fatal("failed round's DkgRound record was not GC'd on retry (HIGH-2)")
+	}
+}
+
+// TestOnChainDKG_SustainedSubQuorumBoundedAndRecovers is the HIGH-2 regression test.
+// Under a SUSTAINED sub-quorum (nobody deals) the EndBlocker keeps failing+retrying
+// forever; the fix must keep retained DkgRound state BOUNDED (GC the failed round record
+// on retry) instead of leaking one record per retry, and must STILL converge the instant
+// >= t members return. Pre-fix, purgeRoundData kept every failed round's record, so
+// CountDkgRounds grew without bound with the retry count — this test would fail.
+func TestOnChainDKG_SustainedSubQuorumBoundedAndRecovers(t *testing.T) {
+	const thr = 2
+	members := []member{newMember("op1", "acc1"), newMember("op2", "acc2"), newMember("op3", "acc3")}
+	k, ctx := newKeeper(t, 1)
+	ms := keeper.NewMsgServerImpl(k)
+	p := types.Params{
+		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgRetryBackoff: 1, DkgMaxAttempts: 3,
+		DkgThreshold: thr, DkgMembers: declaredFrom(members),
+	}
+	_ = k.SetParams(ctx, p)
+
+	// Drive many blocks with NOBODY dealing: fail -> retry -> fail -> retry ... Assert
+	// the retained DkgRound record count never grows with the number of retries.
+	maxRounds := 0
+	lastEpoch := uint64(0)
+	for h := int64(1); h <= 80; h++ {
+		k.EndBlockDKG(ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager()))
+		if c := k.CountDkgRounds(ctx); c > maxRounds {
+			maxRounds = c
+		}
+		if e := k.GetCurrentEpoch(ctx); e > lastEpoch {
+			lastEpoch = e
+		}
+	}
+	if lastEpoch < 4 {
+		t.Fatalf("expected several auto-retries (epoch should advance), only reached epoch %d", lastEpoch)
+	}
+	if maxRounds > 2 {
+		t.Fatalf("HIGH-2: retained DkgRound records grew unbounded under sustained sub-quorum (peak=%d across %d retries)", maxRounds, lastEpoch)
+	}
+	t.Logf("bounded: %d retries, peak retained DkgRound records = %d", lastEpoch, maxRounds)
+
+	// Quorum returns: the next round the EndBlocker opens must converge to an active key
+	// with NO manual intervention.
+	var round types.DkgRound
+	h := int64(81)
+	for ; h <= 300; h++ {
+		k.EndBlockDKG(ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager()))
+		if r, ok := k.GetDkgRound(ctx, k.GetCurrentEpoch(ctx)); ok && r.Status == types.DkgStatusOpen && uint64(h) < r.DealDeadline {
+			round = r
+			break
+		}
+	}
+	if round.Status != types.DkgStatusOpen {
+		t.Fatal("no open round appeared to converge on")
+	}
+	dealAllMembers(t, k, ms, ctx.WithBlockHeight(h+1), members, round.Epoch, thr)
+	k.EndBlockDKG(ctx.WithBlockHeight(int64(round.ComplaintDeadline)).WithEventManager(sdk.NewEventManager()))
+	ak, ok := k.GetActiveKey(ctx, round.Epoch)
+	if !ok {
+		t.Fatalf("quorum returned but epoch %d did not converge to an active key", round.Epoch)
+	}
+	if len(ak.Qual) != 3 {
+		t.Fatalf("expected full QUAL after recovery, got %v", ak.Qual)
+	}
+	if c := k.CountDkgRounds(ctx); c > 2 {
+		t.Fatalf("retained round records not bounded after recovery: %d", c)
+	}
+	t.Logf("recovered: epoch %d converged with full QUAL after a sustained sub-quorum outage", round.Epoch)
 }

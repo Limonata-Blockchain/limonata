@@ -249,6 +249,14 @@ func (m msgServer) DkgDeal(goCtx context.Context, msg *types.MsgDkgDeal) (*types
 	if len(msg.Commitments) != int(round.Threshold) {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "expected %d commitments, got %d", round.Threshold, len(msg.Commitments))
 	}
+	// HIGH-1: every Feldman commitment must be a well-formed COMPRESSED secp256k1 point
+	// (parse + on-curve). A malformed commitment that only passed the count check would
+	// be silently dropped by FinalizePublic (excluding the dealer), but rejecting the
+	// whole dealing here keeps stored state well-formed and prevents a member from
+	// wasting its one deal slot on garbage.
+	if _, err := dkg.ParseCommitmentPoints(msg.Commitments); err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "malformed commitment (not a compressed secp256k1 point): %v", err)
+	}
 	// Require exactly one enc-share per member, covering every member index once, so
 	// each member can derive its final share from a qualified dealer.
 	n := len(round.Members)
@@ -264,8 +272,22 @@ func (m msgServer) DkgDeal(goCtx context.Context, msg *types.MsgDkgDeal) (*types
 		if seen[s.MemberIndex] {
 			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "duplicate enc_share for member %d", s.MemberIndex)
 		}
-		if len(s.A) == 0 || len(s.Body) == 0 {
-			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "empty enc_share for member %d", s.MemberIndex)
+		// HIGH-1 (root-cause fix): validate EVERY enc-share field so a structurally
+		// unopenable share can NEVER enter QUAL. `A` must be a valid compressed secp256k1
+		// point — the decrypt path (ComputeShare) and the complaint path
+		// (VerifyDecryptShare) both parse it, so a bad A made the dealer both underivable
+		// AND uncomplainable while it stayed in QUAL, corrupting every honest member's
+		// aggregate share (the reported keyless-liveness DoS). The nonce must be the exact
+		// AES-GCM length (else Decrypt cannot open the sealed share), and the body must be
+		// present. Any malformed field REJECTS the whole dealing at ingress.
+		if !dkg.ValidCompressedPoint(s.A) {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "enc_share for member %d has a malformed A (not a compressed secp256k1 point)", s.MemberIndex)
+		}
+		if len(s.Nonce) != threshold.NonceSize {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "enc_share for member %d has a %d-byte nonce, want %d", s.MemberIndex, len(s.Nonce), threshold.NonceSize)
+		}
+		if len(s.Body) == 0 {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "empty enc_share body for member %d", s.MemberIndex)
 		}
 		seen[s.MemberIndex] = true
 		stored = append(stored, types.DkgStoredEncShare{MemberIndex: s.MemberIndex, A: s.A, Nonce: s.Nonce, Body: s.Body})

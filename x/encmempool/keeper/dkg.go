@@ -80,13 +80,15 @@ func (k Keeper) SetComplaint(ctx context.Context, c types.DkgComplaintRec) error
 	return k.store(ctx).Set(dkgComplaintKey(c.Epoch, c.Against, c.AccuserIndex), mustJSON(c))
 }
 
-// purgeRoundData deletes every stored dealing and complaint for an epoch. It is
-// called on auto-retry so a failed round's now-useless deals/complaints do not
-// accumulate in state across an extended outage. Keys are collected first (a store
-// iterator must not be mutated mid-scan) then deleted — a deterministic operation
-// (the key set is a pure function of committed state). The small DkgRound record is
-// intentionally kept for history/telemetry.
-func (k Keeper) purgeRoundData(ctx context.Context, epoch uint64) {
+// purgeDealings deletes every stored dealing + complaint (the BULK point-to-point
+// state) for an epoch, leaving the small DkgRound record intact. Keys are collected
+// first (a store iterator must not be mutated mid-scan) then deleted — deterministic
+// (the key set is a pure function of committed state). Used when an epoch is superseded
+// by a MEMBER CHANGE: the old dealing bulk is dead weight once the round finalized, but
+// the round record is KEPT because in-flight ciphertexts stamped with the old (active)
+// epoch still authorize their decryption shares against it (SubmitDecryptionShare reads
+// the round's member set).
+func (k Keeper) purgeDealings(ctx context.Context, epoch uint64) {
 	st := k.store(ctx)
 	var keys [][]byte
 	for _, pfx := range [][]byte{
@@ -105,6 +107,38 @@ func (k Keeper) purgeRoundData(ctx context.Context, epoch uint64) {
 	for _, key := range keys {
 		_ = st.Delete(key)
 	}
+}
+
+// purgeFailedRound GCs a FAILED, superseded round ENTIRELY — its dealings, complaints,
+// AND the DkgRound record itself. It is called on auto-retry.
+//
+// HIGH-2 FIX: the previous code retained the per-epoch DkgRound record on every retry
+// ("kept for history/telemetry"), and a DkgRound carries the full member list + enc
+// keys. Under a SUSTAINED sub-quorum the EndBlocker opens a fresh epoch every backoff
+// forever, so that retained record grew state without bound — a griefable, permanent
+// DoS vector on the mempool key. Deleting the failed round's record here bounds retained
+// round-record state to O(1) across an arbitrarily long outage. This is safe: a Failed
+// round never became Active, so no ActiveThresholdKey and no EncTx/EncShare references
+// its epoch (SubmitEncrypted stamps only the ACTIVE epoch), so nothing can dangle.
+func (k Keeper) purgeFailedRound(ctx context.Context, epoch uint64) {
+	k.purgeDealings(ctx, epoch)
+	_ = k.store(ctx).Delete(dkgRoundKey(epoch))
+}
+
+// CountDkgRounds returns the number of retained DkgRound records. It backs the HIGH-2
+// bounded-state regression test: a sustained sub-quorum must NOT grow round-record state
+// without bound.
+func (k Keeper) CountDkgRounds(ctx context.Context) int {
+	it, err := k.store(ctx).Iterator(types.DkgRoundPrefix, prefixEnd(types.DkgRoundPrefix))
+	if err != nil {
+		return 0
+	}
+	defer it.Close()
+	n := 0
+	for ; it.Valid(); it.Next() {
+		n++
+	}
+	return n
 }
 
 // IterateComplaints visits every stored complaint for an epoch.

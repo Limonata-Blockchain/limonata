@@ -91,12 +91,33 @@ func (k Keeper) BeginBlock(ctx sdk.Context) error {
 // commitments) via the stored DLEQ proof, so a malicious keyper's bad partial is
 // DROPPED WITH ATTRIBUTION instead of silently corrupting the Lagrange combine. On
 // the legacy path (epoch 0) it uses the unverified threshold.Recover as before.
+// maxDecryptAttemptsPerBlock bounds the number of threshold-recovery attempts (each
+// does up to t DLEQ verifications + a Lagrange combine) BeginBlock performs at a single
+// height. Ciphertexts maturing at one height are already gas-bounded (one submit block
+// maps to exactly one decrypt height), so this is defense-in-depth: it caps the crypto
+// work per block so no flood of ciphertexts can stall block production. The cap is far
+// above any legitimate per-block volume, so normal operation never reaches it.
+const maxDecryptAttemptsPerBlock = 2048
+
 func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 	var matured []types.EncTx
 	k.IterateEncTxAtHeight(ctx, cur, func(e types.EncTx) { matured = append(matured, e) })
 
 	order := uint64(0)
+	attempts := 0
 	for _, e := range matured {
+		// BOUNDED CRYPTO WORK: once the per-block attempt cap is hit, GC the remaining
+		// matured ciphertexts (keeping state bounded) with an event instead of running
+		// their expensive recovery. Deterministic — `matured` is in seq order on every
+		// node, so all nodes skip the identical suffix.
+		if attempts >= maxDecryptAttemptsPerBlock {
+			ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_skipped_overflow",
+				sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10))))
+			k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
+			k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
+			continue
+		}
+		attempts++
 		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a
 		// single malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an
 		// out-of-spec nonce) would halt the whole chain. Process each ciphertext inside

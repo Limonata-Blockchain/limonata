@@ -3,11 +3,19 @@ package keeper
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/cosmos/evm/x/encmempool/types"
 )
+
+// dkgBackoffCeilingBlocks is the hard ceiling (in blocks) on the auto-retry backoff.
+// The backoff grows geometrically with the failed-attempt count so a SUSTAINED
+// sub-quorum retries less and less often (bounded event/state churn), but it is capped
+// here so the chain ALWAYS reopens within a bounded window and therefore converges the
+// instant >= t members return — liveness is preserved, never traded away.
+const dkgBackoffCeilingBlocks uint64 = 1000
 
 // EndBlockDKG drives the on-chain validator DKG. It is fully deterministic (reads
 // only committed state + the bonded validator set) so every node runs an identical
@@ -32,6 +40,22 @@ import (
 // commitments. All nodes therefore compute an identical transition (or identical
 // failed outcome), which is the #1 multi-node halt-safety requirement.
 func (k Keeper) EndBlockDKG(ctx sdk.Context) {
+	// PANIC-GUARD (defense-in-depth): EndBlock runs inside consensus; an unrecovered
+	// panic here halts the whole chain. Every branch below is written not to panic (the
+	// crypto aggregate handles malformed/empty inputs, and DkgDeal ingress validation
+	// rejects malformed dealings before they reach finalize), but a last-resort recover
+	// converts any unforeseen data-dependent panic into a contained, DETERMINISTIC event
+	// (identical committed state => identical outcome on every node) instead of a halt.
+	defer func() {
+		if r := recover(); r != nil {
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_endblock_panic",
+				sdk.NewAttribute("height", u64str(uint64(ctx.BlockHeight()))),
+				sdk.NewAttribute("reason", fmt.Sprintf("%v", r)),
+			))
+		}
+	}()
+
 	p := k.GetParams(ctx)
 	if !p.DkgEnabled {
 		return
@@ -80,13 +104,21 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		// Membership changed -> fresh INDEPENDENT campaign (attempt resets to 1). This
 		// takes priority over retry: a failed round whose set has since changed should
 		// re-genesis against the new set, not retry the stale one.
+		//
+		// MEDIUM FIX: purge the SUPERSEDED epoch's dealing bulk (deal/complaint state)
+		// so a re-key does not leave the old epoch's point-to-point shares in state
+		// indefinitely. Only the DEALINGS are dropped, not the DkgRound record: an
+		// in-flight ciphertext stamped with the old (active) epoch still needs that
+		// record to authorize its decryption shares until it matures.
+		k.purgeDealings(ctx, cur)
 		k.openRound(ctx, cur+1, active, hash, h, p, 1, "member_change")
 
 	case lastRound.Status == types.DkgStatusFailed:
-		// AUTO-RETRY / SELF-HEAL. Wait out a backoff (>= 1 block, so we never spin
-		// every block) measured from the failed round's complaint deadline, then open
-		// a fresh round carrying an incremented attempt counter.
-		if h < lastRound.ComplaintDeadline+max64(p.DkgRetryBackoff, 1) {
+		// AUTO-RETRY / SELF-HEAL. Wait out a backoff measured from the failed round's
+		// complaint deadline, then open a fresh round carrying an incremented attempt
+		// counter. The backoff grows with the attempt count and is CAPPED (HIGH-2), so
+		// a long outage retries less often but never stops.
+		if h < addSat(lastRound.ComplaintDeadline, retryBackoff(p, lastRound.Attempt)) {
 			return
 		}
 		attempt := lastRound.Attempt + 1
@@ -101,9 +133,10 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 				sdk.NewAttribute("members", u64str(uint64(len(active)))),
 			))
 		}
-		// The failed epoch's dealings/complaints are dead weight — GC them so an
-		// extended outage cannot grow state without bound across many retries.
-		k.purgeRoundData(ctx, cur)
+		// HIGH-2: GC the failed round ENTIRELY (dealings, complaints, AND its DkgRound
+		// record) before opening the retry, so sustained sub-quorum retries can never
+		// grow retained round-record state without bound.
+		k.purgeFailedRound(ctx, cur)
 		k.openRound(ctx, cur+1, active, hash, h, p, attempt, "retry")
 
 	// case Active with an unchanged member set: steady state — nothing to do.
@@ -117,11 +150,19 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 // emitted so operators can watch convergence (start / member_change / retry).
 func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMember, hash []byte, h uint64, p types.Params, attempt uint64, reason string) {
 	t := roundThreshold(p, len(members))
+	// MEDIUM FIXES: (1) the complaint window is FLOORED at >= 1 block so a dealing that
+	// lands on the deal deadline still has at least one block in which it can be
+	// complained about before finalize — a zero window would let a last-block bad dealer
+	// finalize uncontestable. (2) All deadline arithmetic uses a SATURATING add so a
+	// pathologically large governance-set window cannot overflow uint64 and wrap the
+	// deadline below the current height (which would make deals/complaints instantly
+	// "closed" and jam the round machine).
+	dealDeadline := addSat(h, max64(p.DkgDealWindow, 1))
 	round := types.DkgRound{
 		Epoch:             epoch,
 		OpenHeight:        h,
-		DealDeadline:      h + max64(p.DkgDealWindow, 1),
-		ComplaintDeadline: h + max64(p.DkgDealWindow, 1) + p.DkgComplaintWindow,
+		DealDeadline:      dealDeadline,
+		ComplaintDeadline: addSat(dealDeadline, max64(p.DkgComplaintWindow, 1)),
 		Members:           members,
 		Threshold:         t,
 		MembersHash:       hash,
@@ -148,6 +189,37 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 func max64(a, b uint64) uint64 {
 	if a > b {
 		return a
+	}
+	return b
+}
+
+// addSat is a saturating uint64 add: it returns a+b, or the uint64 max on overflow,
+// so deadline arithmetic can never wrap past 2^64 and produce a deadline BELOW the
+// current height (which would jam the deal/complaint windows).
+func addSat(a, b uint64) uint64 {
+	s := a + b
+	if s < a {
+		return ^uint64(0)
+	}
+	return s
+}
+
+// retryBackoff returns the blocks to wait after a FAILED round (of the given attempt)
+// before auto-reopening. It grows geometrically with the failed attempt so a sustained
+// sub-quorum outage backs off (bounded churn), but is CAPPED at dkgBackoffCeilingBlocks
+// (never below the configured base) so the chain ALWAYS retries within a bounded window
+// and converges the moment >= t members return. failedAttempt is the failed round's
+// Attempt, so the FIRST retry (attempt 1) waits exactly the configured base backoff.
+func retryBackoff(p types.Params, failedAttempt uint64) uint64 {
+	base := max64(p.DkgRetryBackoff, 1)
+	ceiling := max64(base, dkgBackoffCeilingBlocks)
+	b := base
+	for i := uint64(1); i < failedAttempt; i++ {
+		next := b << 1
+		if next < b || next >= ceiling { // overflow or reached the ceiling
+			return ceiling
+		}
+		b = next
 	}
 	return b
 }

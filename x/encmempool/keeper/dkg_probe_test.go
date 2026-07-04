@@ -110,14 +110,22 @@ func TestProbe_AggregateToInfinity_NoPanic(t *testing.T) {
 		t.Fatalf("CONSENSUS HALT: EndBlock finalize panicked on infinity aggregate: %v", panicked)
 	}
 	ak, ok := k.GetActiveKey(ctx, 1)
-	t.Logf("installed active key? %v; Pub=%x", ok, func() []byte { if ok { return ak.Pub }; return nil }())
+	t.Logf("installed active key? %v; Pub=%x", ok, func() []byte {
+		if ok {
+			return ak.Pub
+		}
+		return nil
+	}())
 	round, _ := k.GetDkgRound(ctx, 1)
 	t.Logf("round status after finalize: %q qual would be both", round.Status)
 }
 
-// PROBE 2 — malformed attacker commitments must not panic EndBlock finalize.
-// A member submits t commitments that pass the count check but are (a) garbage
-// 33-byte non-points and (b) wrong length. finalize must skip the dealer, never panic.
+// PROBE 2 (now a REGRESSION test) — malformed commitments must be REJECTED at ingress
+// so a member cannot enter a dealing with garbage/short commitments at all, and the
+// EndBlock finalize (which is independently no-panic-hardened) still recovers gracefully
+// from the resulting sub-quorum. member1 submits garbage 33-byte non-points; member3
+// submits wrong-length commitment bytes; both must be rejected; only member2's honest
+// dealing lands, so |QUAL|=1 < t=2 and the round FAILS (never panics).
 func TestProbe_MalformedCommitments_NoPanic(t *testing.T) {
 	const thr = 2
 	members := []member{newMember("op1", "acc1"), newMember("op2", "acc2"), newMember("op3", "acc3")}
@@ -125,7 +133,7 @@ func TestProbe_MalformedCommitments_NoPanic(t *testing.T) {
 	ms := keeper.NewMsgServerImpl(k)
 	openEpoch1(t, k, ctx, members, thr)
 
-	// member1: two 33-byte garbage "points" (not on curve).
+	// member1: two 33-byte garbage "points" (not on curve) -> REJECTED at ingress.
 	garbage := make([]byte, 33)
 	garbage[0] = 0x02
 	for i := 1; i < 33; i++ {
@@ -133,8 +141,11 @@ func TestProbe_MalformedCommitments_NoPanic(t *testing.T) {
 	}
 	if _, err := ms.DkgDeal(ctx.WithBlockHeight(2), &types.MsgDkgDeal{
 		Dealer: members[0].acc, Epoch: 1, Commitments: [][]byte{garbage, garbage}, EncShares: dummyEncShares(members),
-	}); err != nil {
-		t.Fatalf("garbage deal rejected at ingress (would need on-chain guard): %v", err)
+	}); err == nil {
+		t.Fatal("garbage-commitment dealing was ACCEPTED at ingress (must be rejected)")
+	}
+	if _, ok := k.GetDealing(ctx, 1, members[0].index); ok {
+		t.Fatal("a rejected garbage dealing must not be stored")
 	}
 	// member2: two honest commitments so there is a mix.
 	c2, _, _ := dkg.Deal(members[1].index, []uint64{1, 2, 3}, thr, rand.Reader)
@@ -143,12 +154,12 @@ func TestProbe_MalformedCommitments_NoPanic(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("honest deal: %v", err)
 	}
-	// member3: wrong-length commitment bytes (5 bytes each) — still passes count==t.
+	// member3: wrong-length commitment bytes (5 bytes each) -> REJECTED at ingress.
 	short := []byte{1, 2, 3, 4, 5}
 	if _, err := ms.DkgDeal(ctx.WithBlockHeight(2), &types.MsgDkgDeal{
 		Dealer: members[2].acc, Epoch: 1, Commitments: [][]byte{short, short}, EncShares: dummyEncShares(members),
-	}); err != nil {
-		t.Fatalf("short deal: %v", err)
+	}); err == nil {
+		t.Fatal("short-commitment dealing was ACCEPTED at ingress (must be rejected)")
 	}
 
 	var panicked interface{}
@@ -157,17 +168,19 @@ func TestProbe_MalformedCommitments_NoPanic(t *testing.T) {
 		k.EndBlockDKG(ctx.WithBlockHeight(5).WithEventManager(sdk.NewEventManager()))
 	}()
 	if panicked != nil {
-		t.Fatalf("CONSENSUS HALT: finalize panicked on malformed commitments: %v", panicked)
+		t.Fatalf("CONSENSUS HALT: finalize panicked: %v", panicked)
 	}
 	round, _ := k.GetDkgRound(ctx, 1)
-	// Only member2 is well-formed -> QUAL={2} has size 1 < t=2 -> round must FAIL (not panic).
-	t.Logf("round status: %q (expect failed: 1 well-formed < t=2)", round.Status)
+	// Only member2 landed a well-formed dealing -> QUAL={2} size 1 < t=2 -> round FAILS.
+	if round.Status != types.DkgStatusFailed {
+		t.Fatalf("round should FAIL with 1 well-formed dealing < t=2, got %q", round.Status)
+	}
 }
 
-// PROBE 3 — nonce length on DkgDeal enc-shares is NOT validated by the handler.
-// A stored bad-nonce enc-share flows into threshold.Decrypt inside DkgComplaint.
-// Confirm the complaint handler does not panic (msg handlers are recovered by
-// baseapp, but a panic that depends on non-canonical bytes is still worth pinning).
+// PROBE 3 (now a REGRESSION test) — a DkgDeal enc-share with a wrong-length AES-GCM
+// nonce must be REJECTED at ingress, so a bad-nonce enc-share can never be stored and
+// later flow into threshold.Decrypt on the complaint/decrypt paths. (The complaint
+// handler remains no-panic-hardened for defense in depth.)
 func TestProbe_DealBadNonce_ComplaintNoPanic(t *testing.T) {
 	const thr = 2
 	members := []member{newMember("op1", "acc1"), newMember("op2", "acc2"), newMember("op3", "acc3")}
@@ -183,11 +196,14 @@ func TestProbe_DealBadNonce_ComplaintNoPanic(t *testing.T) {
 	}
 	if _, err := ms.DkgDeal(ctx.WithBlockHeight(2), &types.MsgDkgDeal{
 		Dealer: members[0].acc, Epoch: 1, Commitments: c, EncShares: badShares,
-	}); err != nil {
-		t.Fatalf("bad-nonce deal rejected at ingress: %v", err)
+	}); err == nil {
+		t.Fatal("bad-nonce dealing was ACCEPTED at ingress (must be rejected)")
+	}
+	if _, ok := k.GetDealing(ctx, 1, members[0].index); ok {
+		t.Fatal("a rejected bad-nonce dealing must not be stored")
 	}
 
-	// members[1] files a complaint against members[0] with a (garbage) DLEQ proof.
+	// Defense in depth: a complaint against the (absent) dealer must not panic.
 	var panicked interface{}
 	func() {
 		defer func() { panicked = recover() }()
@@ -197,9 +213,9 @@ func TestProbe_DealBadNonce_ComplaintNoPanic(t *testing.T) {
 		})
 	}()
 	if panicked != nil {
-		t.Fatalf("DkgComplaint panicked on bad-nonce stored enc-share: %v", panicked)
+		t.Fatalf("DkgComplaint panicked: %v", panicked)
 	}
-	t.Log("DkgComplaint did not panic on bad-nonce enc-share")
+	t.Log("bad-nonce enc-share rejected at ingress; complaint path did not panic")
 }
 
 var _ = fmt.Sprintf

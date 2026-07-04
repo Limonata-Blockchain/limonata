@@ -117,6 +117,18 @@ func FinalizePublic(members []uint64, t int, dealings []PublicDealing, disqualif
 	return &PublicResult{Pub: vbz[0], PublicCommitments: vbz, Qual: qual, Disqualified: disqOut}, nil
 }
 
+// ValidCompressedPoint reports whether b is a well-formed COMPRESSED secp256k1 point
+// (exactly 33 bytes, a valid 0x02/0x03 prefix, and ON the curve). It is the ingress
+// gate for HIGH-1: an enc-share `A` (or a Feldman commitment) that does not satisfy
+// this is structurally unopenable/unusable, so it must be rejected at DkgDeal before it
+// can enter QUAL and poison every honest member's aggregate share. It reuses the same
+// parsePoint the decrypt/complaint paths use, so "accepted at ingress" is exactly
+// "parseable downstream".
+func ValidCompressedPoint(b []byte) bool {
+	_, err := parsePoint(b)
+	return err == nil
+}
+
 // ParseCommitmentPoints parses a slice of compressed points (e.g. a stored
 // ActiveThresholdKey's aggregate commitments) back into Jacobian points for
 // RecoverVerified / SharePubKey.
@@ -223,6 +235,23 @@ func DecryptShareFrom(encPriv *secp256k1.ModNScalar, memberIndex uint64, ct *thr
 //   - proofValid=true, cheated=false => the dealer's share is valid; reject the
 //     (frivolous) complaint.
 func VerifyJustifiedComplaint(accuserIndex uint64, accuserEncPub []byte, dealerCommitments [][]byte, encA, encNonce, encBody, sharedPoint, dleqProof []byte) (cheated, proofValid bool) {
+	// DEFENSE-IN-DEPTH (HIGH-1): a structurally-malformed enc-share is a PUBLIC,
+	// incontrovertible dealer fault — the dealer's OWN on-chain bytes do not form an
+	// openable sealed share (A is not a curve point, or the AES-GCM nonce is the wrong
+	// length), so NO accuser secret or DLEQ proof is needed to justify disqualification:
+	// there is nothing to frame, since any node recomputes this purely from public
+	// state. Return (cheated, proofValid) = (true, true) so the complaint is recorded.
+	// DkgDeal ingress now rejects such dealings up front, so this path is normally
+	// unreachable; keeping it here closes the complaint route independently (e.g. a
+	// dealing imported via genesis that bypassed the handler). Previously this exact
+	// case short-circuited at parsePoint(encA) inside VerifyDecryptShare and returned
+	// proofValid=false, making the fault structurally UNCOMPLAINABLE — the HIGH-1 bug.
+	if _, err := parsePoint(encA); err != nil {
+		return true, true
+	}
+	if len(encNonce) != threshold.NonceSize {
+		return true, true
+	}
 	Y, err := parsePoint(accuserEncPub)
 	if err != nil {
 		return false, false
