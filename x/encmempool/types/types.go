@@ -1,6 +1,10 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+
+	sdkmath "cosmossdk.io/math"
+)
 
 // Params govern the commit-reveal timing. RevealDelay is the minimum number of
 // blocks between a commit and its reveal; MaxRevealWindow bounds how long an
@@ -96,6 +100,41 @@ type RoundMember struct {
 	OperatorAddr string `json:"operator_addr"`
 	AccountAddr  string `json:"account_addr"`
 	EncPubKey    []byte `json:"enc_pubkey"`
+	// Weight is the member's committee STAKE weight, snapshotted at round-open (the
+	// transparent path records the validator's tokens; the legacy declared path leaves it
+	// zero). It is NOT part of MembersHash, so a validator's stake drifting does not churn
+	// the member set / trigger a rekey. HIGH-3 uses it to require a decrypting set to hold
+	// a STRICT MAJORITY of committee stake, so a stake-minority Sybil that grabbed a
+	// seat-majority still cannot capture decryption. Zero/absent on the legacy path =>
+	// the count threshold alone governs (unchanged behavior).
+	Weight sdkmath.Int `json:"weight"`
+}
+
+// MemberIndexByOperator returns the 1-based DKG member index for `operator` in `members`,
+// or 0 if the operator is not a member. This is the OPERATOR-keyed self-identifier that
+// replaces the enc-key first-match: the operator is the validator's real consensus
+// identity (resolved from its consensus address), so it cannot be spoofed by a colliding
+// enc key. HIGH-4.
+func MemberIndexByOperator(members []RoundMember, operator string) uint64 {
+	if operator == "" {
+		return 0
+	}
+	for _, m := range members {
+		if m.OperatorAddr == operator {
+			return m.Index
+		}
+	}
+	return 0
+}
+
+// VoteExtEnabledAt reports whether CometBFT vote extensions are ACTIVE at blockHeight,
+// given the consensus-param enable height. It mirrors baseapp.ValidateVoteExtensions'
+// own gate EXACTLY (enableHeight != 0 AND blockHeight > enableHeight), so the transparent
+// DKG's handlers act if and only if ValidateVoteExtensions would accept the extensions.
+// HIGH-1: this is the coupling that stops enabling DkgTransparent (a module param) while
+// vote extensions (a SEPARATE consensus param) are not active from halting the chain.
+func VoteExtEnabledAt(enableHeight, blockHeight int64) bool {
+	return enableHeight != 0 && blockHeight > enableHeight
 }
 
 // DKG round status values.

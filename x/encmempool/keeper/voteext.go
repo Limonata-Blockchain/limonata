@@ -47,20 +47,59 @@ type VEEntry struct {
 // --- enc-pubkey registration (operator -> announced compressed secp256k1 key) ---
 
 func encPubKeyKey(operator string) []byte { return concat(types.EncPubKeyPrefix, []byte(operator)) }
+func encKeyOwnerKey(key []byte) []byte    { return concat(types.EncKeyOwnerPrefix, key) }
 
-// RecordEncPubKey stores a bonded validator's auto-announced DKG enc key IDEMPOTENTLY:
-// it is a no-op when the stored key already equals key, so a validator re-announcing the
-// same key every block causes no state churn (and no MembersHash flap). It only writes on
-// first announcement or a genuine key change.
-func (k Keeper) RecordEncPubKey(ctx sdk.Context, operator string, key []byte) bool {
+// RecordEncPubKey stores a bonded validator's auto-announced DKG enc key IDEMPOTENTLY,
+// and only after it PROVES OWNERSHIP and passes CROSS-OPERATOR UNIQUENESS (HIGH-2/HIGH-4):
+//
+//   - IDEMPOTENT: a no-op when the stored key already equals key, so a validator
+//     re-announcing the same key every block causes no state churn (and no MembersHash
+//     flap). The PoP was already verified when the key was first stored, so the hot
+//     re-announce path does no signature work.
+//   - PROOF-OF-POSSESSION: a first announce / rotation is rejected unless `pop` is a valid
+//     proof that the announcer holds the enc PRIVATE key, bound to `operator`. This stops a
+//     validator from announcing another's observed PUBLIC key as its own.
+//   - UNIQUENESS: a key already bound to a DIFFERENT operator is rejected, so two operators
+//     can never sit in the committee under one key (which would misroute/silence shares).
+//
+// Deterministic: every read is committed state and every write is first-wins by operator
+// (the caller feeds entries in a canonical, operator-sorted order). Returns whether it
+// wrote a new/rotated key.
+func (k Keeper) RecordEncPubKey(ctx sdk.Context, operator string, key, pop []byte) bool {
 	if operator == "" || !dkg.ValidCompressedPoint(key) {
 		return false
 	}
-	if cur, ok := k.GetEncPubKey(ctx, operator); ok && bytes.Equal(cur, key) {
-		return false // idempotent: already registered with this exact key
+	cur, had := k.GetEncPubKey(ctx, operator)
+	if had && bytes.Equal(cur, key) {
+		return false // idempotent: already registered with this exact key (PoP already proven)
 	}
-	_ = k.store(ctx).Set(encPubKeyKey(operator), append([]byte(nil), key...))
+	// PROOF-OF-POSSESSION: only the holder of the enc private key, announcing under its OWN
+	// operator, can register (or rotate to) a key.
+	if !dkg.VerifyEncKeyPoP(key, operator, pop) {
+		return false
+	}
+	// CROSS-OPERATOR UNIQUENESS: refuse a key already owned by a different operator.
+	if owner, ok := k.GetEncKeyOwner(ctx, key); ok && owner != operator {
+		return false
+	}
+	// Rotation: drop the reverse index for this operator's previous key before rebinding.
+	if had {
+		_ = k.store(ctx).Delete(encKeyOwnerKey(cur))
+	}
+	st := k.store(ctx)
+	_ = st.Set(encPubKeyKey(operator), append([]byte(nil), key...))
+	_ = st.Set(encKeyOwnerKey(key), []byte(operator))
 	return true
+}
+
+// GetEncKeyOwner returns the operator that owns an announced enc key, if any (the reverse
+// index backing the HIGH-2 cross-operator uniqueness check).
+func (k Keeper) GetEncKeyOwner(ctx context.Context, key []byte) (string, bool) {
+	bz, err := k.store(ctx).Get(encKeyOwnerKey(key))
+	if err != nil || len(bz) == 0 {
+		return "", false
+	}
+	return string(bz), true
 }
 
 // GetEncPubKey returns a validator's registered enc key, if any.
@@ -121,23 +160,55 @@ func (k Keeper) TransparentMembers(ctx context.Context, p types.Params) []types.
 	if max := p.EffectiveMaxMembers(); len(cands) > max {
 		cands = cands[:max]
 	}
-	// Assign indices by operator address order (stable, committed-state-derived).
+	// Assign indices by operator address order (stable, committed-state-derived). Each
+	// member also carries its STAKE weight (HIGH-3), snapshotted here from committed state.
 	sort.Slice(cands, func(i, j int) bool { return cands[i].op < cands[j].op })
 	out := make([]types.RoundMember, len(cands))
 	for i, c := range cands {
-		out[i] = types.RoundMember{Index: uint64(i + 1), OperatorAddr: c.op, EncPubKey: c.key}
+		out[i] = types.RoundMember{Index: uint64(i + 1), OperatorAddr: c.op, EncPubKey: c.key, Weight: c.tokens}
 	}
 	return out
 }
 
 // memberIndexByOperator returns a round member's index by operator address, or 0.
 func memberIndexByOperator(round types.DkgRound, op string) uint64 {
-	for _, m := range round.Members {
-		if m.OperatorAddr == op {
-			return m.Index
+	return types.MemberIndexByOperator(round.Members, op)
+}
+
+// DecryptingSetMeetsStake reports whether the committee members whose share indices are in
+// `present` collectively hold a STRICT MAJORITY of the committee's snapshotted stake weight.
+//
+// HIGH-3: the committee seats are STAKE-ranked (top-N by tokens), but the Shamir decryption
+// threshold is a member COUNT, so a stake-minority Sybil holding a seat-majority could reach
+// the count and capture decryption. Gating the decrypting set on a strict stake majority
+// closes that: a stake-minority set (even a seat-majority) can never satisfy 2*got > total,
+// while the honest stake majority always can (in transparent operation every member serves a
+// share). It reduces to the count threshold alone on the LEGACY/unweighted path (no weights
+// recorded => returns true), preserving existing behavior.
+//
+// Policy justification: a STRICT MAJORITY (> 1/2 stake) is the minimal bar that guarantees no
+// stake-minority can decrypt AND that any honest stake majority can always block a premature
+// decryption; a stricter > 2/3 bar (BFT) would let a 1/3 stake minority block liveness, which
+// is a heavier tradeoff than this dormant feature warrants. It is overflow-safe (sdkmath.Int).
+func DecryptingSetMeetsStake(members []types.RoundMember, present map[uint64]bool) bool {
+	total := sdkmath.ZeroInt()
+	got := sdkmath.ZeroInt()
+	weighted := false
+	for _, m := range members {
+		w := m.Weight
+		if w.IsNil() || !w.IsPositive() {
+			continue
+		}
+		weighted = true
+		total = total.Add(w)
+		if present[m.Index] {
+			got = got.Add(w)
 		}
 	}
-	return 0
+	if !weighted || !total.IsPositive() {
+		return true // legacy / unweighted committee: the count threshold alone governs
+	}
+	return got.Add(got).GT(total) // strict stake majority: 2*got > total
 }
 
 // ============================================================================
@@ -193,7 +264,7 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 	// EndBlocker's member-set computation THIS block.
 	announced := 0
 	for _, e := range canon {
-		if k.RecordEncPubKey(ctx, e.Operator, e.VE.EncPubKey) {
+		if k.RecordEncPubKey(ctx, e.Operator, e.VE.EncPubKey, e.VE.EncPubKeyPoP) {
 			announced++
 		}
 	}

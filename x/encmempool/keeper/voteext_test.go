@@ -15,11 +15,21 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
+	"github.com/cosmos/evm/x/encmempool/dkg"
 	"github.com/cosmos/evm/x/encmempool/dkgnode"
 	"github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
+
+// encPoP builds a valid enc-key proof-of-possession for a test member (the enc key signs
+// its own operator identity). Every transparent announce path needs one now (HIGH-2/HIGH-4).
+func encPoP(m member) []byte { return dkg.SignEncKeyPoP(m.priv, m.op) }
+
+// annVE builds a member's key-announcement vote extension (key + PoP).
+func annVE(m member) types.VoteExtension {
+	return types.VoteExtension{EncPubKey: m.pub, EncPubKeyPoP: encPoP(m)}
+}
 
 // mockStaking is a minimal StakingKeeper: it returns a fixed bonded validator set.
 // Order is irrelevant — TransparentMembers re-ranks deterministically.
@@ -78,7 +88,7 @@ func TestTransparent_CommitteeSelection(t *testing.T) {
 	k, ctx := newKeeperSK(t, 1, sk)
 	// Register enc keys for A..D (not E).
 	for _, m := range []member{m1, m2, m3, m4} {
-		k.RecordEncPubKey(ctx, m.op, m.pub)
+		k.RecordEncPubKey(ctx, m.op, m.pub, encPoP(m))
 	}
 	p := transparentParams(2, 2) // committee cap = 2
 
@@ -106,17 +116,17 @@ func TestTransparent_EncKeyIdempotentAndDormant(t *testing.T) {
 
 	// Dormant: DkgEnabled/DkgTransparent off -> no registration.
 	_ = k.SetParams(ctx, types.DefaultParams())
-	k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{{Operator: m1.op, VE: types.VoteExtension{EncPubKey: m1.pub}}})
+	k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{{Operator: m1.op, VE: annVE(m1)}})
 	if _, ok := k.GetEncPubKey(ctx, m1.op); ok {
 		t.Fatal("dormant path must not register enc keys")
 	}
 
 	// Active: registers on first announce; idempotent thereafter.
 	_ = k.SetParams(ctx, transparentParams(1, 0))
-	if changed := k.RecordEncPubKey(ctx, m1.op, m1.pub); !changed {
+	if changed := k.RecordEncPubKey(ctx, m1.op, m1.pub, encPoP(m1)); !changed {
 		t.Fatal("first announce should register")
 	}
-	if changed := k.RecordEncPubKey(ctx, m1.op, m1.pub); changed {
+	if changed := k.RecordEncPubKey(ctx, m1.op, m1.pub, encPoP(m1)); changed {
 		t.Fatal("re-announcing the same key must be a no-op")
 	}
 	if got, ok := k.GetEncPubKey(ctx, m1.op); !ok || !bytes.Equal(got, m1.pub) {
@@ -140,7 +150,7 @@ func setupTransparentRound(t *testing.T, members []member) (keeper.Keeper, sdk.C
 	// Auto-announce enc keys via the vote-extension consume path (no manual registration).
 	ann := make([]keeper.VEEntry, len(members))
 	for i, m := range members {
-		ann[i] = keeper.VEEntry{Operator: m.op, VE: types.VoteExtension{EncPubKey: m.pub}}
+		ann[i] = keeper.VEEntry{Operator: m.op, VE: annVE(m)}
 	}
 	k.ConsumeVoteExtensions(ctx.WithBlockHeight(1), ann)
 	// EndBlocker opens epoch 1 with the transparent member set.
@@ -162,7 +172,7 @@ func buildDealingEntry(t *testing.T, round types.DkgRound, m member) keeper.VEEn
 	if err != nil {
 		t.Fatalf("BuildDealing: %v", err)
 	}
-	return keeper.VEEntry{Operator: m.op, VE: types.VoteExtension{EncPubKey: m.pub, Dealing: d}}
+	return keeper.VEEntry{Operator: m.op, VE: types.VoteExtension{EncPubKey: m.pub, EncPubKeyPoP: encPoP(m), Dealing: d}}
 }
 
 // TestTransparent_DealAndFinalize: dealings ingested from vote extensions finalize into an

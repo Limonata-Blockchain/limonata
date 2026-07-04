@@ -350,6 +350,11 @@ func selectFairDecrypts(matured []types.EncTx, budget int) []bool {
 
 var errNotEnoughShares = errors.New("not enough shares")
 
+// errStakeMinority is returned when a DKG-epoch decrypting set clears the COUNT threshold
+// but the contributing members hold only a stake MINORITY of the committee (HIGH-3). It is
+// treated as a normal (deterministic) decrypt failure, never a halt.
+var errStakeMinority = errors.New("decrypting set holds only a stake minority")
+
 // recoverSharedSecret recovers x*A for an EncTx from the collected keyper shares,
 // choosing the DKG-verified path (epoch > 0) or the legacy path (epoch 0). It
 // returns errNotEnoughShares (with the required count) when < t shares are present.
@@ -362,6 +367,20 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 		need = int(ak.Threshold)
 		if len(shares) < need {
 			return nil, need, errNotEnoughShares
+		}
+		// HIGH-3: reconcile the COUNT threshold with STAKE. The committee seats are stake-ranked,
+		// so a count-majority can be a stake-minority; require the members actually contributing
+		// shares to hold a STRICT MAJORITY of committee stake. A stake-minority Sybil holding a
+		// seat-majority therefore cannot capture on-chain decryption. No-op on the legacy path
+		// (unweighted members => DecryptingSetMeetsStake returns true).
+		if round, ok := k.GetDkgRound(ctx, e.Epoch); ok && len(round.Members) > 0 {
+			present := make(map[uint64]bool, len(shares))
+			for _, s := range shares {
+				present[s.Index] = true
+			}
+			if !DecryptingSetMeetsStake(round.Members, present) {
+				return nil, need, errStakeMinority
+			}
 		}
 		commitments, perr := dkg.ParseCommitmentPoints(ak.PublicCommitments)
 		if perr != nil {

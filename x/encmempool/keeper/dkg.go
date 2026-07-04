@@ -342,8 +342,11 @@ func MembersHash(members []types.RoundMember) []byte {
 	return h.Sum(nil)
 }
 
-// roundThreshold picks t for a round of n members: params.DkgThreshold if it is in
-// [1, n], else the honest majority floor(n/2)+1.
+// roundThreshold picks the COUNT threshold t for a round of n members: params.DkgThreshold
+// if it is in [1, n], else the honest majority floor(n/2)+1. On the STAKE-ranked transparent
+// committee a count threshold alone is not enough (a stake-minority can hold a seat-majority),
+// so the decrypt path additionally gates on a strict stake majority — see DecryptingSetMeetsStake
+// (HIGH-3). t remains a member count because the underlying Shamir scheme is unweighted.
 func roundThreshold(p types.Params, n int) uint32 {
 	if p.DkgThreshold >= 1 && int(p.DkgThreshold) <= n {
 		return p.DkgThreshold

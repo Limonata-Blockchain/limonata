@@ -9,6 +9,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	encmempooldkg "github.com/cosmos/evm/x/encmempool/dkg"
 	"github.com/cosmos/evm/x/encmempool/dkgnode"
 	encmempoolkeeper "github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/threshold"
@@ -36,12 +37,52 @@ import (
 // (protobuf field 0 is invalid), so this cannot collide with a genuine tx.
 var veInjectMarker = []byte("\x00LIMO-DKG-VE\x00")
 
-// veActive reports whether the transparent in-node DKG is switched on (module params).
-// CometBFT-level enablement is detected separately via a non-empty LocalLastCommit / the
-// presence of an injected blob.
+// veActive reports whether the transparent in-node DKG is switched on FOR THIS HEIGHT. It
+// requires BOTH switches: the module params (DkgEnabled && DkgTransparent) AND CometBFT
+// vote extensions active at this height (the consensus param VoteExtensionsEnableHeight).
+//
+// HIGH-1: keying only off the module params (as before) let governance flip DkgTransparent
+// on while vote extensions were not enabled at the CometBFT level. ProcessProposal would then
+// require/self-certify an injected commit whose extension signatures ValidateVoteExtensions
+// cannot validate for a VE-disabled height -> every validator REJECTs -> chain HALT. Coupling
+// veActive to the consensus param EXACTLY as baseapp.ValidateVoteExtensions gates (via
+// VoteExtEnabledAt: enableHeight != 0 && height > enableHeight) makes every handler a strict
+// no-op until VE is genuinely active, so flipping the module param on can never halt.
 func (app *EVMD) veActive(ctx sdk.Context) bool {
 	p := app.EncMempoolKeeper.GetParams(ctx)
-	return p.DkgEnabled && p.DkgTransparent
+	if !p.DkgEnabled || !p.DkgTransparent {
+		return false
+	}
+	cp := app.GetConsensusParams(ctx)
+	if cp.Abci == nil {
+		return false
+	}
+	return encmempooltypes.VoteExtEnabledAt(cp.Abci.VoteExtensionsEnableHeight, ctx.BlockHeight())
+}
+
+// myOperator resolves THIS node's validator operator address for the transparent DKG. It
+// reads the node's consensus address from <home>/config/priv_validator_key.json ONCE
+// (node-local, no consensus obligation), then maps it to the operator via staking (a
+// committed, deterministic read). It returns "" when the node is not a resolvable bonded
+// validator (a full node, or staking not yet aware of it), in which case the node simply
+// does not participate. This is what lets a node self-identify by OPERATOR — its real
+// consensus identity — instead of by a spoofable enc-key match (HIGH-4), and sign an
+// operator-bound proof-of-possession for its announced enc key (HIGH-2).
+func (app *EVMD) myOperator(ctx sdk.Context) string {
+	app.dkgConsAddrOnce.Do(func() {
+		if app.dkgHome == "" {
+			return
+		}
+		app.dkgConsAddr, _ = dkgnode.LoadConsAddress(app.dkgHome)
+	})
+	if len(app.dkgConsAddr) == 0 {
+		return ""
+	}
+	val, err := app.StakingKeeper.GetValidatorByConsAddr(ctx, sdk.ConsAddress(app.dkgConsAddr))
+	if err != nil {
+		return ""
+	}
+	return val.GetOperator()
 }
 
 // encKey lazily loads (or, on first boot, generates+persists) the node's secp256k1 DKG
@@ -69,15 +110,26 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 		if ek == nil {
 			return empty, nil // no key => no participation (never halt)
 		}
+		op := app.myOperator(ctx)
+		if op == "" {
+			return empty, nil // can't resolve our operator => can't self-identify / prove PoP
+		}
 		k := app.EncMempoolKeeper
-		ve := encmempooltypes.VoteExtension{EncPubKey: ek.Pub}
+		// Announce the enc key WITH an operator-bound proof-of-possession (HIGH-2/HIGH-4): the
+		// consume path rejects an announcement whose PoP does not prove we hold this key under
+		// this operator, so a node cannot claim another validator's observed public key.
+		ve := encmempooltypes.VoteExtension{
+			EncPubKey:    ek.Pub,
+			EncPubKeyPoP: encmempooldkg.SignEncKeyPoP(ek.Priv, op),
+		}
 
 		// Dealing for the currently-open round, if I am a member and have not dealt yet.
+		// Self-identify by OPERATOR (not by enc-key match) so a colliding key can't misindex us.
 		if cur := k.GetCurrentEpoch(ctx); cur > 0 {
 			if round, ok := k.GetDkgRound(ctx, cur); ok &&
 				round.Status == encmempooltypes.DkgStatusOpen &&
 				uint64(ctx.BlockHeight()) <= round.DealDeadline {
-				if idx := ek.MyIndex(round.Members); idx != 0 {
+				if idx := encmempooltypes.MemberIndexByOperator(round.Members, op); idx != 0 {
 					if _, dealt := k.GetDealing(ctx, round.Epoch, idx); !dealt {
 						if d, err := dkgnode.BuildDealing(round.Epoch, round.Members, idx, int(round.Threshold)); err == nil {
 							ve.Dealing = d
@@ -88,7 +140,7 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 		}
 
 		// Decryption shares for not-yet-matured ciphertexts I can serve.
-		ve.Shares = app.buildDecryptShares(ctx, ek)
+		ve.Shares = app.buildDecryptShares(ctx, ek, op)
 
 		return &abci.ResponseExtendVote{VoteExtension: encmempooltypes.MarshalVoteExtension(ve)}, nil
 	}
@@ -101,7 +153,7 @@ const maxSharesPerExtension = 256
 // buildDecryptShares produces this node's DLEQ-proved decryption shares for in-flight
 // (not-yet-matured) ciphertexts of epochs it holds a share for. The per-epoch share X_m is
 // derived once from COMMITTED dealings + the epoch's QUAL set, then reused.
-func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey) []encmempooltypes.VoteExtShare {
+func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey, op string) []encmempooltypes.VoteExtShare {
 	k := app.EncMempoolKeeper
 	h := uint64(ctx.BlockHeight())
 	shareByEpoch := map[uint64]*sharedCache{}
@@ -112,7 +164,7 @@ func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey) []encme
 		}
 		sc := shareByEpoch[e.Epoch]
 		if sc == nil {
-			sc = app.deriveEpochShare(ctx, ek, e.Epoch)
+			sc = app.deriveEpochShare(ctx, ek, op, e.Epoch)
 			shareByEpoch[e.Epoch] = sc
 		}
 		if !sc.ok {
@@ -136,13 +188,13 @@ type sharedCache struct {
 	share threshold.Share
 }
 
-func (app *EVMD) deriveEpochShare(ctx sdk.Context, ek *dkgnode.EncKey, epoch uint64) *sharedCache {
+func (app *EVMD) deriveEpochShare(ctx sdk.Context, ek *dkgnode.EncKey, op string, epoch uint64) *sharedCache {
 	k := app.EncMempoolKeeper
 	round, ok := k.GetDkgRound(ctx, epoch)
 	if !ok {
 		return &sharedCache{}
 	}
-	idx := ek.MyIndex(round.Members)
+	idx := encmempooltypes.MemberIndexByOperator(round.Members, op)
 	if idx == 0 {
 		return &sharedCache{}
 	}

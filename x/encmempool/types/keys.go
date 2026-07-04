@@ -60,4 +60,10 @@ var (
 	// (bonded validators that have registered an enc key). Idempotent: only rewritten when
 	// the announced key differs from the stored one.
 	EncPubKeyPrefix = []byte{0x1A} // 0x1A | operatorAddr -> 33-byte compressed secp256k1 pubkey
+	// EncKeyOwnerPrefix is the REVERSE index of EncPubKeyPrefix: it maps an announced enc
+	// pubkey back to the single operator that owns it, so RecordEncPubKey can enforce
+	// CROSS-OPERATOR UNIQUENESS (reject a key already bound to a different operator) in O(1)
+	// without an O(committee) scan. Maintained in lock-step with the forward index: written
+	// on first announce / rotation, deleted when an operator rotates its key. (HIGH-2/HIGH-4.)
+	EncKeyOwnerPrefix = []byte{0x1B} // 0x1B | 33-byte compressed pubkey -> operatorAddr
 )

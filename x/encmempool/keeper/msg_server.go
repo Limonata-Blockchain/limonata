@@ -63,10 +63,24 @@ func (m msgServer) UpdateParams(goCtx context.Context, msg *types.MsgUpdateParam
 	if err := p.Validate(); err != nil {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid params: %v", err)
 	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	// HIGH-1: the TRANSPARENT in-node DKG rides ABCI++ vote extensions, which are governed by
+	// a SEPARATE consensus param (VoteExtensionsEnableHeight). Enabling DkgTransparent while
+	// vote extensions are not scheduled arms a path whose ProcessProposal would later reject
+	// every proposal carrying the injected commit -> chain HALT. Refuse the activation here so
+	// governance MUST schedule vote extensions (a consensus-params update) first. (The runtime
+	// veActive guard is the belt to this suspenders: it also no-ops the handlers until VE is
+	// actually active, so even a genesis misconfig cannot halt.)
+	if p.DkgEnabled && p.DkgTransparent {
+		cp := ctx.ConsensusParams()
+		if cp.Abci == nil || cp.Abci.VoteExtensionsEnableHeight == 0 {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"dkg_transparent requires CometBFT vote extensions to be scheduled first (consensus param vote_extensions_enable_height must be non-zero)")
+		}
+	}
 	if err := m.SetParams(goCtx, p); err != nil {
 		return nil, err
 	}
-	ctx := sdk.UnwrapSDKContext(goCtx)
 	ctx.EventManager().EmitEvent(sdk.NewEvent(
 		"encmempool_params_updated",
 		sdk.NewAttribute("enc_enabled", strconv.FormatBool(p.EncEnabled)),

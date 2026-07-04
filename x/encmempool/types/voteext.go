@@ -42,6 +42,13 @@ type VoteExtension struct {
 	// app.
 	EncPubKey []byte `json:"enc_pubkey,omitempty"`
 
+	// EncPubKeyPoP is a PROOF-OF-POSSESSION for EncPubKey: an ECDSA signature by the enc
+	// PRIVATE key over the announcing operator's identity (see dkg.SignEncKeyPoP). The
+	// consume path verifies it before recording the key, so a node cannot announce a key it
+	// does not control (e.g. a victim's observed public key) — HIGH-2 / HIGH-4. It is bound
+	// to the operator, so it is not replayable by a different validator.
+	EncPubKeyPoP []byte `json:"enc_pubkey_pop,omitempty"`
+
 	// Dealing, when present, is this node's Feldman dealing for the currently-open DKG
 	// epoch (it replaces the MsgDkgDeal tx path).
 	Dealing *VoteExtDealing `json:"dealing,omitempty"`

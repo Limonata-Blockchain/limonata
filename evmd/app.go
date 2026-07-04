@@ -231,6 +231,13 @@ type EVMD struct {
 	dkgEncKeyOnce sync.Once
 	dkgEncKey     *dkgnode.EncKey
 	dkgEncKeyErr  error
+	// dkgConsAddr is this node's consensus address, lazily loaded ONCE from
+	// <home>/config/priv_validator_key.json. It is used to resolve the node's OPERATOR (via
+	// staking) so the node self-identifies in the DKG committee by its real consensus identity
+	// and signs an operator-bound enc-key proof-of-possession — HIGH-2 / HIGH-4. Node-local; a
+	// load failure (e.g. a full node) degrades to non-participation, never a halt.
+	dkgConsAddrOnce sync.Once
+	dkgConsAddr     []byte
 
 	// the module manager
 	ModuleManager      *module.Manager

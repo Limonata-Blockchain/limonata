@@ -26,6 +26,35 @@ import (
 // EncKeyFile is the node-home-relative filename of the persisted DKG enc key.
 const EncKeyFile = "dkg_enc_key.json"
 
+// privValKeyFile is the standard CometBFT path (relative to the node home) of the file
+// carrying the node's consensus key + its derived consensus address.
+const privValKeyFile = "config/priv_validator_key.json"
+
+// LoadConsAddress reads THIS node's consensus address (the 20-byte address CometBFT tags
+// its votes with) from <homeDir>/config/priv_validator_key.json. It is node-local and
+// read-only — it never touches the priv-validator STATE file and never exposes the private
+// key. The transparent DKG uses the returned address to resolve the node's operator (via
+// staking), so the node can self-identify by OPERATOR and bind its enc-key proof-of-
+// possession to that identity. Returns an error when the node has no validator key (a full
+// node), in which case the caller simply does not participate.
+func LoadConsAddress(homeDir string) ([]byte, error) {
+	raw, err := os.ReadFile(filepath.Join(homeDir, privValKeyFile))
+	if err != nil {
+		return nil, err
+	}
+	var rec struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, fmt.Errorf("malformed priv_validator_key.json: %w", err)
+	}
+	addr, err := hex.DecodeString(rec.Address)
+	if err != nil || len(addr) == 0 {
+		return nil, fmt.Errorf("priv_validator_key.json has no valid consensus address")
+	}
+	return addr, nil
+}
+
 type encKeyJSON struct {
 	Priv string `json:"priv"` // hex of the 32-byte secret scalar
 	Pub  string `json:"pub"`  // hex of the 33-byte compressed pubkey (advisory)
@@ -90,9 +119,13 @@ func parseEncKey(raw []byte) (*EncKey, error) {
 }
 
 // MyIndex returns this node's 1-based DKG member index in a round by matching its enc
-// pubkey against the round's member set, or 0 if the node is not a member. This is the
-// "key doubles as self-identifier" mechanism: the node never needs to know its own
-// operator/consensus address to find itself.
+// pubkey against the round's member set, or 0 if the node is not a member.
+//
+// DEPRECATED for self-identification (HIGH-4): matching by enc key is spoofable — a
+// colliding key could misindex and silence an honest member. The live path now
+// self-identifies by OPERATOR (types.MemberIndexByOperator, resolved from the node's
+// consensus address). This method is retained only as a utility / for the regression that
+// documents the difference; do NOT use it to route shares.
 func (e *EncKey) MyIndex(members []types.RoundMember) uint64 {
 	for _, m := range members {
 		if len(m.EncPubKey) == len(e.Pub) && string(m.EncPubKey) == string(e.Pub) {

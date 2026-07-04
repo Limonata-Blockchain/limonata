@@ -18,6 +18,63 @@ scoped fix listed in the GO/NO-GO section. Ship the fixes, re-audit, then it is 
 
 ---
 
+## FIX CYCLE — 2026-07-04 (all 4 HIGH fixed, med/low triaged)
+
+The four HIGH findings are now fixed with minimal, scoped changes; the transparent
+experience, determinism/no-fork contract, and every prior HIGH fix are preserved. Each HIGH
+carries a regression test that was verified to FAIL against the pre-fix source and PASS after.
+`go test -tags test ./x/encmempool/... -count=1` is green; `go vet` + `gofmt` clean; the `evmd`
+binary builds (exit 0).
+
+- **HIGH-1 (halt on misconfig) — FIXED.** `veActive` (`evmd/dkg_voteext.go`) now couples to the
+  consensus param: it is true only when `DkgEnabled && DkgTransparent` AND vote extensions are
+  active at this height (`types.VoteExtEnabledAt(enableHeight, blockHeight)` = `enableHeight!=0 &&
+  height>enableHeight`, mirroring `baseapp.ValidateVoteExtensions` exactly), so no VE handler
+  ever acts — and `ProcessProposal` never self-certifies an un-validatable commit — while VE is
+  inactive. `MsgUpdateParams` additionally REJECTS enabling `DkgTransparent` unless VE is
+  scheduled (`vote_extensions_enable_height != 0`). Regression: `TestReg_H1_*`.
+- **HIGH-2 + HIGH-4 (enc-key impersonation / no uniqueness / self-identifier overload) — FIXED.**
+  `RecordEncPubKey` now requires an operator-bound PROOF-OF-POSSESSION (`dkg.SignEncKeyPoP` /
+  `dkg.VerifyEncKeyPoP` — an ECDSA signature by the enc private key over the operator, so a
+  replayed key+PoP fails under a different operator) and enforces CROSS-OPERATOR UNIQUENESS via a
+  reverse index (`EncKeyOwnerPrefix`). The node self-identifies by OPERATOR
+  (`types.MemberIndexByOperator`, resolved from its consensus address via
+  `dkgnode.LoadConsAddress` + staking) instead of by an enc-key first-match. Regression:
+  `TestReg_H2_*`, `TestReg_H4_*`.
+- **HIGH-3 (count-majority threshold vs stake-ranked seats) — FIXED.** Each `RoundMember` carries
+  its snapshotted STAKE `Weight` (NOT part of `MembersHash`, so stake drift never churns the
+  committee). The decrypt path (`recoverSharedSecret`, DKG epoch>0) now requires the contributing
+  set to hold a STRICT MAJORITY of committee stake (`keeper.DecryptingSetMeetsStake`,
+  overflow-safe `sdkmath.Int`), so a stake-minority Sybil holding a seat-majority can no longer
+  form a valid decrypting set. Legacy/unweighted rounds are unaffected (gate returns true).
+  Regression: `TestReg_H3_*`.
+
+### Med/low triage (this cycle)
+
+FIXED / addressed inline with the HIGH work:
+- PoP verification is panic-safe in the consensus consume path (parse errors → reject, no panic).
+- Enc-key reverse (uniqueness) index is GC'd on key rotation, so no stale owner entries accrue.
+- `RoundMember.Weight` deliberately excluded from `MembersHash` (avoids stake-drift rekey flaps).
+- Stake gate is overflow-safe and a strict no-op on the legacy declared-member path.
+- Idempotent re-announce short-circuits BEFORE PoP verification, so the hot path does no crypto.
+
+DEFERRED (documented, non-blocking):
+- **Injected blob is `Txs[0]`** and relies on the default tx runner's deterministic decode-fail
+  (one wasted "failed tx" slot/block). Bounded + deterministic; a custom skip-runner is a higher
+  halt-risk change — deferred.
+- **Lenient `ProcessProposal`** (a proposer that omits the blob is accepted): a Byzantine
+  proposer can stall DKG *progress* (not fork/halt). Accepted tradeoff for liveness.
+- **`ValidateVoteExtensions` depends on `ctx.CometInfo()/HeaderInfo()`** being populated in
+  ProcessProposal (documented SDK usage; exercised by the 4-node run). Deferred.
+- **Remote-signer / KMS nodes**: self-identity is read from `<home>/config/priv_validator_key.json`;
+  a node whose consensus key lives only in a remote signer (no local key file) cannot resolve its
+  operator and therefore does not participate in the DKG (safe: non-participation, never a halt).
+  Follow-up: allow the operator/consensus address to be supplied via config/flag.
+- **Deferred proof re-runs** (harness, not code): a second full encrypt→decrypt under epoch 2
+  (post-rekey) and a JOIN membership change — to be re-run on the 4-node harness before enabling.
+
+---
+
 ## 1. Design — what "transparent" means and how it is wired
 
 ### The goal
