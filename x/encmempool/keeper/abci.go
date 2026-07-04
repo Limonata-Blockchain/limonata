@@ -86,10 +86,61 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	// 4. Threshold-encryption path (OPT-IN). Decrypt + reveal ciphertexts whose
 	//    decrypt height is now, when >= t keyper shares are present. Fully
 	//    deterministic (identical on every node) — consensus-safe.
+	//
+	//    KILL-SWITCH SAFE-DISABLE: when the path is LIVE we decrypt as usual. When it was
+	//    turned OFF mid-flight (governance flipped EncEnabled/DkgEnabled via MsgUpdateParams)
+	//    but EncTx are still in state, those ciphertexts must NOT strand forever —
+	//    decryptMatured is the only path that removes an EncTx, and it is gated on the path
+	//    being live. SubmitEncrypted already refuses NEW encrypted tx while disabled, so the
+	//    in-flight set is finite; drainDisabledEncTx GC's it via the same bounded-scan +
+	//    releaseEncTx path (releasing every ref-count and pruning the pinned epoch). The
+	//    O(1) count guard keeps this zero-overhead in the default/dormant config.
 	if p.EncEnabled && (p.Threshold > 0 || p.DkgEnabled) {
 		k.decryptMatured(ctx, cur, p)
+	} else if k.GetGlobalEncCount(ctx) > 0 {
+		k.drainDisabledEncTx(ctx, cur, p)
 	}
 	return nil
+}
+
+// drainDisabledEncTx GARBAGE-COLLECTS matured in-flight EncTx when the encrypted path is
+// DISABLED (the governance kill-switch flipped EncEnabled off, or DkgEnabled off with no
+// legacy trusted key to fall back on). Without it, a disable would STRAND every already-
+// submitted ciphertext forever: decryptMatured is the only remover of an EncTx and is gated
+// on the path being live, so a disabled module would never decrypt AND never GC those
+// entries — leaking EncTx state, the global/per-submitter ref-counts, and the pinned
+// per-epoch DkgRound + ActiveThresholdKey indefinitely (a strand + unbounded-state fault).
+//
+// It mirrors decryptMatured's SAFETY INVARIANTS exactly, minus the decrypt attempt:
+//   - BOUNDED SCAN: at most maxDecryptScanPerBlock matured entries per block (O(cap), NOT
+//     O(backlog)) via CollectMaturedUpTo, so even a huge backlog drains over several blocks
+//     without unbounded per-block work — the DROP->DEFER HIGH-fix is preserved.
+//   - CLEAN RELEASE: every entry goes through releaseEncTx (delete EncTx + its shares, dec
+//     the global/per-submitter/epoch ref-counts, maybePruneEpoch), so the HIGH-2 epoch
+//     ref-count invariant is never re-leaked.
+//   - DETERMINISTIC: a pure function of committed state, identical on every node.
+//
+// Only MATURED entries (decrypt_height <= cur) are drained; immature ones are drained on the
+// block they mature. Since no new EncTx are admitted while disabled and DecryptDelay is
+// bounded, the in-flight set fully drains within a bounded number of blocks — no permanent
+// strand. GC (not decrypt) is the correct kill-switch semantics: the module is being turned
+// OFF and the PoC never re-injects decrypted bodies into the EVM, so shedding the in-flight
+// ciphertexts with a loud event is the clean, non-stranding outcome.
+func (k Keeper) drainDisabledEncTx(ctx sdk.Context, cur uint64, _ types.Params) {
+	matured, truncated := k.CollectMaturedUpTo(ctx, cur, maxDecryptScanPerBlock)
+	for _, e := range matured {
+		ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_enc_drained_disabled",
+			sdk.NewAttribute("submitter", e.Submitter),
+			sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+			sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
+			sdk.NewAttribute("height", strconv.FormatUint(cur, 10))))
+		k.releaseEncTx(ctx, e)
+	}
+	if truncated {
+		ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_drain_deferred",
+			sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
+			sdk.NewAttribute("scan_truncated", strconv.FormatBool(truncated))))
+	}
 }
 
 // decryptMatured combines keyper shares to decrypt every EncTx maturing at height

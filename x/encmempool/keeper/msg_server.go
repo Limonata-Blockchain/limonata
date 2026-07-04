@@ -12,6 +12,8 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 
 	"github.com/cosmos/evm/x/encmempool/dkg"
 	"github.com/cosmos/evm/x/encmempool/threshold"
@@ -24,6 +26,54 @@ type msgServer struct{ Keeper }
 func NewMsgServerImpl(k Keeper) types.MsgServer { return &msgServer{Keeper: k} }
 
 var _ types.MsgServer = msgServer{}
+
+// UpdateParams is the governance KILL-SWITCH for x/encmempool. It atomically REPLACES
+// the module params, letting the gov authority toggle DkgEnabled / EncEnabled (and the
+// safety-bounded DKG params) so that activating the dormant encrypted-mempool / validator
+// DKG is REVERSIBLE by a vote — a bad activation can be turned back OFF without another
+// coordinated chain upgrade (the module previously had NO params-mutation path at all, so
+// activation was a one-way door).
+//
+// SAFETY:
+//   - AUTHORITY-GATED: only the x/gov module account may call it (mirrors x/valgrant);
+//     any other signer is rejected with ErrUnauthorized. The runtime gov module address
+//     is compared directly, so no keeper/app.go re-wiring of an authority is required.
+//   - FULLY VALIDATED: the replacement params must pass the SAME Params.Validate (which
+//     calls ValidateDkgWindows) used at genesis — bounding DecryptDelay / thresholds /
+//     DKG windows / ceilings and requiring a well-formed member/keyper set whenever
+//     EncEnabled or DkgEnabled is true. An update that could strand EncTx state or panic
+//     BeginBlock/EndBlock is rejected BEFORE it is written; the current params are left
+//     untouched on any error.
+//   - SAFE DISABLE: flipping EncEnabled=false or DkgEnabled=false stops new DKG rounds /
+//     new encrypted-tx admission; already-in-flight EncTx are drained cleanly by
+//     BeginBlock (decrypted if a key path is still live, else GC'd via releaseEncTx +
+//     maybePruneEpoch), so no in-flight ciphertext is stranded and consensus never halts.
+//     Re-enabling opens a fresh round via the existing EndBlock DKG state machine.
+func (m msgServer) UpdateParams(goCtx context.Context, msg *types.MsgUpdateParams) (*types.MsgUpdateParamsResponse, error) {
+	govAddr := authtypes.NewModuleAddress(govtypes.ModuleName).String()
+	if msg.Authority != govAddr {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "expected gov authority %s, got %s", govAddr, msg.Authority)
+	}
+	// params carries the JSON encoding of types.Params (the module stores params as
+	// JSON-in-store, not proto). Decode then FULLY validate before writing.
+	var p types.Params
+	if err := json.Unmarshal(msg.Params, &p); err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid params json: %v", err)
+	}
+	if err := p.Validate(); err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid params: %v", err)
+	}
+	if err := m.SetParams(goCtx, p); err != nil {
+		return nil, err
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_params_updated",
+		sdk.NewAttribute("enc_enabled", strconv.FormatBool(p.EncEnabled)),
+		sdk.NewAttribute("dkg_enabled", strconv.FormatBool(p.DkgEnabled)),
+	))
+	return &types.MsgUpdateParamsResponse{}, nil
+}
 
 // CommitTx records a hash-commitment at the current block height. It emits no
 // transaction content (only the commitment hash is stored).
