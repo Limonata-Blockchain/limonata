@@ -1,204 +1,179 @@
 # x/encmempool on-chain validator DKG — integration status
 
-**Date:** 2026-07-03
-**Branch:** `limonata-dkg-integration` (HEAD `1456bd52`)
+**Date:** 2026-07-04
+**Branch:** `limonata-dkg-integration` (HEAD `d9e12408` — HIGH-1/HIGH-2 fix pass)
 **Target:** conditional merge into `limonata-v030-release`
 **Decision:** **NO-GO. Not merged into v0.3.0.**
-**Evidence gate:** **NOT PASSED** (2 unresolved HIGH audit findings; multi-node deploy verdict is conditional, not unconditional).
+**Evidence gate:** **NOT PASSED** — one HIGH audit finding SURVIVES the fix pass (an
+unbounded-state HIGH-2 *variant* via the member-change / ActiveThresholdKey path).
 
-This document is the honest, evidence-based record of the hardening pass, the real
-multi-node proof, the re-audit, and the merge decision. It supersedes the informal
-single-node PoC result.
+This document supersedes the `1456bd52` NO-GO record. It records the fix pass, the real
+4-node re-proof, the re-audit, and the (still) NO-GO merge decision.
 
 ---
 
 ## TL;DR
 
-The DKG integration is **genuinely good engineering that is not yet safe to ship to 14
-independent validators.** The determinism held perfectly across independent nodes, the
-self-healing auto-retry works, and the real-time daemon fixed the original deal-window
-race. But an adversarial re-audit found **two HIGH-severity defects that are reachable by
-a single Byzantine validator**, and the multi-node test did **not** cleanly prove the one
-scenario that 14 equal-power validators will actually exercise (a rekey concurrent with a
->2/3 validator-set rotation). Both HIGH findings are reproduced by passing probe tests in
-the tree. Shipping this into v0.3.0 now would put a validator-triggerable liveness DoS
-into a release.
-
-**Merge is gated on fixing the two HIGH findings and re-running the equal-power rekey
-proof — not on more caution.**
+The fix pass is strong and moved the needle: **HIGH-1 is fixed**, the **originally-filed
+HIGH-2 (failed-round retry path) is fixed**, and a real 4-node equal-power re-proof passed
+all five PROVE properties with zero app-hash divergence and both original HIGHs confirmed
+dead live. **But the re-audit found that HIGH-2 was only half-closed.** The same
+unbounded-state class survives through the *other* state-growth path — legitimate/induced
+**member changes** — which retain the superseded epoch's `DkgRound` record AND leak a
+never-deleted `ActiveThresholdKey`, and additionally reset the retry backoff. There is no
+delete of an `ActiveThresholdKey` **anywhere** in the module. That is a surviving
+validator-inducible unbounded-state HIGH, so the gate does **not** pass and the DKG is
+**not** merged into v0.3.0. The v0.3.0 release dir was **not touched**.
 
 ---
 
-## What was hardened (and it works)
+## Fix pass — what got fixed (verified)
 
-Committed on `limonata-dkg-integration` as `Limonata <noreply@limonata.xyz>`
-(commit `1456bd52`, no Claude attribution). `go build ./cmd/evmd` => exit 0;
-`go vet` clean; all module tests pass.
+Committed on `limonata-dkg-integration` as `Limonata <noreply@limonata.xyz>` (commit
+`d9e12408`, no Claude attribution). `go build ./cmd/evmd` => exit 0; `go vet` + `gofmt`
+clean; `go test ./x/encmempool/...` passes.
 
-1. **Self-healing auto-retry (PRIORITY 1).** `keeper/endblock.go` `EndBlockDKG` now marks
-   a round that finalizes with `|QUAL| < t` (or times out with too few deals) as `Failed`
-   and automatically opens a fresh round (new epoch, reset deadlines, incremented
-   `Attempt`) after a bounded backoff (`DkgRetryBackoff`, >= 1 block enforced). A single
-   timing hiccup or transient member outage can no longer wedge the feature permanently.
-   Membership change takes priority over retry. Tests: `TestOnChainDKG_AutoRetryOnFailedRound`,
-   `TestOnChainDKG_RetryPurgesStaleDeals`.
+- **HIGH-1 (FIXED).** `DkgDeal` now validates EVERY enc-share field at ingress and rejects
+  the whole dealing if any is malformed: each Feldman commitment must parse as a compressed
+  on-curve secp256k1 point (`dkg.ParseCommitmentPoints`), each enc-share `A` must be a valid
+  compressed point (`dkg.ValidCompressedPoint`), each nonce must be exactly
+  `threshold.NonceSize`, body non-empty — so a bad dealing can never enter QUAL.
+  Defense-in-depth: `VerifyJustifiedComplaint` now treats a structurally-unopenable
+  enc-share as a public, unframeable, justify-disqualifiable fault (`cheated=true,
+  proofValid=true`). Regression probes in `dkg_soundness_probe_test.go`
+  (`RejectedAtIngress`, `JustifyDisqualifiable` unit+e2e, `LivenessPreserved`) verified to
+  FAIL pre-fix. **Re-audit: closed. Confirmed dead live on 4 nodes (malformed A / nonce /
+  commitment deals rejected at ingress, code 18; finalized key correct on all nodes).**
 
-2. **Real-time daemon + realistic windows (PRIORITY 2).** The dkg daemon
-   (`evmd/cmd/evmd/cmd/dkg.go`) was refactored from a poll-lookback per-block scan (which
-   fell behind the deal window in the single-node PoC — original gap #1) to a websocket
-   `NewBlock` subscription that reacts the instant a round opens, with a periodic ticker as
-   a self-healing fallback. Default windows resized for a ~2s-block p2p net:
-   `DkgDealWindow` 5->20, `DkgComplaintWindow` 3->10, `DkgRetryBackoff`=5, `DkgMaxAttempts`=8
-   (all governance-tunable).
+- **HIGH-2, failed-round path (FIXED).** `purgeRoundData` split into `purgeDealings`
+  (deal/complaint bulk only) and `purgeFailedRound` (also deletes the `DkgRound` record);
+  the auto-retry branch now calls `purgeFailedRound`, bounding retained failed-round state
+  to O(1) under a sustained sub-quorum. Capped geometric backoff (`retryBackoff`, ceiling
+  `dkgBackoffCeilingBlocks=1000`) added; `CountDkgRounds` added.
+  `TestOnChainDKG_SustainedSubQuorumBoundedAndRecovers` asserts record count stays <=2
+  across ~16 retries then recovers; verified to FAIL pre-fix (peak=16). **Re-audit: this
+  specific (failed-round) path is closed and confirmed bounded live (failed epochs 9–11
+  purged on retry).**
 
-3. **Determinism audited + locked (PRIORITY 3).** EndBlock finalize + BeginBlock decrypt
-   are byte-identical across nodes: sorted store-key iteration, Go maps used only for
-   lookup/dedup, QUAL built in sorted order, no wall-clock, no randomness. Test:
-   `TestOnChainDKG_FinalizeDeterministic` (two keepers, reversed insertion order, identical
-   Pub / PublicCommitments / QUAL / Threshold).
-
-4. **Ingress + BeginBlock consensus-safety hardening** folded in: reject wrong-length GCM
-   nonce at submit; recover-guard the decrypt path so a malformed permissionless ciphertext
-   cannot halt consensus.
-
----
-
-## Multi-node proof (real p2p, independent nodes)
-
-**Result: worked, rough, no divergence — but deploy is CONDITIONAL.**
-
-Genuinely proven on a real 4-node p2p network (independent nodes, independent daemons on
-independent RPCs/websockets):
-
-- All 4 nodes independently computed **byte-identical `ThresholdPub`s and byte-identical
-  app hashes** through a first round, two rekeys, and two forced round failures — **never a
-  fork or divergence.**
-- The real-time daemon landed all 4 deals inside the deal window, so **epoch 1 finalized on
-  the FIRST attempt** — the original gap #1 failure did not recur.
-- The self-healing auto-retry **recovered a sub-threshold round with no manual
-  intervention** (epochs reopened attempt 1->2->3 until the crashed daemon returned and it
-  converged).
-- Encrypt->decrypt round-tripped the exact plaintext identically on every node via the
-  DLEQ-verified path.
-
-**Three reasons it is NOT unconditionally production-ready for 14 equal validators:**
-
-1. **Rekey touches base-layer accounting and CAN halt the chain if misconfigured.** A
-   deterministic all-node halt was hit from `x/distribution` when `unbonding_time` was
-   pathologically short. It is not the DKG code and won't occur with a normal
-   `unbonding_time`, but it proves member-set changes must be validated against
-   distribution/slashing behavior for exiting validators before mainnet.
-2. **The clean rekey proof used a DOMINANT node0 (>2/3 power)** to sidestep the small-set
-   quorum knife-edge. Equal-power 4-way block production was demonstrated separately, but a
-   rekey **under equal power with the member-change round running concurrently with a real
-   >2/3 validator-set transition** — exactly what 14 equal validators do — was **not**
-   cleanly demonstrated. This must be re-run before trusting it at 14 nodes.
-3. Gaps #4 (EVM re-injection) and #5 (enc-key derivation) are untouched by design — see
-   below.
+- **Triage (cheap/adjacent, FIXED):** member_change purges the superseded epoch's dealing
+  bulk; complaint window floored >=1 (`max64`); saturating deadline arithmetic (`addSat`)
+  guards overflow; `EndBlockDKG` wrapped in a deterministic panic-guard (recover -> event,
+  no chain halt); `decryptMatured` bounds crypto work at `maxDecryptAttemptsPerBlock=2048`,
+  GCing overflow with an event.
 
 ---
 
-## Re-audit findings
+## Multi-node re-proof (real 4-node p2p, equal power)
 
-13 findings total. **2 HIGH, 0 CRITICAL.** Both HIGH findings are reproduced by passing
-probe tests in `x/encmempool/keeper/` (`dkg_probe_test.go`, `dkg_probe2_test.go`,
-`dkg_soundness_probe_test.go`) — i.e. they are demonstrated, not hypothetical.
+**Result: worked, no divergence, both ORIGINAL highs dead — verdict GO for those two.**
 
-### HIGH-1 — Malformed enc-share `A` is accepted at ingress and is structurally uncomplainable (validator-triggerable keyless-liveness DoS)
+Re-proof succeeded on a realistic 4-node equal-power (100 each) p2p network with normal
+unbonding (`1814400s`). All 5 PROVE properties passed with raw evidence: (1) identical
+app-hash network formed; (2) DKG finalized to the SAME pub on all 4, no master secret on
+chain; (3) encrypt->decrypt identical on all 4; (4) member-change rekey produced a NEW
+independent key identical across nodes, and a 2-of-4 rotation under normal unbonding caused
+NO `x/distribution` halt; (5) auto-retry recovered a forced sub-quorum failure with state
+that stayed strictly bounded. App-hash identical across all 4 nodes at 16 heights spanning
+the run — zero divergence, zero halts.
 
-- **Where:** `keeper/msg_server.go:267` (DkgDeal enc-share validation only checks
-  `len(A)!=0`, never that `A` parses as a compressed secp256k1 point) →
-  `dkg/onchain.go:235` / `dkg/proof.go:82` (`VerifyJustifiedComplaint` →
-  `VerifyDecryptShare` calls `parsePoint(A)` FIRST and returns false on a malformed point)
-  → `dkg/onchain.go:87` (`FinalizePublic` keeps the dealer in QUAL — it only checks
-  commitments) → `keeper/endblock.go:85` (no retry once the round is Active).
-- **Attack:** one Byzantine validator publishes VALID Feldman commitments (passes the QUAL
-  gate) but seals every other member an enc-share whose `A` is a non-empty but invalid
-  point. Victims cannot derive their share (ComputeShare parses `A`) **and cannot complain**
-  (the complaint-verification path parses `A` first and rejects the complaint as a framing
-  attempt). The dealer stays in QUAL, poisoning every honest member's final share, while the
-  round finalizes Active with no auto-retry. **One malicious member => permanent keyless
-  liveness DoS for the epoch, with no on-chain recovery** until an unrelated member-set
-  change.
-- **Probe:** `TestProbe_MalformedEncShareA_Uncomplainable`,
-  `TestProbe_MalformedEncShareA_BreaksDecryption`,
-  `TestProbe_MalformedEncShareA_CryptoRootCause` (all passing = defect present).
-- **Fix direction:** validate `A` (and every enc-share field) as a well-formed compressed
-  point at DkgDeal ingress, so a malformed dealing is rejected before it can enter QUAL;
-  OR make the complaint path able to justify-disqualify a structurally-unopenable share.
-
-### HIGH-2 — Unbounded `DkgRound` state growth under a sustained sub-quorum
-
-- **Where:** `keeper/endblock.go:85-107` (retry branch never hard-stops — past
-  `DkgMaxAttempts` it emits `encmempool_dkg_stalled` but KEEPS reopening a new epoch) +
-  `keeper/dkg.go:31,89-108` (`purgeRoundData` deletes deal/complaint keys but
-  **deliberately retains the per-epoch `DkgRound` record** "for history/telemetry").
-- **Consequence:** while fewer than `t` members are live, the EndBlocker opens a new epoch
-  every `DkgRetryBackoff` blocks forever, and each leaves a permanent `DkgRound` record
-  (which carries the full member list + enc keys). At 2s blocks / backoff 5 that is one
-  retained record every ~10s of outage — unbounded, griefable state bloat.
-- **Fix direction:** cap retained history (ring buffer of the last N failed rounds) or GC
-  the `DkgRound` record on retry, and/or apply a real backoff ceiling.
-
-### The other 11 (medium/low)
-
-Not merge-blocking on their own but should be triaged alongside the HIGH fixes before the
-feature is enabled in production.
+Residual note the re-proof itself flagged **by design**: *superseded ACTIVE-epoch
+`DkgRound` records are retained and grow with member changes.* The re-proof treated this as
+acceptable ("grows only with legitimate member changes"). **The re-audit disagrees** — see
+the surviving HIGH below.
 
 ---
 
-## Deferred gaps (documented, not regressions)
+## Re-audit — 14 findings, **one SURVIVING HIGH (merge-blocker)**, 0 critical
 
-- **Gap #4 — EVM re-injection.** Decrypted plaintext is still emitted as an EVENT, not
-  re-injected into x/vm execution. Documented in `keeper/abci.go`. This is a
-  threshold-decryption / anti-MEV delay primitive, not yet end-to-end encrypted EVM
-  execution.
-- **Gap #5 — member enc-key derivation.** Member enc keys are genesis-declared, not derived
-  from validator keys. Consensus keys are ed25519 (wrong curve for the secp256k1 ECIES);
-  derivation needs the operator account's eth_secp256k1 pubkey + an AccountKeeper wiring.
-  Documented in `types/types.go`.
+### SURVIVING HIGH — HIGH-2 variant: member-change / ActiveThresholdKey unbounded state (+ backoff reset)
+
+- **Where (verified in tree, HEAD `d9e12408`):**
+  - `keeper/endblock.go:108-114` — the `member_change` branch calls `purgeDealings(cur)`
+    (drops dealing/complaint bulk but **KEEPS** the `DkgRound` record) then
+    `openRound(..., attempt=1, "member_change")`.
+  - `keeper/dkg.go:83-110` — `purgeDealings` **deliberately retains** the `DkgRound`
+    record. The only path that deletes a record is `purgeFailedRound` (`dkg.go:123-126`),
+    which is called **only** from the retry branch (`endblock.go:139`). No ACTIVE-epoch
+    record is ever GC'd.
+  - **No `ActiveThresholdKey` delete exists anywhere in the module.** Grep of
+    `x/encmempool/**` for any delete/prune of `ActiveThresholdKey` returns nothing; only
+    `SetActiveKey` (`dkg.go:160`) and `GetActiveKey` (`dkg.go:164`) exist. Every successful
+    rekey writes a new `ActiveThresholdKey` at the new epoch and none is ever reclaimed.
+- **Why it is a HIGH, not "by design":**
+  1. **Monotonic unbounded growth with no prune-on-mature.** ACTIVE-epoch records are only
+     needed to authorize decryption shares for in-flight ciphertexts stamped with that
+     epoch. Those ciphertexts have a bounded reveal horizon and are consumed by BeginBlock
+     `decryptMatured`. Once an old epoch has zero pending ciphertexts, its `DkgRound` record
+     **and** its `ActiveThresholdKey` are dead weight — but nothing reference-counts or
+     prunes them. State grows O(total successful rekeys over chain lifetime), forever.
+  2. **Inducible, not merely "legitimate."** `ActiveMembers` (`dkg.go:206`) is
+     `IterateBondedValidatorsByPower` ∩ `p.DkgMembers`, and the re-key trigger is a change
+     in `MembersHash`. A declared member flapping its bonded status (bond/unbond, or
+     crossing the bonded-set boundary) induces a member_change **each time** — so the growth
+     is griefable, not bounded by honest churn.
+  3. **Backoff reset.** `member_change` opens `attempt=1`, resetting the HIGH-2 geometric
+     backoff. An attacker who flaps membership both bloats state and defeats the retry
+     backoff ceiling that HIGH-2 added for the failed path.
+- **Net:** the fix closed the *failed-round* unbounded-state path but left the
+  *active-epoch/member-change* unbounded-state path (plus a never-deleted `ActiveThresholdKey`
+  and a griefable backoff reset) open. Same HIGH-2 class, different door. **Merge-blocking.**
+
+### The other 13 (medium/low)
+
+Not merge-blocking on their own; several cheap ones were fixed in this pass (see Triage).
+The remainder (infinity-aggregate stuck key from 2 colluding dealers; Gap #4 EVM
+re-injection; Gap #5 enc-key derivation; base-layer exiting-validator lookup review) are
+documented as deferred, out of the minimal fix scope.
+
+---
+
+## Remaining fix to flip the gate to GO
+
+1. **Prune superseded ACTIVE-epoch state.** Add reference-counted / prune-on-mature GC:
+   track pending EncTx/EncShare count per epoch (or scan at maturation) and, once a
+   superseded epoch has **zero** pending ciphertexts, delete BOTH `dkgRoundKey(epoch)` AND
+   its `ActiveThresholdKey(epoch)`. Add the missing `DeleteActiveKey`. Alternatively
+   ring-buffer the last N ACTIVE epochs and refuse to prune any epoch still referenced by a
+   pending ciphertext (safe — reveal horizon is bounded). Must preserve in-flight-ciphertext
+   share authorization for any epoch that still has pending ciphertexts.
+2. **Do not let an induced member-change flap reset the backoff or force unbounded fresh
+   rounds.** Carry/dampen the backoff across member-change churn, or rate-limit re-genesis so
+   membership flapping cannot reset the backoff and cannot mint unbounded retained rounds —
+   while still rekeying promptly on a genuine, settled member change (preserve liveness).
+3. **Extend the HIGH-2 bounded-state probe to the MEMBER_CHANGE path:** many induced rekeys
+   => retained `DkgRound` record count AND `ActiveThresholdKey` count must stay
+   O(pending-epochs), not O(total rekeys). Verify it FAILS pre-fix.
+4. Then a **fresh 4-node re-proof + re-audit**. Only if that audit returns no surviving
+   critical/high does the gate pass.
 
 ---
 
 ## Build / test evidence
 
-- `cd evmd && go build -o <scratch> ./cmd/evmd` => **exit 0**
-- `go test ./x/encmempool/dkg/` => **ok**
-- `go test ./x/encmempool/threshold/` => **ok**
-- `go test ./x/encmempool/keeper/` => **ok** (includes the auto-retry/determinism tests and
-  the HIGH-finding probe tests)
-- Live chain (pre-existing, pid on 26657/8545) never touched, still advancing during this
-  work (711790+). No throwaway chain started; no new listeners created.
+- `go build ./cmd/evmd` => **exit 0**; `go vet` + `gofmt` clean.
+- `go test ./x/encmempool/...` => **ok** (auto-retry, determinism, soundness, and
+  bounded-state probes). NOTE: the passing suite does **not** yet cover the surviving
+  member-change unbounded-state path — that probe is item 3 above and does not exist yet.
+- Live chain never touched; no throwaway listeners left; v0.3.0 release dir NOT touched.
 
 ---
 
-## Safe-default note
+## Safe-default note (informational — NOT a substitute for the fix)
 
-`DefaultParams` ships `DkgEnabled: false` (`types/types.go:179`). Even if the integration
-source were present in a binary, the DKG state machine, daemon message handlers, and the new
-EndBlocker are all gated behind `DkgEnabled` and are inert until governance flips it on with
-a declared `DkgMembers` set. That is the correct posture — but it is not a substitute for
-fixing HIGH-1 before the feature is ever enabled on a chain with untrusted validators.
+`DefaultParams` ships `DkgEnabled: false`. The DKG state machine, daemon handlers, and the
+new EndBlocker are inert until governance flips it on with a declared `DkgMembers` set. That
+is the correct ship posture, and it is why the surviving HIGH is not an *active* risk to a
+v0.3.0 that ships it dormant. It is **not**, however, grounds to merge with a known
+unbounded-state HIGH still open: the gate rule is "no surviving critical/high," and one
+survives. Merge only after the fix + fresh re-proof + clean re-audit.
 
 ---
 
 ## Go / No-Go
 
-**NO-GO for v0.3.0 right now.** The gate did not pass: two HIGH findings reachable by a
-single Byzantine validator, and the one multi-node scenario that matches the 14-equal-
-validator production config was not cleanly proven.
-
-### Merge checklist (what must be true to flip this to GO)
-
-1. Fix **HIGH-1** (validate enc-share `A`/fields as well-formed points at DkgDeal ingress,
-   or make a structurally-unopenable share justify-disqualifiable) — and keep the probe test
-   as a passing regression that now asserts the dealing is rejected / the dealer is dropped.
-2. Fix **HIGH-2** (bound retained `DkgRound` history / GC on retry / backoff ceiling).
-3. Re-run the multi-node suite with **EQUAL validator power** and **normal `unbonding_time`**
-   to confirm no halt when a member-change coincides with a >2/3 validator-set rotation.
-4. Add a targeted guard/review for base-layer lookups of exiting validators during a rekey.
-5. Then either close gaps #4/#5 or ship them explicitly documented as deferred, with
-   `DkgEnabled=false` at genesis and a documented governance-enable procedure.
-
-Only after 1–4 should the DKG source be merged into `limonata-v030-release` and the release
-tar regenerated.
+**NO-GO for v0.3.0.** Gate NOT PASSED: one surviving HIGH (member-change /
+`ActiveThresholdKey` unbounded state + backoff reset). HIGH-1 and the failed-round HIGH-2
+are genuinely fixed and the 4-node re-proof is clean, but the code's verdict is that the
+unbounded-state class is not fully closed. Fix item 1–3 above, re-prove on 4 equal-power
+nodes, re-audit; merge into `limonata-v030-release` (with `DkgEnabled=false` at genesis)
+only when the re-audit shows no surviving critical/high.
