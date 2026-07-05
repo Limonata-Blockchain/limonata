@@ -13,6 +13,40 @@ env-gated ExtendVote adversary harness for the live multi-ciphertext + compute-D
 
 ## VERDICT: `AUDIT_CLEAN = NO` — **NO-GO to ENABLE** (dormant-by-default MERGE still safe; external audit still required regardless)
 
+> ⚠️ **VERDICT CORRECTION (adversarial re-audit, post-doer 2026-07-05).** The overall `AUDIT_CLEAN = NO`
+> stands, but **two specific doer claims below are WRONG and are corrected here:**
+>
+> 1. **"HIGH-T CLOSED" is only true for near-BALANCED committees — HIGH-T is NOT closed on Limonata's
+>    real topology.** Cycle-9 re-keyed the *consumer* verify budget per-`(operator,ciphertext)` but left
+>    the *supply* side untouched: `buildDecryptShares` caps a member's TOTAL emitted shares/block at
+>    `shareCap = max(256,S)` (`evmd/dkg_voteext.go:171,183,198`) and dumps a member's whole owned-point
+>    set on the oldest ciphertext first. A member owning `P` eval points can therefore fully serve only
+>    `floor(shareCap/P)` ciphertexts/block. Eval-point allocation has **no max cap** and explicitly lets
+>    a whale own `≥ t` points and "decrypt alone" (`stakeweight.go:54-57`) — and **Limonata runs a ~70%-VP
+>    validator**. For such a whale `P > shareCap/2` so it is threshold-critical AND `floor(shareCap/P) ≈ 1`:
+>    honest decrypt drains ~1 ciphertext/block and grace-critical honest ciphertexts STILL STRAND under a
+>    multi-ciphertext backlog. All cycle-9 evidence used *balanced* committees (8 equal nodes; probe capped
+>    at 30 cts to stay under its own supply ceiling), so none could surface skew. HIGH-T survives on the
+>    real topology.
+> 2. **HIGH-U is UNDER-SIZED and is halt-class, not "bounded / recovers / not a halt".** (a) Each verify is
+>    `O(t)` EC ops (`SharePubKey` evaluates the degree-`(t-1)` commitment, `voteext.go:791`), so the true
+>    per-block ceiling is `O(cap·S·t) = O(cap·S²)`, not `O(cap·S)` — ~5.3M EC ops/block at default `S=256`,
+>    and **`EffectiveShareBudget` is governance-tunable up to `maxDkgShareBudget=2048`** (`types.go:578,653`),
+>    where the ceiling is ~3.6e8 EC ops/block → **minutes-long `FinalizeBlock` = a practical HALT at a VALID
+>    governance config.** (b) It is **sustainable / non-recovering:** there is NO per-block ciphertext
+>    admission rate limit (only standing-inventory ceilings `MaxInFlightEncTx=32768` /
+>    `MaxInFlightPerSubmitter=2048`, `types.go:387`), so one gas-paying submitter refills the oldest-128
+>    processed window every block and pins `FinalizeBlock` at its peak (~10 s on the current small set)
+>    indefinitely. The "recovery" the doer observed only happened because its harness attacker STOPPED.
+>
+> **Root remediation for BOTH HIGH-T-skew and HIGH-U is a DESIGN change, not another sizing/audit cycle:**
+> a per-block ciphertext-admission rate limit + a fair share-SUPPLY scheduler that emits only the marginal
+> points needed per ciphertext and guarantees the oldest grace-critical ciphertexts reach threshold coverage
+> independent of stake skew, bounding cross-ciphertext work to a small constant. Together with the carried
+> structural HIGH-2/HIGH-3 (byzantine QUAL dealer bricks an epoch; no complaint/justify round), the DKG's
+> remaining work is DESIGN + implementation, which is why (Jason, 2026-07-05) we STOP the DKG audit loop
+> here and pivot to designing the complaint round + admission/scheduler. Dormant merge stays safe.
+
 The cycle-9 fix **genuinely closes HIGH-T** — the cycle-8 honest-throughput / forced-strand regression.
 Cycle-8 keyed the per-operator ingest DLEQ-verify budget by **`(operator, EPOCH)`**, but a decryption
 share is **per-CIPHERTEXT** (`D = x·A`, bound to the ciphertext ephemeral `A`), so with `C` in-flight
