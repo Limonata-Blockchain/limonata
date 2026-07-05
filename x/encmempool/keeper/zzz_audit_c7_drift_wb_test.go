@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Limonata. Source-available under the Business Source License 1.1
+// (see LICENSE.dkg at the repository root). NOT licensed under Apache-2.0 - this file is a
+// separately-licensed part of the Limonata transparent-DKG / encrypted-mempool work.
+
 package keeper
 
 // CYCLE-7 ADVERSARIAL AUDIT — lens: STAKE-DRIFT / REKEY (white-box).
