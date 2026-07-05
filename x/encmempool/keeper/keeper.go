@@ -340,6 +340,16 @@ func (k Keeper) CollectShares(ctx context.Context, h, seq uint64) []types.EncSha
 	return out
 }
 
+// hasEncShareAt reports whether a decryption share is ALREADY stored at the exact eval-point slot
+// (decryptHeight, seq, index). It is an O(1) point lookup (encShareKey is keyed by the eval-point
+// index, and a point is owned by exactly one member), so it backs the first-wins share dedup on the
+// hot vote-extension ingest path WITHOUT the O(S) allocate-and-scan of CollectShares — the cheap
+// pre-check the cycle-8 verify bound relies on to short-circuit a re-sent share before any DLEQ work.
+func (k Keeper) hasEncShareAt(ctx context.Context, decryptHeight, seq, index uint64) bool {
+	bz, err := k.store(ctx).Get(encShareKey(decryptHeight, seq, index))
+	return err == nil && bz != nil
+}
+
 // --- iteration (genesis export + BeginBlock); keys are pre-sorted big-endian ---
 
 func (k Keeper) IterateCommits(ctx context.Context, fn func(types.Commit)) {

@@ -251,21 +251,52 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 // ---- VerifyVoteExtension: lenient structural check (heavy validation is on-chain) ----
 
 func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler {
-	return func(_ sdk.Context, req *abci.RequestVerifyVoteExtension) (*abci.ResponseVerifyVoteExtension, error) {
+	return func(ctx sdk.Context, req *abci.RequestVerifyVoteExtension) (*abci.ResponseVerifyVoteExtension, error) {
 		accept := &abci.ResponseVerifyVoteExtension{Status: abci.ResponseVerifyVoteExtension_ACCEPT}
 		reject := &abci.ResponseVerifyVoteExtension{Status: abci.ResponseVerifyVoteExtension_REJECT}
 		if len(req.VoteExtension) == 0 {
 			return accept, nil // a non-participating node is fine
 		}
 		if len(req.VoteExtension) > encmempooltypes.VoteExtMaxBytes {
-			return reject, nil // oversized: refuse (bounds block size)
+			return reject, nil // oversized: refuse (bounds block size — preserves VE <= 1 MiB)
 		}
-		if _, ok := encmempooltypes.UnmarshalVoteExtension(req.VoteExtension); !ok {
+		ve, ok := encmempooltypes.UnmarshalVoteExtension(req.VoteExtension)
+		if !ok {
 			return reject, nil // undecodable: refuse
 		}
-		// Everything else (crypto validity, membership, dedup) is enforced deterministically
-		// on-chain in ProcessProposal + PreBlock, so accept structurally-valid extensions
-		// generously — an honest node's extension always passes, preserving liveness.
+		// CYCLE-8 SHARE-COUNT CAPS (HIGH-A/HIGH-B, defense-in-depth ahead of the authoritative PreBlock
+		// bound): bytes-only bounding let one member pack a 1-MiB extension with THOUSANDS of decryption
+		// shares, each an O(t) DLEQ verification on the PreBlock consensus path — a halt-class stall. Two
+		// honest-safe structural caps let a peer refuse a padded extension EARLY, before it is ever
+		// injected/consumed:
+		//   PER-VE:  an honest extension carries at most VoteExtShareCap == max(256, S) shares total (the
+		//            exact cap buildDecryptShares stops at), so a larger count is padding.
+		//   PER-CIPHERTEXT: an operator owns at most S eval points, so it can owe at most S shares for any
+		//            one (decryptHeight, seq); more than S at a single ciphertext is padding. Using S (the
+		//            budget upper-bounds every operator's owned-point count) keeps this a pure param check
+		//            that never needs the round, so it can NEVER drop an honest vote.
+		// Both are non-binding LOCAL filters — the DETERMINISTIC, authoritative bound (per-VE cap +
+		// per-(operator,epoch) verify budget == owned points + within-block dedup + global O(S) ceiling)
+		// is enforced in the keeper's ConsumeVoteExtensions/ingestDecryptSharesBounded. Params are committed
+		// consensus state (GetParams falls back to defaults), so both caps are deterministic per height.
+		p := app.EncMempoolKeeper.GetParams(ctx)
+		if len(ve.Shares) > p.VoteExtShareCap() {
+			return reject, nil
+		}
+		perCiphertext := p.EffectiveShareBudget() // S: the max eval points any single operator can own
+		if len(ve.Shares) > perCiphertext {
+			perCt := make(map[[2]uint64]int, len(ve.Shares))
+			for i := range ve.Shares {
+				k := [2]uint64{ve.Shares[i].DecryptHeight, ve.Shares[i].Seq}
+				perCt[k]++
+				if perCt[k] > perCiphertext {
+					return reject, nil // > S shares at one ciphertext: padding, refuse
+				}
+			}
+		}
+		// Everything else (crypto validity, membership, dedup) is enforced deterministically on-chain in
+		// ProcessProposal + PreBlock, so accept structurally-valid extensions generously — an honest
+		// node's extension always passes, preserving liveness.
 		return accept, nil
 	}
 }

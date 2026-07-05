@@ -317,15 +317,14 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 		}
 	}
 
-	// Phase 3: decryption shares for in-flight ciphertexts.
-	shared := 0
-	for _, e := range canon {
-		for i := range e.VE.Shares {
-			if k.IngestDecryptShareFromVE(ctx, e.Operator, e.VE.Shares[i]) {
-				shared++
-			}
-		}
-	}
+	// Phase 3: decryption shares for in-flight ciphertexts, under a HARD, DETERMINISTIC per-block
+	// bound on DLEQ-verification work (cycle-8). ingestDecryptSharesBounded composes a per-VE
+	// share-count cap, a within-block eval-point dedup, a per-(operator,epoch) verify budget equal to
+	// the operator's owned eval-point count, and a global O(S) ceiling, so the block's TOTAL O(t) DLEQ
+	// verification is O(S) regardless of how much chaff any committee member sprays — closing the
+	// cycle-7 HIGH-A (unbounded ingest-verify halt) + HIGH-B (chaff re-verified every block) DoS
+	// WITHOUT weakening the cycle-7 drop-DoS fix (chaff is still DLEQ-rejected; honest defers + heals).
+	shared := k.ingestDecryptSharesBounded(ctx, canon, p)
 
 	if announced+dealt+shared > 0 {
 		ctx.EventManager().EmitEvent(sdk.NewEvent(
@@ -414,62 +413,170 @@ func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares 
 	return nil
 }
 
-// IngestDecryptShareFromVE authorizes, DLEQ-VERIFIES, and stores a decryption share carried on
-// a vote extension, authorizing by OPERATOR against the ciphertext's epoch round: the operator
-// must be a member AND the share's index must be an EVALUATION POINT that member OWNS (HIGH-3 —
-// so a member can only ever contribute shares at its own stake-allocated points, never claim
-// another member's point). It mirrors the SubmitDecryptionShare msg-server authorization, minus
-// the account/signer. First-wins per (decryptHeight, seq, evalPoint).
+// IngestDecryptShareFromVE authorizes, DLEQ-VERIFIES, and stores a SINGLE decryption share carried
+// on a vote extension, authorizing by OPERATOR against the ciphertext's epoch round: the operator
+// must be a member AND the share's index must be an EVALUATION POINT that member OWNS (HIGH-3 — so a
+// member can only ever contribute shares at its own stake-allocated points, never claim another
+// member's point). It mirrors the SubmitDecryptionShare msg-server authorization, minus the
+// account/signer. First-wins per (decryptHeight, seq, evalPoint).
 //
-// CYCLE-7 (fix #1): the share's DLEQ proof is VERIFIED here — before SetEncShare — against the
-// epoch's DKG public commitments and this ciphertext's ephemeral A. A structurally-valid but
-// cryptographically-garbage CHAFF share (non-empty D, absent/garbage proof) is REJECTED at
-// ingest and NEVER enters state, so it can never (1) inflate the matured-decrypt count gate past
-// `need`, nor (2) mark its member present in the stake gate — the two effects a <=1/3-stake
-// coalition combined to convert a healable within-grace DEFER into a hard DROP. Verification runs
-// exactly ONCE per share: a re-sent share is caught by the first-wins check below (before the
-// verify call) and never re-verified, so there is no per-block re-verification cost. It is a PURE
-// function of committed state + the share bytes (identical verdict on every node), which is
-// mandatory in this PreBlock/consensus path.
+// This is the UNBUDGETED single-share primitive. The CONSENSUS path — ConsumeVoteExtensions Phase 3
+// — instead goes through ingestDecryptSharesBounded, which wraps the SAME classify + verify+store
+// steps in the cycle-8 per-block verify bound. The split is deliberate: the cheap authorization /
+// dedup checks (classifyDecryptShare) run BEFORE the expensive DLEQ verify (verifyAndStoreDecryptShare),
+// so the bounded path can apply its caps between the two and never pay an O(t) verify for a share it
+// will drop.
+//
+// CYCLE-7 (fix #1): the share's DLEQ proof is VERIFIED (in verifyAndStoreDecryptShare) before
+// SetEncShare — against the epoch's DKG public commitments and this ciphertext's ephemeral A. A
+// structurally-valid but cryptographically-garbage CHAFF share (non-empty D, absent/garbage proof)
+// is REJECTED at ingest and NEVER enters state, so it can never (1) inflate the matured-decrypt count
+// gate past `need`, nor (2) mark its member present in the stake gate — the two effects a <=1/3-stake
+// coalition combined to convert a healable within-grace DEFER into a hard DROP. A stored share is an
+// already-verified share (the first-wins check short-circuits a re-send before the verify), so
+// verification is a one-time ingest cost. It is a PURE function of committed state + the share bytes
+// (identical verdict on every node), mandatory in this PreBlock/consensus path.
 //
 // The stored EncShare.Keyper is the operator address (attribution only); the decrypt path
 // (recoverSharedSecret) uses only Index/D/Proof. Returns whether it stored a new share.
 func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s types.VoteExtShare) bool {
-	if len(s.D) == 0 {
-		return false
-	}
-	e, ok := k.GetEncTx(ctx, s.DecryptHeight, s.Seq)
-	if !ok || e.Epoch == 0 || e.Epoch != s.Epoch {
-		return false // no such ciphertext, legacy epoch, or epoch mismatch
-	}
-	round, ok := k.GetDkgRound(ctx, e.Epoch)
+	member, ctA, epoch, ok := k.classifyDecryptShare(ctx, operator, s, nil)
 	if !ok {
 		return false
 	}
+	_ = member // the single-share path enforces no per-operator budget; the batch path uses it
+	return k.verifyAndStoreDecryptShare(ctx, epoch, ctA, operator, s)
+}
+
+// ============================================================================
+// CYCLE-8: deterministic, HARD-BOUNDED ingest of a block's decryption shares.
+//
+// Closes the two DoS the cycle-7 ingest-DLEQ-verify introduced:
+//   HIGH-A (halt-class): the consume loop verified EVERY share in EVERY extension with no count cap,
+//     so one member packing a 1-MiB extension with thousands of shares forced thousands of O(t)
+//     elliptic-curve verifications on the PreBlock consensus path every block -> consensus stall.
+//   HIGH-B (<=1/3-stake compute DoS): a REJECTED chaff share is never stored, so the first-wins dedup
+//     never suppressed it and the identical chaff was re-verified from scratch every block.
+//
+// The bound is four composed, pure, NO-persistent-state controls (see ingestDecryptSharesBounded).
+// ============================================================================
+
+// shareSlot is a decryption share's per-round eval-point coordinate. A Shamir evaluation point is
+// owned by exactly ONE committee member, so (decryptHeight, seq, index) is a globally-unique slot —
+// the key for BOTH the persistent first-wins dedup (stored shares) and the within-block verify dedup.
+type shareSlot struct {
+	decryptHeight uint64
+	seq           uint64
+	index         uint64
+}
+
+// txKey keys the in-flight-ciphertext read cache by (decryptHeight, seq).
+type txKey struct {
+	decryptHeight uint64
+	seq           uint64
+}
+
+// opEpoch keys the PER-OPERATOR, PER-EPOCH verify budget. Within one block an operator may force at
+// most len(its owned eval points) DLEQ verifications for a given epoch — the exact number of shares it
+// could ever legitimately owe (one per point it owns). Because Σ owned points over the committee is
+// exactly the budget S, this per-operator cap ALSO bounds the block's total verify work to O(S).
+type opEpoch struct {
+	operator string
+	epoch    uint64
+}
+
+// consumeCaches memoizes the two committed-state decodes the cheap share classification repeats
+// across a block: the DKG round (which carries the whole member set) and the in-flight ciphertext. It
+// changes NO verdict — it only avoids re-unmarshaling the same round/ciphertext for every share and
+// every re-sent chaff copy. A nil *consumeCaches is a valid (uncached) value for the single-share path.
+type consumeCaches struct {
+	rounds map[uint64]roundHit
+	txs    map[txKey]txHit
+}
+type roundHit struct {
+	r  types.DkgRound
+	ok bool
+}
+type txHit struct {
+	e  types.EncTx
+	ok bool
+}
+
+func newConsumeCaches() *consumeCaches {
+	return &consumeCaches{rounds: map[uint64]roundHit{}, txs: map[txKey]txHit{}}
+}
+
+func (k Keeper) roundCached(ctx sdk.Context, c *consumeCaches, epoch uint64) (types.DkgRound, bool) {
+	if c != nil {
+		if h, hit := c.rounds[epoch]; hit {
+			return h.r, h.ok
+		}
+	}
+	r, ok := k.GetDkgRound(ctx, epoch)
+	if c != nil {
+		c.rounds[epoch] = roundHit{r: r, ok: ok}
+	}
+	return r, ok
+}
+
+func (k Keeper) txCached(ctx sdk.Context, c *consumeCaches, h, seq uint64) (types.EncTx, bool) {
+	if c != nil {
+		if hit, ok := c.txs[txKey{decryptHeight: h, seq: seq}]; ok {
+			return hit.e, hit.ok
+		}
+	}
+	e, ok := k.GetEncTx(ctx, h, seq)
+	if c != nil {
+		c.txs[txKey{decryptHeight: h, seq: seq}] = txHit{e: e, ok: ok}
+	}
+	return e, ok
+}
+
+// classifyDecryptShare runs the CHEAP (no elliptic-curve) authorization + dedup checks for a
+// decryption share carried on a vote extension. It returns the resolved member, the ciphertext's
+// ephemeral A, and the epoch when — and ONLY when — the share is a FRESH, well-authorized candidate
+// for DLEQ verification: non-empty D, a matching in-flight ciphertext, a real round, the operator is a
+// member, the claimed eval point is one it OWNS, and no share is already stored at that slot
+// (first-wins, O(1) point lookup). ok=false => the share is cheaply rejected or already-stored: it
+// does NO elliptic-curve work and consumes NO verify budget. Deterministic pure read of committed
+// state (consensus-safe); the *consumeCaches only memoizes reads and may be nil.
+func (k Keeper) classifyDecryptShare(ctx sdk.Context, operator string, s types.VoteExtShare, c *consumeCaches) (types.RoundMember, []byte, uint64, bool) {
+	if len(s.D) == 0 {
+		return types.RoundMember{}, nil, 0, false
+	}
+	e, ok := k.txCached(ctx, c, s.DecryptHeight, s.Seq)
+	if !ok || e.Epoch == 0 || e.Epoch != s.Epoch {
+		return types.RoundMember{}, nil, 0, false // no such ciphertext, legacy epoch, or epoch mismatch
+	}
+	round, ok := k.roundCached(ctx, c, e.Epoch)
+	if !ok {
+		return types.RoundMember{}, nil, 0, false
+	}
 	idx := memberIndexByOperator(round, operator)
 	if idx == 0 {
-		return false // operator is not a member of the epoch
+		return types.RoundMember{}, nil, 0, false // operator is not a member of the epoch
 	}
 	member, ok := memberByIndex(round, idx)
 	if !ok || !member.OwnsEvalPoint(s.Index) {
-		return false // the claimed eval point is not one this member owns
+		return types.RoundMember{}, nil, 0, false // the claimed eval point is not one this member owns
 	}
-	// First-wins per EVALUATION POINT: an already-recorded share at this point (by anyone) is
-	// not overwritten. Since each point is owned by exactly one member, this both dedups a
-	// member's own re-submission and blocks a claim on another member's point. It runs BEFORE
-	// the DLEQ verification below so an already-stored (already-verified) share is never
-	// re-verified — verification is a one-time ingest cost, never a per-block one.
-	for _, ex := range k.CollectShares(ctx, s.DecryptHeight, s.Seq) {
-		if ex.Index == s.Index {
-			return false
-		}
+	// First-wins per EVALUATION POINT (O(1) point lookup): an already-recorded share at this exact
+	// slot (by anyone; a point has one owner) is not overwritten and, crucially, is never re-verified
+	// — a stored share is an already-DLEQ-verified one, so verification stays a one-time ingest cost.
+	if k.hasEncShareAt(ctx, s.DecryptHeight, s.Seq, s.Index) {
+		return types.RoundMember{}, nil, 0, false
 	}
-	// DLEQ VERIFICATION AT INGEST (cycle-7 fix #1): store the share ONLY if its proof verifies,
-	// so "stored share" == "DLEQ-verified share" and a chaff share can never enter state.
-	if !k.verifyDecryptShareDLEQ(ctx, e.Epoch, e.A, s.Index, s.D, s.Proof) {
+	return member, e.A, e.Epoch, true
+}
+
+// verifyAndStoreDecryptShare performs the ONE expensive step — the DLEQ verification — and, iff it
+// passes, stores the share. A failed verification is a chaff rejection (loud event, not stored), so
+// "stored share" == "DLEQ-verified share" and a chaff share can never enter state (cycle-7 fix #1).
+func (k Keeper) verifyAndStoreDecryptShare(ctx sdk.Context, epoch uint64, ctA []byte, operator string, s types.VoteExtShare) bool {
+	if !k.verifyDecryptShareDLEQ(ctx, epoch, ctA, s.Index, s.D, s.Proof) {
 		ctx.EventManager().EmitEvent(sdk.NewEvent(
 			"encmempool_dkg_ve_share_rejected",
-			sdk.NewAttribute("epoch", u64str(e.Epoch)),
+			sdk.NewAttribute("epoch", u64str(epoch)),
 			sdk.NewAttribute("operator", operator),
 			sdk.NewAttribute("index", u64str(s.Index)),
 			sdk.NewAttribute("decrypt_height", u64str(s.DecryptHeight)),
@@ -484,6 +591,100 @@ func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s typ
 		return false
 	}
 	return true
+}
+
+// ingestDecryptSharesBounded is the DETERMINISTIC, HARD-BOUNDED consensus-path ingest of a block's
+// decryption shares (cycle-8). It caps the block's total O(t) DLEQ verification at O(S) REGARDLESS of
+// attacker input, via four composed, pure, NO-persistent-state controls applied to the CANONICAL
+// (operator-sorted, deduped) entries:
+//
+//  1. PER-VE SHARE-COUNT CAP: a single extension may carry at most VoteExtShareCap == max(256, S)
+//     shares — the exact bound the honest builder (buildDecryptShares) stops at. Excess is dropped
+//     (deterministically: the committed share order fixes which survive) BEFORE any per-share work.
+//     This defeats the 1-MiB, thousands-of-shares extension (HIGH-A's raw magnitude).
+//  2. WITHIN-BLOCK EVAL-POINT DEDUP: each (decryptHeight, seq, index) slot is verified at most ONCE
+//     per block, so re-sending the same chaff slot many times costs one verify, not many.
+//  3. PER-(operator,epoch) VERIFY BUDGET == the operator's owned eval-point count: an operator can
+//     force at most as many DLEQ verifications as it owns points in that epoch — the most it could
+//     ever legitimately owe. Excess (chaff across many ciphertexts, or padding) is dropped BEFORE the
+//     verify. Summed over the committee this budget is exactly S, so it is ALSO what bounds the block's
+//     total verify work to O(S), it is the "short-circuit re-sent chaff" control (a spammer re-sending
+//     every block can still only ever burn its owned-point budget — HIGH-B), and it stops a single
+//     member from monopolizing the global budget.
+//  4. GLOBAL O(S) CEILING: a belt for the rare multi-epoch overlap where step 3's per-epoch sums could
+//     stack — capping the block's total verifications at VoteExtShareCap; the surplus DEFERS to a later
+//     block (re-sent idempotently), it is NOT rejected.
+//
+// A DEFERRED share (budget/ceiling) is NOT a chaff rejection: nothing is stored and NO reject event
+// fires, so an honest share throttled this block simply verifies on a later one — the cycle-7
+// defers+heals behavior is preserved. Every control is a pure function of committed state + the
+// canonical entries (the accounting maps are rebuilt each block, never persisted), so every node
+// accepts / rejects / defers identically — the fork-safety contract. Returns the number stored.
+func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p types.Params) int {
+	shareCap := p.VoteExtShareCap() // per-VE cap AND global ceiling: both == max(256, S) == O(S)
+	c := newConsumeCaches()
+	seen := make(map[shareSlot]bool) // (2) within-block eval-point dedup
+	spent := make(map[opEpoch]int)   // (3) per-(operator,epoch) verifications performed this block
+	budget := make(map[opEpoch]int)  // (3) memoized owned-eval-point count per (operator,epoch)
+	globalSpent := 0                 // (4) total verifications performed this block
+	shared := 0
+	deferred := false
+	for _, e := range canon {
+		if globalSpent >= shareCap {
+			deferred = true
+			break // (4) global O(S) ceiling reached — defer the rest to a later block
+		}
+		shares := e.VE.Shares
+		if len(shares) > shareCap { // (1) per-VE share-count cap
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_ve_shares_clamped",
+				sdk.NewAttribute("operator", e.Operator),
+				sdk.NewAttribute("submitted", u64str(uint64(len(shares)))),
+				sdk.NewAttribute("cap", u64str(uint64(shareCap))),
+			))
+			shares = shares[:shareCap]
+		}
+		for i := range shares {
+			if globalSpent >= shareCap {
+				deferred = true
+				break // (4) global ceiling reached mid-extension
+			}
+			s := shares[i]
+			slot := shareSlot{decryptHeight: s.DecryptHeight, seq: s.Seq, index: s.Index}
+			if seen[slot] {
+				continue // (2) this eval-point slot was already verified this block
+			}
+			member, ctA, epoch, ok := k.classifyDecryptShare(ctx, e.Operator, s, c)
+			if !ok {
+				continue // cheap-rejected / already-stored: no DLEQ work, no budget consumed
+			}
+			oe := opEpoch{operator: e.Operator, epoch: epoch}
+			b, hit := budget[oe]
+			if !hit {
+				b = len(member.OwnedEvalPoints()) // (3) == the operator's owned eval-point count
+				budget[oe] = b
+			}
+			if spent[oe] >= b {
+				continue // (3) per-operator cap: excess dropped BEFORE the O(t) DLEQ verify
+			}
+			// ---- bounded: charge the budgets, then perform the one DLEQ verification + store ----
+			seen[slot] = true
+			spent[oe]++
+			globalSpent++
+			if k.verifyAndStoreDecryptShare(ctx, epoch, ctA, e.Operator, s) {
+				shared++
+			}
+		}
+	}
+	if deferred {
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_ve_verify_bounded",
+			sdk.NewAttribute("height", u64str(uint64(ctx.BlockHeight()))),
+			sdk.NewAttribute("verified", u64str(uint64(globalSpent))),
+			sdk.NewAttribute("cap", u64str(uint64(shareCap))),
+		))
+	}
+	return shared
 }
 
 // verifyDecryptShareDLEQ deterministically checks the DLEQ proof carried on a decryption share
