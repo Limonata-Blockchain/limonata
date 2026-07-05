@@ -485,6 +485,17 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 			return nil, 0, errors.New("no active key for epoch")
 		}
 		need = int(ak.Threshold)
+		// CYCLE-7 (fix #2): this count gate — and the memberPresent stake map built below —
+		// govern on the DLEQ-VERIFIED share count. On the transparent path that holds BY
+		// CONSTRUCTION: IngestDecryptShareFromVE now verifies each share's DLEQ proof BEFORE
+		// SetEncShare, so a structurally-valid-but-cryptographically-garbage CHAFF share never
+		// enters state — `len(shares)` is exactly the count of verified shares, and every index
+		// in memberPresent is backed by a verified share. A coalition can therefore no longer
+		// inflate this count past `need` (nor mark itself present) with chaff to sail through
+		// both gates and land in RecoverVerified's hard-drop. Any share that somehow reached
+		// state without ingest verification is still caught downstream: RecoverVerified drops it
+		// and returns ErrInsufficientVerified, which is routed back into this same errNotEnoughShares
+		// DEFER path (see the RecoverVerified call site below).
 		if len(shares) < need {
 			return nil, need, errNotEnoughShares
 		}
@@ -527,6 +538,19 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 			})
 		}
 		shared, err = dkg.RecoverVerified(commitments, e.A, need, partials)
+		if errors.Is(err, dkg.ErrInsufficientVerified) {
+			// CYCLE-7 (belt-and-suspenders, fix #3): fewer than `need` partials survived DLEQ
+			// verification — the SAME healable condition as a raw share shortfall, not a
+			// terminal fault. Route it into the WITHIN-GRACE DEFER branch (errNotEnoughShares)
+			// so the ciphertext is KEPT and re-attempted as late HONEST shares land, instead of
+			// being HARD-DROPPED (encmempool_decrypt_failed). With ingest-time DLEQ verification
+			// (IngestDecryptShareFromVE) this is normally UNREACHABLE on the transparent path —
+			// every stored share is already verified, so `len(shares) < need` trips
+			// errNotEnoughShares above before we get here — but it defends any share that
+			// reached state WITHOUT ingest verification (a legacy/declared msg path or a genesis
+			// import), so a padded raw count can never convert a healable defer into a drop.
+			return nil, need, errNotEnoughShares
+		}
 		return shared, need, err
 	}
 

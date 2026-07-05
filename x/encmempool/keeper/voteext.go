@@ -414,14 +414,26 @@ func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares 
 	return nil
 }
 
-// IngestDecryptShareFromVE authorizes + stores a DLEQ-proved decryption share carried on a
-// vote extension, authorizing by OPERATOR against the ciphertext's epoch round: the operator
+// IngestDecryptShareFromVE authorizes, DLEQ-VERIFIES, and stores a decryption share carried on
+// a vote extension, authorizing by OPERATOR against the ciphertext's epoch round: the operator
 // must be a member AND the share's index must be an EVALUATION POINT that member OWNS (HIGH-3 —
 // so a member can only ever contribute shares at its own stake-allocated points, never claim
 // another member's point). It mirrors the SubmitDecryptionShare msg-server authorization, minus
-// the account/signer. First-wins per (decryptHeight, seq, evalPoint). The stored EncShare.Keyper
-// is the operator address (attribution only); the decrypt path (recoverSharedSecret) uses only
-// Index/D/Proof. Returns whether it stored a new share.
+// the account/signer. First-wins per (decryptHeight, seq, evalPoint).
+//
+// CYCLE-7 (fix #1): the share's DLEQ proof is VERIFIED here — before SetEncShare — against the
+// epoch's DKG public commitments and this ciphertext's ephemeral A. A structurally-valid but
+// cryptographically-garbage CHAFF share (non-empty D, absent/garbage proof) is REJECTED at
+// ingest and NEVER enters state, so it can never (1) inflate the matured-decrypt count gate past
+// `need`, nor (2) mark its member present in the stake gate — the two effects a <=1/3-stake
+// coalition combined to convert a healable within-grace DEFER into a hard DROP. Verification runs
+// exactly ONCE per share: a re-sent share is caught by the first-wins check below (before the
+// verify call) and never re-verified, so there is no per-block re-verification cost. It is a PURE
+// function of committed state + the share bytes (identical verdict on every node), which is
+// mandatory in this PreBlock/consensus path.
+//
+// The stored EncShare.Keyper is the operator address (attribution only); the decrypt path
+// (recoverSharedSecret) uses only Index/D/Proof. Returns whether it stored a new share.
 func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s types.VoteExtShare) bool {
 	if len(s.D) == 0 {
 		return false
@@ -444,11 +456,27 @@ func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s typ
 	}
 	// First-wins per EVALUATION POINT: an already-recorded share at this point (by anyone) is
 	// not overwritten. Since each point is owned by exactly one member, this both dedups a
-	// member's own re-submission and blocks a claim on another member's point.
+	// member's own re-submission and blocks a claim on another member's point. It runs BEFORE
+	// the DLEQ verification below so an already-stored (already-verified) share is never
+	// re-verified — verification is a one-time ingest cost, never a per-block one.
 	for _, ex := range k.CollectShares(ctx, s.DecryptHeight, s.Seq) {
 		if ex.Index == s.Index {
 			return false
 		}
+	}
+	// DLEQ VERIFICATION AT INGEST (cycle-7 fix #1): store the share ONLY if its proof verifies,
+	// so "stored share" == "DLEQ-verified share" and a chaff share can never enter state.
+	if !k.verifyDecryptShareDLEQ(ctx, e.Epoch, e.A, s.Index, s.D, s.Proof) {
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_ve_share_rejected",
+			sdk.NewAttribute("epoch", u64str(e.Epoch)),
+			sdk.NewAttribute("operator", operator),
+			sdk.NewAttribute("index", u64str(s.Index)),
+			sdk.NewAttribute("decrypt_height", u64str(s.DecryptHeight)),
+			sdk.NewAttribute("seq", u64str(s.Seq)),
+			sdk.NewAttribute("reason", "dleq_verification_failed"),
+		))
+		return false
 	}
 	if k.SetEncShare(ctx, types.EncShare{
 		Keyper: operator, DecryptHeight: s.DecryptHeight, Seq: s.Seq, Index: s.Index, D: s.D, Proof: s.Proof,
@@ -456,4 +484,30 @@ func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s typ
 		return false
 	}
 	return true
+}
+
+// verifyDecryptShareDLEQ deterministically checks the DLEQ proof carried on a decryption share
+// against the epoch's DKG public commitments (the installed ActiveThresholdKey) and the
+// ciphertext's ephemeral A. It recomputes the member's PUBLIC share key Y_index the exact way
+// dkg.RecoverVerified does on the decrypt path, so "accepted at ingest" == "verifiable at
+// recover" — the same pure function of committed state on every node (consensus-safe). A missing
+// active key (the round has not finalized, or was pruned) or an unparseable commitment/proof is
+// treated as a verification FAILURE: the share is rejected now and, if it is genuinely honest,
+// re-arrives on a later vote and verifies once the key is present. Returns true iff D = x*A for
+// the same x as Y_index = x*G.
+func (k Keeper) verifyDecryptShareDLEQ(ctx sdk.Context, epoch uint64, ctA []byte, index uint64, d, proofBz []byte) bool {
+	ak, ok := k.GetActiveKey(ctx, epoch)
+	if !ok || len(ak.PublicCommitments) == 0 {
+		return false
+	}
+	commitments, err := dkg.ParseCommitmentPoints(ak.PublicCommitments)
+	if err != nil {
+		return false
+	}
+	proof, err := dkg.ParseDLEQProof(proofBz)
+	if err != nil {
+		return false // absent / short / non-canonical proof — a chaff share
+	}
+	Y := dkg.SharePubKey(commitments, index)
+	return dkg.VerifyDecryptShare(ctA, &threshold.DecryptShare{Index: index, D: d}, Y, proof)
 }

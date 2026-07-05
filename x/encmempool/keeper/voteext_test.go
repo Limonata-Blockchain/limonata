@@ -300,38 +300,49 @@ func TestTransparent_DealingRejects(t *testing.T) {
 }
 
 // TestTransparent_ShareIngest: decryption shares carried on vote extensions are authorized
-// by operator/member-index and deduped first-wins.
+// by operator/member-index, DLEQ-VERIFIED (cycle-7), and deduped first-wins. It runs on a REAL
+// finalized transparent committee so an authorized share also carries a verifiable proof.
 func TestTransparent_ShareIngest(t *testing.T) {
-	m1 := newMember("op1", "")
-	k, ctx := newKeeperSK(t, 10, &mockStaking{vals: []stakingtypes.Validator{bondedVal("op1", 100)}})
-	_ = k.SetParams(ctx, transparentParams(1, 0))
+	c := runTransparentDKG(t, map[string]int64{"op1": 100, "op2": 100, "op3": 100}, 32)
+	ctx := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
+	ct, err := threshold.Encrypt(c.ak.Pub, []byte("share-ingest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, c.ak.Epoch)
 
-	// A round for epoch 5 with op1 at index 1, and an EncTx stamped to epoch 5.
-	round := types.DkgRound{Epoch: 5, Threshold: 1, Status: types.DkgStatusActive,
-		Members: []types.RoundMember{{Index: 1, OperatorAddr: "op1", EncPubKey: m1.pub}}}
-	_ = k.SetDkgRound(ctx, round)
-	e := k.SubmitEncTx(ctx, "user", 10, 2, []byte("A-not-verified-here"), make([]byte, threshold.NonceSize), []byte("body"), 5)
+	// op1's REAL, DLEQ-proved shares (>= 2 points at these stakes).
+	op1Shares := veSharesFor(t, c, ctx, e, ct, "op1")
+	if len(op1Shares) < 2 {
+		t.Fatalf("precondition: op1 should own >= 2 points, owns %d", len(op1Shares))
+	}
+	entry := keeper.VEEntry{Operator: "op1", VE: types.VoteExtension{EncPubKey: c.byOp["op1"].pub, Shares: []types.VoteExtShare{op1Shares[0]}}}
 
-	sh := types.VoteExtShare{Epoch: 5, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: 1, D: []byte("d-share"), Proof: nil}
-	entry := keeper.VEEntry{Operator: "op1", VE: types.VoteExtension{EncPubKey: m1.pub, Shares: []types.VoteExtShare{sh}}}
-
-	k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{entry})
-	got := k.CollectShares(ctx, e.DecryptHeight, e.Seq)
-	if len(got) != 1 || got[0].Index != 1 || got[0].Keyper != "op1" {
+	c.k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{entry})
+	got := c.k.CollectShares(ctx, e.DecryptHeight, e.Seq)
+	if len(got) != 1 || got[0].Index != op1Shares[0].Index || got[0].Keyper != "op1" {
 		t.Fatalf("share not ingested correctly: %+v", got)
 	}
 
-	// Wrong index: rejected.
-	wrong := entry
-	wrong.VE.Shares = []types.VoteExtShare{{Epoch: 5, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: 2, D: []byte("x")}}
-	k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{wrong})
-	if got := k.CollectShares(ctx, e.DecryptHeight, e.Seq); len(got) != 1 {
-		t.Fatalf("wrong-index share must be rejected, have %d shares", len(got))
+	// First-wins: re-sending the same proved share does not store it twice (and never re-verifies).
+	c.k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{entry})
+	if got := c.k.CollectShares(ctx, e.DecryptHeight, e.Seq); len(got) != 1 {
+		t.Fatalf("first-wins violated: re-sent share stored twice, have %d shares", len(got))
 	}
 
-	// Non-member operator: rejected.
-	k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{{Operator: "opZ", VE: types.VoteExtension{Shares: []types.VoteExtShare{sh}}}})
-	if got := k.CollectShares(ctx, e.DecryptHeight, e.Seq); len(got) != 1 {
+	// Wrong point (a point op1 does NOT own — owned by op2): rejected before any DLEQ check.
+	op2pt := c.memberPoints("op2")[0]
+	wrong := keeper.VEEntry{Operator: "op1", VE: types.VoteExtension{Shares: []types.VoteExtShare{
+		{Epoch: c.ak.Epoch, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: op2pt, D: []byte("x")},
+	}}}
+	c.k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{wrong})
+	if got := c.k.CollectShares(ctx, e.DecryptHeight, e.Seq); len(got) != 1 {
+		t.Fatalf("wrong-point share must be rejected, have %d shares", len(got))
+	}
+
+	// Non-member operator: rejected (even carrying an otherwise-valid proved share).
+	c.k.ConsumeVoteExtensions(ctx, []keeper.VEEntry{{Operator: "opZ", VE: types.VoteExtension{Shares: []types.VoteExtShare{op1Shares[1]}}}})
+	if got := c.k.CollectShares(ctx, e.DecryptHeight, e.Seq); len(got) != 1 {
 		t.Fatalf("non-member share must be rejected, have %d shares", len(got))
 	}
 }

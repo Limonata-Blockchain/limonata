@@ -3,11 +3,22 @@ package dkg
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
+
+// ErrInsufficientVerified is the SENTINEL RecoverVerified wraps when fewer than t of the
+// supplied partials pass DLEQ verification. The on-chain decrypt path treats it like a plain
+// share shortfall (errNotEnoughShares) — a WITHIN-GRACE DEFER that can heal from late honest
+// shares — rather than a hard drop, so a coalition that pads the RAW share count with chaff
+// (a count that collapses below t once the chaff is DLEQ-dropped) cannot force a matured
+// ciphertext to DROP instead of DEFER. It is deliberately DISTINCT from a malformed-ciphertext
+// or bad-commitment error (t < 1, empty commitments, a failing Lagrange combine on verified
+// shares), which stay terminal failures because no late honest share can heal them.
+var ErrInsufficientVerified = errors.New("insufficient DLEQ-verified partials")
 
 // dleqContext domain-separates the Fiat-Shamir CHALLENGE transcript.
 const dleqContext = "limonata/encmempool/dkg/dleq/v1"
@@ -237,7 +248,11 @@ func RecoverVerified(commitments []secp256k1.JacobianPoint, ctA []byte, t int, p
 		}
 	}
 	if len(good) < t {
-		return nil, fmt.Errorf("only %d/%d partials passed DLEQ verification", len(good), t)
+		// Wrap ErrInsufficientVerified so the on-chain decrypt path can tell "not enough
+		// VERIFIED partials (heal-eligible: defer within grace)" apart from a terminal
+		// malformed-input failure, and route this case into the same bounded DEFER branch as
+		// a raw share shortfall instead of hard-dropping the ciphertext.
+		return nil, fmt.Errorf("only %d/%d partials passed DLEQ verification: %w", len(good), t, ErrInsufficientVerified)
 	}
 	return threshold.Recover(good)
 }

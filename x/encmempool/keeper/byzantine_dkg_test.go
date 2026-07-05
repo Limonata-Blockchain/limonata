@@ -6,6 +6,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
+	"github.com/cosmos/evm/x/encmempool/dkg"
 	"github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
@@ -107,8 +108,12 @@ func TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected(t *tes
 		t.Fatalf("QUAL = %v, want the 3 present dealers", ak.Qual)
 	}
 
-	// A ciphertext stamped to epoch 1 so decryption-share ingestion has a target.
-	e := w.k.SubmitEncTx(w.ctx, "user", 10, 2, make([]byte, 33), make([]byte, threshold.NonceSize), []byte("b"), 1)
+	// A REAL ciphertext to the epoch key so an AUTHORIZED share can also DLEQ-verify at ingest.
+	ct, encErr := threshold.Encrypt(ak.Pub, []byte("byz-share"))
+	if encErr != nil {
+		t.Fatal(encErr)
+	}
+	e := w.k.SubmitEncTx(w.ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1)
 
 	// Pick a point op2 owns and a point op1 owns (both non-empty ranges).
 	op1Pts := ownedPoints(w.round, "op1")
@@ -117,7 +122,7 @@ func TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected(t *tes
 		t.Fatalf("expected both members to own points: op1=%v op2=%v", op1Pts, op2Pts)
 	}
 
-	// op2 claims a point op1 OWNS -> rejected (per-point authorization).
+	// op2 claims a point op1 OWNS -> rejected (per-point authorization, BEFORE any DLEQ check).
 	wrong := keeper.VEEntry{Operator: "op2", VE: types.VoteExtension{Shares: []types.VoteExtShare{
 		{Epoch: 1, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: op1Pts[0], D: []byte("d")},
 	}}}
@@ -126,15 +131,45 @@ func TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected(t *tes
 		t.Fatalf("share at a co-member's point must be rejected, have %d", len(got))
 	}
 
-	// op2 claims a point it OWNS -> accepted.
+	// op2 claims a point it OWNS, with a VALID DLEQ-proved share -> accepted.
 	right := keeper.VEEntry{Operator: "op2", VE: types.VoteExtension{Shares: []types.VoteExtShare{
-		{Epoch: 1, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: op2Pts[0], D: []byte("d")},
+		provedShareAt(t, w, ak, ct, "op2", op2Pts[0], e),
 	}}}
 	w.k.ConsumeVoteExtensions(w.ctx.WithBlockHeight(3), []keeper.VEEntry{right})
 	got := w.k.CollectShares(w.ctx, e.DecryptHeight, e.Seq)
 	if len(got) != 1 || got[0].Index != op2Pts[0] || got[0].Keyper != "op2" {
 		t.Fatalf("share at an owned point must be accepted: %+v", got)
 	}
+}
+
+// provedShareAt returns member `op`'s REAL, DLEQ-proved decryption share for ciphertext ct at the
+// eval point `index`, as a vote-extension payload the ingest gate will accept.
+func provedShareAt(t *testing.T, w weightedRoundMembers, ak types.ActiveThresholdKey, ct *threshold.Ciphertext, op string, index uint64, e types.EncTx) types.VoteExtShare {
+	t.Helper()
+	var m member
+	for _, mm := range w.members {
+		if mm.op == op {
+			m = mm
+		}
+	}
+	shares, err := deriveOK(w.k, w.ctx, w.round, ak, m)
+	if err != nil {
+		t.Fatalf("derive %s: %v", op, err)
+	}
+	for _, sh := range shares {
+		if sh.Index == index {
+			ds, proof, perr := dkg.ProveDecryptShare(sh, ct)
+			if perr != nil {
+				t.Fatal(perr)
+			}
+			return types.VoteExtShare{
+				Epoch: e.Epoch, DecryptHeight: e.DecryptHeight, Seq: e.Seq,
+				Index: ds.Index, D: ds.D, Proof: dkg.MarshalDLEQProof(proof),
+			}
+		}
+	}
+	t.Fatalf("member %s owns no share at point %d", op, index)
+	return types.VoteExtShare{}
 }
 
 // TestCycle6_Byzantine_EquivocatingDealerSameCommitFirstWins: a dealer that attaches TWO
