@@ -1,269 +1,270 @@
 # Transparent in-node validator-DKG — status & readiness report
 
-**Date:** 2026-07-05 (audit cycle 6 close-out — exhaustive re-audit)
+**Date:** 2026-07-05 (audit cycle 7 — DLEQ-verify-at-ingest fix + adversarial re-audit)
 **Branch:** `limonata-dkg-transparent` (feature branch — DO NOT merge into any release)
-**Commit under review:** `abd6457e` — *test(encmempool/dkg): cycle-6 exhaustive re-audit — drive the never-live paths, all green*, atop
-`73b1dd1e` (cycle-5 AUDIT_CLEAN close-out) → `d8976687` → `2c2a271d` → `19d5cb6f` → `17101a12`
+**Commit under review:** `e6e198c1` — *harden(encmempool/dkg): cycle-7 — DLEQ-verify VE decryption
+shares at ingest; route insufficient-verified to the grace defer*, atop `abd6457e` (cycle-6
+exhaustive re-audit) → `b25c89dc` → `73b1dd1e` → `d8976687` → `2c2a271d` → `19d5cb6f` → `17101a12`
 
 ---
 
 ## VERDICT: `AUDIT_CLEAN = NO` — **NO-GO to ENABLE** (dormant-by-default MERGE still safe; external audit still required regardless)
 
-This is a reversal from cycle 5, and it is the whole point of pushing harder. Jason asked for a
-**bigger, exhaustive re-audit to be CERTAIN everything is green.** The live multi-node run *is*
-green — all five mission objectives were proven LIVE on a 6-node throwaway, including the marquee
-128-entry defer-cap that cycle 5 could only unit-test. But the **6-lens adversarial code audit that
-ran alongside it found 3 HIGH-severity liveness breaks** (of **19 total findings**) on the exact
-paths a live *honest-binary* network structurally cannot exercise. So:
+The cycle-7 fix **genuinely closes the targeted HIGH** — the `<=1/3`-stake chaff-padding hole that
+turned the cycle-3 H-B healable grace-deferral into a hard drop — and that closure was **proven LIVE
+end-to-end on a fresh isolated 8-node network** (§3). That is real, verified progress on the exact
+thing cycle 6 flagged as HIGH-1.
 
-- **The live network is green.** `multinode` returned **GREEN**: defer-cap, boundary liveness,
-  stake-drift storm, absent-dealer byzantine, and cross-node determinism all proven live,
-  fork-free, on 6 nodes. Nothing that an honest binary can be driven to do broke.
-- **The branch is NOT audit-clean.** `AUDIT_CLEAN = NO`. Three HIGH liveness findings (§4) survive:
-  two of them are **unhealable** (a single Byzantine QUAL dealer permanently bricks an epoch's
-  decryption, with **no complaint/justify recourse on the transparent path**), and one lets a
-  **`< 1/3`-stake committee member convert the cycle-3 H-B healable grace-deferral into a hard
-  drop**. All three were reproduced as passing repro tests driving the REAL consensus entry points.
-- **These two facts are not in tension** — see §3. The live run used honest binaries, which
-  *provably cannot* emit a well-shaped-but-corrupt VE dealing or pad unverified shares with intent;
-  the audit drove the deterministic on-chain consume/finalize/decrypt functions directly with the
-  adversarial inputs a **malicious validator** (or a small-stake committee member) *can* produce.
+**But the fix is NOT a net-clean win, and it is NOT ready to enable.** The same cycle-7 adversarial
+re-audit that validated the closure found the fix **introduced TWO NEW HIGH-severity DoS findings**
+(§4), both on the *new* crypto it added to the consensus-critical PreBlock path — and one of them is
+**halt-class**, strictly worse than the deterministic-drop DoS it replaced. Separately, the two
+cycle-6 HIGHs this fix did not scope (Byzantine QUAL dealer / no complaint round) **remain open**.
+
+Net inventory of OPEN HIGH findings going into any enable decision: **4**.
+
+| # | HIGH finding | Origin | Status after cycle-7 |
+|---|--------------|--------|----------------------|
+| — | Unverified VE decryption-share COUNT PADDING → healable defer becomes hard DROP | cycle-6 HIGH-1 | ✅ **CLOSED** (this fix; live-proven §3) |
+| **A** | **Unbounded per-VE ingest-DLEQ-verify → single committee member stalls consensus every block (halt-class liveness DoS)** | **cycle-7 (introduced by the fix)** | ❌ **OPEN — NEW** |
+| **B** | **`<=1/3`-stake PreBlock compute DoS: uncapped, re-verified-every-block DLEQ verification of REJECTED chaff** | **cycle-7 (introduced by the fix)** | ❌ **OPEN — NEW** |
+| **2** | Byzantine QUAL dealer permanently bricks an epoch's decryption, no complaint recourse | cycle-6 HIGH-2 | ❌ **OPEN** (out of scope for this fix; surfaces untouched) |
+| **3** | Transparent VE-DKG has no complaint/justify round at all (root cause of #2) | cycle-6 HIGH-3 | ❌ **OPEN** (out of scope for this fix; surfaces untouched) |
 
 **What this means concretely:**
 
-- **NO-GO to ENABLE** the transparent DKG (on any chain, even a testnet you rely on for
-  confidentiality) until HIGH-1/2/3 are fixed and re-audited. The findings are liveness/DoS on the
-  encrypted-mempool decrypt guarantee, not consensus safety — no fork, no halt — but they defeat the
-  confidentiality/anti-MEV purpose the feature exists to provide.
-- **Merging the branch DORMANT is still safe.** All three HIGH findings live on the *enabled*
+- **NO-GO to ENABLE** the transparent DKG on any chain relied on for confidentiality. One HIGH was
+  closed; **two new HIGHs (one halt-class) were opened by the closure itself**, and two pre-existing
+  unhealable HIGHs are untouched. The fix moved an expensive pure-crypto verification (`O(t)`
+  elliptic-curve ops per share) onto the PreBlock consensus path **without a per-block compute/count
+  bound and without caching rejections** — trading a `<=1/3`-stake *forced-drop* DoS for a `single-
+  member` *stall-every-block* DoS. That is a lateral-to-worse move for the enable decision, even
+  though the specific chaff-padding mechanism is genuinely gone.
+- **Merging the branch DORMANT is still safe.** All four HIGH findings live on the *enabled*
   transparent decrypt/DKG path. With `DkgEnabled = DkgTransparent = false` (the shipped default) the
-  binary is byte-behavior-identical to `17101a12`; none of the three is reachable. Merging without
-  enabling changes nothing.
+  binary is byte-behavior-identical to `17101a12`; none is reachable. Landing the branch dormant
+  preserves the work + the committed probe corpus and changes nothing operationally.
+- **Do NOT represent "the chaff hole is closed" as "the branch is fixed."** The closure is real, but
+  in isolation it is misleading: the enable-blocking HIGH count went **3 → 4**, not 3 → 2.
 - **External professional audit is STILL REQUIRED before ANY mainnet reliance**, independent of the
-  three findings above. Six internal adversarial cycles are not a substitute for an external audit.
-  We do NOT claim an external audit has been performed.
+  four findings above. Seven internal adversarial cycles are not a substitute. We do NOT claim an
+  external audit has been performed.
 - **The release decision belongs to Jason.** This report states technical readiness only.
 
 ---
 
-## 1. Cycle history — six adversarial cycles
+## 1. Cycle history — seven adversarial cycles
 
 | Cycle | Commit(s) | Result |
 |-------|-----------|--------|
-| **1** | `f8615df2` | Transparent in-node DKG built (VE auto-participation, transparent enc key, members = bonded set). Live 4→5-node, 0 divergence. Audit: **NO-GO, 4 HIGHs** (halt on misconfig, enc-key impersonation, stake-minority seat-majority capture, self-id overload). |
-| **2** | `a75b027f` | HIGH-1 closed (VE-coupled `veActive` guard), HIGH-2/4 closed (operator-bound PoP + operator-indexed self-id). **HIGH-3 SURVIVED — fix at wrong layer** (threshold stayed a seat COUNT). **NO-GO.** |
+| **1** | `f8615df2` | Transparent in-node DKG built (VE auto-participation, transparent enc key, members = bonded set). Live 4→5-node, 0 divergence. Audit: **NO-GO, 4 HIGHs**. |
+| **2** | `a75b027f` | HIGH-1 closed (VE-coupled `veActive` guard), HIGH-2/4 closed (operator-bound PoP + operator-indexed self-id). **HIGH-3 SURVIVED — fix at wrong layer.** **NO-GO.** |
 | **3** | `19d5cb6f` | HIGH-3 closed at the **crypto layer**: stake-weighted secret sharing. Audit: **NO-GO, 11 findings** — H-A (degenerate `S<n`), H-B (`t` stranded honest supermajorities AND the shortfall path **silently dropped** the ciphertext), + M/L. |
-| **4** | `2c2a271d` | All 6 cycle-3 findings closed: `t = floor(2S/3) − n + 1`, `S ≥ 8n` coupling, non-silent **32-block grace deferral**. Audit: **14 findings, 0 crit/high → CLEAN**. 4-node run **GO**. Two items deferred to cycle 5. |
-| **5** | `73b1dd1e` (was `d8976687`) | Both cycle-4 deferrals closed (stake-drift rekey; grace path live-proven heal+strand), minimal + default-off. Audit: **11 findings, 0 crit/high → CLEAN**. 4-node run **GO**, 0 divergence / 76 heights. **Defer-cap remained unit-test-only.** |
-| **6** | `abd6457e` (**this report**) | Exhaustive re-audit on 6 nodes: **all 5 mission objectives proven LIVE** incl. the defer-cap (§2). 6-lens audit: **19 findings, 3 HIGH → `AUDIT_CLEAN = NO`** (§4). The bigger push worked exactly as intended — it surfaced real, previously-unexercised byzantine-dealer / unverified-share liveness breaks that five green live runs had masked. |
+| **4** | `2c2a271d` | All 6 cycle-3 findings closed: `t = floor(2S/3) − n + 1`, `S ≥ 8n` coupling, non-silent **32-block grace deferral**. Audit: **14 findings, 0 crit/high → CLEAN**. 4-node run **GO**. |
+| **5** | `73b1dd1e` | Both cycle-4 deferrals closed (stake-drift rekey; grace path live-proven heal+strand), minimal + default-off. Audit: **11 findings, 0 crit/high → CLEAN**. 4-node run **GO**. Defer-cap remained unit-test-only. |
+| **6** | `abd6457e` / `b25c89dc` | Exhaustive re-audit on 6 nodes: **all 5 mission objectives proven LIVE** incl. the 128-entry defer-cap. 6-lens audit: **19 findings, 3 HIGH → `AUDIT_CLEAN = NO`** (HIGH-1 chaff-padding, HIGH-2 Byzantine QUAL dealer, HIGH-3 no complaint round). |
+| **7** | `e6e198c1` (**this report**) | Fix for cycle-6 HIGH-1: **DLEQ-verify decryption shares at INGEST** + verified-count-by-construction + defer-routing backstop. **HIGH-1 CLOSED, live-proven on 8 nodes** (§3). But the re-audit found **the fix introduced 2 NEW HIGH DoS findings** (§4-A/B, one halt-class); cycle-6 HIGH-2/HIGH-3 remain open. **24 findings, `AUDIT_CLEAN = NO`.** |
 
-**Held across every cycle (never regressed):** the transparent experience (no daemon/account/fee/key/list),
-consume-path + EndBlock determinism / zero app-hash divergence, dormancy + kill-switch, bounded
-VE/dealing size, flood/refcount invariants (any final EncTx drop goes through `releaseEncTx`), legacy
-declared-DKG path byte-identical.
-
----
-
-## 2. Cycle-6 multi-node LIVE run — **GREEN** on all 5 mission objectives (6-node throwaway)
-
-An independent 6-node throwaway network (fresh genesis, real governance, live delegation moves, live
-flood) exercised every mission path — including the ones cycle 5 could not drive live — with **zero
-app-hash divergence across 40+ sampled heights and two node resyncs**.
-
-1. **(a) 128-entry defer-cap — PROVEN LIVE (the marquee result).** Cycle 5 could only unit-test this.
-   Under a `>128`-concurrent-shortfall flood on the DKG-epoch path: the cap **engages** (152 loud
-   `encmempool_decrypt_deferral_capped` emissions), the deferred set is **bounded at exactly 128
-   concurrent**, defer slots are **per-submitter fair to the exact split (38/38/38/38)**, it is
-   **H2-safe** (epoch-1 ref-count released + epoch pruned at h1678), an **honest ciphertext heals
-   under the flood**, and there is **no leak, no halt**, deterministic across all 6 nodes.
-2. **(b) Boundary liveness — PROVEN LIVE.** With **32 % of committee stake offline**, the **68 %
-   online supermajority decrypts** cleanly; sub-quorum shortfalls defer-and-heal. (Scope: committees
-   were **n = 5–6**, the 6-node constraint — NOT toward the `DkgMaxMembers = 16` cap; larger-n
-   threshold behavior is covered by the `fuzz_stakeweight` + `TestC6_StakeCapture_*` unit probes, not
-   live.)
-3. **(c) Stake-drift storm — PROVEN LIVE.** Under **8 rapid re-delegations**, the `DkgMinRekeyGap`
-   dampener held: **only 2 rekeys fired, exactly 20 blocks apart** — the storm was killed, the
-   feature did not thrash.
-4. **(d) Byzantine dealer (the live-injectable variant) — PROVEN LIVE.** An **absent dealer** was
-   **QUAL-excluded and the round finalized** fork-free on the real 6-node network. (The
-   corrupt-dealing / wrong-point-share / equivocating-VE variants were driven through the REAL
-   deterministic consensus entry points in the keeper tests — NOT over live p2p — because an honest
-   binary cannot emit them; see §3. This is exactly where the audit found HIGH-2/3.)
-5. **(e) Determinism — PROVEN LIVE.** `app_hash` never diverged across all of the above, over 40+
-   sampled heights and two node resyncs.
-
-**Infra bring-up was ROUGH but the scenarios ran clean once up** (recorded for the next runner):
-`evmd` needs `mempool.type = app`; chain-id must be resolved via `client.toml` not the flag; all
-ports were remapped off the live `8545`/`26657` and the concurrent clawback `26659`; `pkill` by
-command-line pattern self-killed the harness (exit-144 flakiness) until moved into script files;
-foreground `sleep` is blocked (use a Monitor/until-loop); autocli binary flags decode hex-before-
-base64; and there is a gov proposal-id race to sequence around. **Verdict on the live run: workable
-— every scenario produced exactly-as-designed results.**
+**Held across every cycle (never regressed):** the transparent experience (no daemon/account/fee/key/
+list), consume-path + EndBlock determinism / zero app-hash divergence, dormancy + kill-switch, bounded
+VE/dealing *bytes*, flood/refcount invariants (any final EncTx drop goes through `releaseEncTx`),
+legacy declared-DKG path byte-identical.
 
 ---
 
-## 3. Why the live run is GREEN and the audit is NO — both are true
+## 2. The cycle-7 fix — what it does
 
-This is the crux, and it must be read before trusting either number in isolation.
+Cycle-6 HIGH-1: `IngestDecryptShareFromVE` (`voteext.go`) stored a decryption share carried on a vote
+extension after checking only operator-membership + point-ownership + first-wins — it did **not**
+verify the share's DLEQ proof. So a committee member (a `<=1/3`-stake MINORITY) could store
+structurally-valid-but-cryptographically-garbage **chaff** shares at its own owned eval points. That
+chaff (1) inflated the RAW stored count past `need` (`abci.go:499` count gate) and (2) marked the
+member "present" in the `DecryptingSetMeetsStake` map (`abci.go:516-522`) — both computed from the RAW
+shares BEFORE any DLEQ check. Control reached `dkg.RecoverVerified`, which dropped the chaff and
+returned a **non-`errNotEnoughShares`** error → `decryptMatured` hit the **hard-drop** branch
+(`abci.go:341`, `encmempool_decrypt_failed`) instead of the within-grace **DEFER** branch
+(`abci.go:319`). A 25%-stake coalition could thereby force any matured-but-transiently-short ciphertext
+to DROP at maturity rather than defer + heal from late honest shares — nullifying the 32-block
+`StrandedDecryptGrace` exactly in its protection window (anti-MEV / liveness DoS).
 
-- The **live 6-node harness runs honest binaries.** An honest binary *provably cannot*:
-  (i) emit a **well-shaped-but-cryptographically-corrupt VE dealing** (it seals every enc-share
-  honestly), nor (ii) **pad the decryption-share count with unverified chaff** at its own eval
-  points with intent. So the live run — correctly — reported GREEN: every path an honest node can
-  be driven down is bounded, fair, deterministic, and heals.
-- The **audit drove the REAL deterministic on-chain functions directly** —
-  `ConsumeVoteExtensions` → `IngestDealingFromVE` / `IngestDecryptShareFromVE`, `EndBlockDKG` →
-  `finalizeRound` → `FinalizePublicWeighted`, and `recoverSharedSecret` — with the adversarial
-  inputs a **malicious validator running modified software** (or a small-stake committee member)
-  *can* produce. Those inputs enter the *same committed-state path* a live proposer would ingest,
-  so the break is real on-chain, not a test artifact.
-- **Neither caveat is a defect in the harness; both are inherent to what an honest transparent
-  binary can be made to do over p2p.** The value of the bigger cycle-6 push is precisely that it
-  reached past the honest-binary envelope and found the breaks five green live runs could not.
+**The belt-and-suspenders fix (commit `e6e198c1`):**
 
-**Net:** the feature is live-clean under honesty and **NOT robust to a byzantine committee member.**
-For an encrypted mempool whose entire value proposition is confidentiality/anti-MEV under partial
-adversity, that is a NO-GO to enable.
+1. **DLEQ-verify at ingest** — `IngestDecryptShareFromVE` now calls `verifyDecryptShareDLEQ`
+   (`voteext.go:469`, :498-513) **before** `SetEncShare`: it recomputes `Y = SharePubKey(commitments,
+   index)` from the epoch's installed `ActiveThresholdKey` commitments and verifies `D = x·A` against
+   the ciphertext's ephemeral `A`, the exact check `RecoverVerified` does at combine time. A chaff
+   share is rejected at ingest (`encmempool_dkg_ve_share_rejected`) and **never enters state**, so it
+   can neither inflate the count nor mark its member present. Verification is a **pure function** of
+   committed state + share bytes — identical verdict on every node, mandatory in this PreBlock path.
+2. **Verified-count-by-construction** — because only verified shares are stored, the `abci.go:499`
+   count gate and the `abci.go:516-522` `memberPresent` stake map now govern on the DLEQ-verified count
+   automatically (`stored == verified` on the transparent path). No separate gate needed.
+3. **Defer-routing backstop** — `dkg.RecoverVerified` now wraps a sentinel `ErrInsufficientVerified`
+   (`proof.go:255`, `abci.go:541`) when fewer than `t` partials pass DLEQ; `recoverSharedSecret` routes
+   that into the **same within-grace DEFER branch** as `errNotEnoughShares`, not the hard-drop branch.
+   This defends any share that reached state WITHOUT ingest verification (a legacy/declared msg path or
+   a genesis import). **By design it is UNREACHABLE on the transparent path** (fix #1 pre-verifies
+   every stored share), so it is a pure backstop, exercised only by the committed `SetEncShare`-inject
+   test.
+
+Preserves every cycle-1..6 fix (defer-cap, boundary liveness, stake-drift rekey, byzantine handling,
+threshold inequalities, dormant-by-default); the stake gate and `errStakeMinority` path are unchanged.
+The fix touches only `voteext.go`, `abci.go`, `proof.go` (plus tests) — it does **not** touch
+`onchain.go` / `endblock.go` / the complaint path, which is why cycle-6 HIGH-2/HIGH-3 are untouched.
 
 ---
 
-## 4. Cycle-6 exhaustive re-audit — **19 findings, 3 HIGH → `AUDIT_CLEAN = NO`**
+## 3. Live chaff-attack proof — GREEN on a fresh isolated 8-node network
 
-The 6-lens audit re-attacked: the defer-cap under flood/sybil, boundary liveness at extreme stake
-distributions, the drift/cadence rekey under storms and overflow, byzantine dealers + the
-complaint/justify path, unverified-share handling, and cross-height/cross-node determinism. Three
-findings are HIGH; all three are **confirmed with passing repro tests** that drive the real
-consensus entry points. **None is a consensus-safety break** (no fork, no halt — determinism held
-in every probe); all three are **liveness/confidentiality DoS** on the enabled transparent path.
+The fix was driven end-to-end on a fresh 8-node throwaway (real genesis, live delegation, live flood,
+a mixed **real-fix / variant** binary set), attacking the exact vulnerable gates:
 
-### HIGH-1 — Unverified VE decryption-share COUNT PADDING turns a healable grace-deferral into a HARD DROP (`< 1/3`-stake adversary; defeats the cycle-3 H-B fix)
+1. **The fix closes the hole on a scenario that GENUINELY reaches the vulnerable gates.** Honest serve
+   at maturity = **116 points**; the attacker adds **chaff = 64** → `serve+chaff = 180 >= t = 163`,
+   i.e. the chaff *would have crossed the count threshold* pre-fix (`180 >= 163`) while honest-alone is
+   short (`116 < 163`). The fixed ingest verification kept the stored/verified count at **exactly 116
+   (not 180)** — **384 chaff shares rejected at ingest**, attacker never marked present — so the
+   matured-but-short ciphertext **DEFERRED** (`encmempool_decrypt_missed`) instead of hard-dropping,
+   and **HEALED to the correct plaintext** from late honest shares within the 32-block grace. The
+   `have = 116-not-180` count is direct causal evidence that ingest verification is what prevents the
+   threshold crossing.
+2. **The fix does NOT mask real faults.** A genuinely-malformed ciphertext still **hard-drops** (AEAD
+   failure at `decrypt_failed`) — the defer-routing does not launder a real fault into the heal grace.
+3. **Determinism is airtight.** **135 heights** across every scenario show **byte-identical app-hash**
+   across the mixed real-fix/variant network, and a node **resynced from genesis reproduces every
+   attack height byte-for-byte** — confirming VE-ingest DLEQ verification is the required pure /
+   deterministic consensus function it must be.
+4. **All five cycle-6 greens re-proven LIVE:** defer-cap bounded + fair, boundary liveness, stake-drift
+   rekey dampened, absent-dealer QUAL exclusion, honest decrypt.
 
-- **Where:** `x/encmempool/keeper/voteext.go:453` (`IngestDecryptShareFromVE` stores a share
-  **without verifying its DLEQ proof** — verification is deferred to combine time) →
-  `x/encmempool/keeper/abci.go:488` (`recoverSharedSecret` count gate is `len(shares) < need` on the
-  **RAW stored count**) → `abci.go:504-514` (`DecryptingSetMeetsStake` marks a member "present" from
-  those same raw shares) → `abci.go:341` (any non-`errNotEnoughShares` error is the **HARD-DROP**
-  branch) ; verification finally happens too late at `x/encmempool/dkg/proof.go:239`
-  (`RecoverVerified` drops unverified partials, then errors).
-- **Mechanism:** a committee member submits **structurally-valid but cryptographically-invalid**
-  decryption shares at **its OWN owned eval points** via a vote extension. That chaff (1) inflates
-  the RAW count past `need` (count gate passes), and (2) marks the member "present" (stake gate
-  passes). `RecoverVerified` then drops the chaff (verified `< need`) and returns a **non-
-  `errNotEnoughShares`** error → the matured ciphertext is **hard-dropped** (`encmempool_decrypt_
-  failed`) *instead of* being deferred into the 32-block grace to heal from late honest shares.
-- **Impact:** during the honest-share-arrival window the grace exists to protect, a **stake-MINORITY
-  Byzantine coalition** can force matured ciphertexts to drop rather than decrypt — an anti-MEV /
-  liveness DoS that **weakens the cycle-3 H-B fix.** Deterministic (no fork); loud-but-**mislabeled**
-  (`decrypt_failed`, masking the attack as a bad ciphertext).
-- **Proof:** `TestC7_UnverifiedShareCountPadding_ForcesDropInsteadOfGrace` **PASSES** — a **25 %-stake
-  minority dropped a healable ciphertext**; the CONTROL (identical honest shares, no chaff) deferred
-  then healed. The *only* difference between DROP and HEAL is attacker-supplied unverified shares.
+**Two honest caveats — neither undermines the closure, both are recorded:**
 
-### HIGH-2 — A Byzantine QUAL dealer permanently breaks an epoch's decryption, with NO complaint recourse on the transparent path
+- **(a) The counterfactual is arithmetic + a unit test, not a live pre-fix drop.** The run proved the
+  FIXED behavior on the vulnerable-path scenario rather than also booting a pre-fix binary live to
+  watch the drop. The "would-have-dropped" claim rests on the committed unit test `TestC7...` plus the
+  `have = 116-not-180` arithmetic (`180 >= t=163` pre-fix vs `116 < t=163` post-fix). That is direct
+  causal evidence, but it is not a side-by-side live A/B.
+- **(b) Fix #3 is by-design unreachable on the live transparent path.** Because fix #1 pre-verifies
+  every stored share, the live run exercises **fix #1 + #2 only**; fix #3's `ErrInsufficientVerified →
+  defer` backstop is covered by the committed test that injects an unverified share via `SetEncShare`
+  (the legacy/genesis door it exists to guard), not by the live network.
 
-- **Where:** `x/encmempool/dkg/onchain.go:92` (`FinalizePublicWeighted` admits a dealer to QUAL by
-  checking only the **commitment SHAPE** — count + point-parse — never that its enc-shares open and
-  match the commitments) → `x/encmempool/keeper/endblock.go:392` (`finalizeRound` →
-  `FinalizePublicWeighted`) ; and there is no way to accuse it: `x/encmempool/keeper/voteext.go:191`
-  (`TransparentMembers` sets **no `AccountAddr`**) and `x/encmempool/types/voteext.go:34`
-  (`VoteExtension` has **no complaint field**).
-- **Mechanism:** a QUAL dealer sends a well-shaped dealing (valid commitments, own eval points
-  honest) but **corrupts every enc-share addressed to points it does NOT own** — either unopenable
-  (AES-GCM tag fails) or openable-but-wrong (seals a wrong scalar). It passes the shape gate, enters
-  QUAL, and mixes into the group key. Every honest member that derives a share touching that dealer
-  gets a **wrong share**, so the epoch key is **undecryptable**. On the transparent path there is no
-  channel to complain: transparent members carry no account, so `MsgDkgComplaint`'s
-  `memberIndexByAccount` returns 0 → **"not a member"** for everyone.
-- **Impact:** a **single** Byzantine dealer surviving in QUAL **permanently bricks an epoch's
-  decryption. Unhealable** — no complaint, no justify, no recovery short of a full membership-change
-  rekey (which the same dealer can re-poison).
-- **Proof:** `TestRepro_ByzantineDealerInQual_BreaksLiveness_NoComplaintRecourse` **PASSES** —
-  variant-1 (unopenable) and variant-2 (openable-but-wrong) each leave **only 8/14 partials passing
-  DLEQ**; the `[no-recourse]` assertion confirms the complaint path is unreachable on the transparent
-  path. (Contrast: `TestOnChainDKG_ComplaintDisqualifiesCheater` PASSES — the complaint machinery
-  **works on the legacy DECLARED/account path**; it is only the transparent VE path that has no way
-  to reach it.)
+**Operational note (recorded for the next runner):** the core proofs ran cleanly; the resync/teardown
+hit friction from the documented `pkill` self-kill gotcha (command strings containing the node path)
+and a node7 double-process blockstore corruption — both resolved via **port-targeted `fuser` kills**,
+neither affecting any proven behavior.
 
-### HIGH-3 — The transparent (vote-extension) DKG has NO complaint/justify round at all (root cause of HIGH-2; unhealable liveness DoS)
+**Net on the live run: GREEN — the fix demonstrably closes the chaff-padding hole and heals.** What the
+live run did NOT and could NOT surface is the *cost* of the new verification under adversarial volume;
+that is what the code audit found next (§4).
 
-- **Where:** `x/encmempool/keeper/voteext.go:307` (`ConsumeVoteExtensions` ingests announcements,
-  dealings, and shares **by shape only — there is no complaint phase**) ; root cause also
-  `x/encmempool/types/voteext.go:34` (no complaint field on the VE) +
-  `x/encmempool/dkgnode/enckey.go:177` (`DeriveShares` sums `X_p = Σ_{i∈QUAL} f_i(p)` over **ALL**
-  QUAL dealers — one bad dealer corrupts every derived share) + `x/encmempool/keeper/dkg.go:385`
-  (`finalizeRound`'s `disq` set is populated **only** from `IterateComplaints`, which is **never
-  written on the transparent path**).
-- **Relationship to HIGH-2:** HIGH-2 is the exploit; HIGH-3 is the structural root — the transparent
-  path traded away the GJKR-style complaint+justify round that the declared path retains, so a
-  proven-bad dealer can never be excluded from QUAL. Fixing HIGH-3 (add the round) closes HIGH-2.
-- **Impact:** unhealable liveness DoS on epoch decryption by any single Byzantine QUAL dealer.
-- **Proof:** same repro as HIGH-2.
+---
 
-### Notable additional residuals (part of the 19; medium-class, non-blocking-but-material)
+## 4. Cycle-7 re-audit — **24 findings, `AUDIT_CLEAN = NO`**, TWO NEW HIGH DoS introduced by the fix
 
-- **Defer-cap fairness is per-SUBMITTER, and submitter identity is free → sybil defeats it.**
-  `TestProbe_SybilDefeatsDeferCapFairness` **PASSES**: the fair-share cap holds against 1 flooding
-  identity but is **DEFEATED by 200 sybil identities of equal volume** (honest ciphertext
-  `granted_grace = false`, `cap_dropped = true`). **This qualifies mission objective (a)'s "fair"
-  claim:** the live 38/38/38/38 fairness was proven with a **small fixed set of submitters**; it
-  does NOT hold under a sybil spray. Whether this matters depends on whether encmempool submission is
-  permissioned/costly enough to price sybils — a design decision to record, not silently assume.
-- **Overflow-magnitude stake silently kills the stake-drift rekey.**
-  `TestC7_BB_OverflowRecoveredNoHaltNoRekey` **PASSES**: pathological stake magnitudes make the drift
-  metric panic every block — **recovered, no halt, no fork** — but the enabled rekey then **NEVER
-  fires (feature silently dead) + per-block panic-event spam.** Default-off, so not a live risk
-  today; but an operator who enables `DkgRekeyOnStakeDriftBps` on a chain with extreme stake
-  magnitudes gets a silently-dead feature.
+The re-audit re-attacked the change with the same discipline as cycle 6, plus a dedicated
+**consensus/halt lens** and **defer-routing lens** on the new code (committed probes:
+`zzz_audit_c7_consensus_probe_test.go`, `zzz_audit_c7_defer_lens_probe_test.go`,
+`audit_c7_defer_drop_probe_test.go`). Total findings rose **19 → 24**. The chaff-padding HIGH is
+closed, but the closure opened two new HIGHs on the crypto it moved onto the hot path. **Neither is a
+consensus-safety break** (the probes prove the verify path never panics, and the ingest verdict is
+order-independent + deterministic — app-hash held across all 135 live heights); both are **liveness /
+availability DoS on the enabled path**, and finding A is **halt-class**.
 
-The remaining ~14 findings are medium/low/informational and are the external auditor's starting
-material (§5). Cycle-6's committed GREEN regressions landed in `abd6457e`
-(`byzantine_dkg_test.go`, `deferral_cap_live_test.go`, `fuzz_stakeweight_test.go`,
-`storm_determinism_test.go`). The adversarial repros that DEMONSTRATE the three HIGH findings live in
-the independent audit-probe suites (`audit_c6_*` / `audit_c7_*` / `zzz_audit6_*` / `zzz_audit_c7_*`),
-**currently untracked** in the worktree — promote them to committed regressions on the fix cycle
-(same disposition as the cycle-5 `audit_c5_*` probes).
+### HIGH-A (NEW) — Unbounded per-VE ingest-DLEQ-verify: a single committee member stalls consensus every block (halt-class liveness DoS)
+
+- **Where:** `x/encmempool/keeper/voteext.go:322-328` (`ConsumeVoteExtensions` Phase 3 loops over
+  **every** share in **every** extension with **no count cap**) → `:469` (per-share `verifyDecryptShare
+  DLEQ` call) → `:498-513` (`verifyDecryptShareDLEQ` — `ParseCommitmentPoints` + `SharePubKey` +
+  `VerifyDecryptShare`, an **`O(t)` elliptic-curve** computation per share). The only bound on how many
+  shares a member can submit is **byte size**: `VoteExtMaxBytes = 1 MiB` (`x/encmempool/types/voteext.go:32`),
+  and `evmd/dkg_voteext.go` `VerifyVoteExtension` caps **bytes only** — never share count.
+- **Mechanism:** a decryption share is ~100–200 bytes, so a 1 MiB vote extension carries **thousands**
+  of them. A single committee member packs its extension with thousands of shares (chaff or not) →
+  thousands of `O(t)` DLEQ verifications executed in **PreBlock, on every node, every block**. PreBlock
+  is on the consensus-critical path; a large enough batch stalls block production network-wide.
+- **Impact:** **halt-class liveness DoS from ONE committee member.** This is strictly worse than the
+  cycle-6 HIGH-1 it replaced (that was a deterministic *drop*, no halt). The fix removed a forced-drop
+  DoS and introduced a stall-the-chain DoS.
+- **Remediation (cycle-8):** cap the **number** of shares verified per extension / per member per block
+  (a small multiple of the member's owned eval-point count is sufficient — a member can never
+  legitimately owe more shares than it owns points across in-flight ciphertexts), independent of the
+  byte cap.
+
+### HIGH-B (NEW) — `<=1/3`-stake PreBlock compute DoS: uncapped, re-verified-EVERY-BLOCK DLEQ verification of REJECTED chaff
+
+- **Where:** `x/encmempool/keeper/voteext.go:462-466` (the first-wins dedup consults `CollectShares`,
+  i.e. **already-STORED** shares only) + `:479` (a REJECTED chaff share returns `false` **before**
+  `SetEncShare` — it is never stored) + `:469`/`:498-513` (the verify) + `:322-328` (the uncapped loop).
+- **Mechanism:** the fix's own comment (`voteext.go:459-461`) claims verification "runs exactly ONCE
+  per share … never a per-block one." **That holds only for shares that PASS.** A rejected chaff share
+  is never stored, so the first-wins dedup never suppresses it; the attacker re-sends the identical
+  chaff on a fresh vote extension **every block**, and because nothing recorded the prior rejection it
+  is **re-verified from scratch every block** until the target ciphertext matures or drops. A
+  `<=1/3`-stake minority sustains a per-block DLEQ-verification tax on **all** nodes for the full life
+  of every in-flight ciphertext.
+- **Impact:** sustained `<=1/3`-stake compute DoS on PreBlock; compounds HIGH-A (the uncapped loop is
+  the multiplier, the missing negative-cache is the persistence). Deterministic, no fork — availability.
+- **Remediation (cycle-8):** short-circuit before the `O(t)` verify (cheap structural pre-checks first),
+  and/or negatively-cache a rejected `(decryptHeight, seq, index)` for the ciphertext's lifetime so
+  identical chaff is rejected in `O(1)` on re-send rather than re-verified.
+
+**Both new HIGHs share one root cause:** the fix added an **expensive, uncapped, un-cached pure-crypto
+verification into the consensus-critical PreBlock path.** The functional closure (§3) is correct; the
+*cost* of the closure is unbounded. Cycle-8 must bound it before the chaff-padding fix is a net
+positive.
+
+### Carried-open cycle-6 HIGHs (out of scope for this fix; surfaces untouched — verified from the diff)
+
+- **HIGH-2 — Byzantine QUAL dealer permanently bricks an epoch's decryption, no complaint recourse.**
+  A QUAL dealer that corrupts enc-shares to points it does not own passes the shape-only gate
+  (`onchain.go` `FinalizePublicWeighted`), enters QUAL, and poisons every derived share; the transparent
+  path carries no account (`voteext.go` `TransparentMembers`) so `MsgDkgComplaint` is unreachable. **Still
+  open** — `e6e198c1` touches neither `onchain.go` nor `endblock.go`.
+- **HIGH-3 — the transparent VE-DKG has NO complaint/justify round at all** (root cause of HIGH-2;
+  `finalizeRound`'s `disq` set is only ever written from the never-reached `IterateComplaints`). **Still
+  open** — the fix adds no complaint field/phase.
+
+### Notable residuals carried from cycle-6 (medium-class, non-blocking-but-material)
+
+- **Defer-cap fairness is per-SUBMITTER and submitter identity is free → sybil defeats it** (fair share
+  holds vs 1 flooding identity, defeated by 200 sybils). Qualifies mission objective (a)'s "fair" claim.
+- **Overflow-magnitude stake silently kills the stake-drift rekey** (recovered, no halt, but the enabled
+  rekey never fires + per-block panic-event spam). Default-off, so not a live risk today.
+
+The remaining findings are medium/low/informational — the external auditor's starting material (§5).
 
 ---
 
 ## 5. Residuals & the EXTERNAL-audit focus list
 
-### The three HIGH blockers to ENABLE (must fix + re-audit before turning the feature on)
+### The FOUR HIGH blockers to ENABLE (must fix + re-audit before turning the feature on)
 
-1. **HIGH-1 — verify decryption-share DLEQ proofs at INGEST.** In `IngestDecryptShareFromVE`
-   (`voteext.go`, before `SetEncShare` at :453) compute `Y = SharePubKey(commitments, s.Index)` from
-   the epoch's committed public commitments and reject any share that fails
-   `VerifyDecryptShare(e.A, share, Y, proof)` — so only verified shares are ever stored and the
-   raw-count gate at `abci.go:488` equals the verified count. (Defence-in-depth: in
-   `recoverSharedSecret`, route `RecoverVerified`'s "too few VERIFIED partials" outcome to the
-   **defer/heal** branch, i.e. treat it as `errNotEnoughShares`, not the hard-drop branch — so even a
-   missed verification cannot skip the grace.)
-2. **HIGH-2 / HIGH-3 — add a share-validity gate and a complaint/justify round to the transparent
-   path.** This is the deep fix and the primary escalation target:
-   (i) on consuming dealings, each member verifies that every enc-share addressed to a point IT owns
-   opens AND matches the dealer's Feldman commitments (`VerifyShareAgainstCommitments`);
-   (ii) add a **complaint field to `types.VoteExtension`** and a **complaint→justify phase to
-   `ConsumeVoteExtensions`** so `finalizeRound`'s `disq` set is actually populated on the transparent
-   path (today it is only ever written from the never-reached `IterateComplaints`);
-   (iii) `FinalizePublicWeighted` must **exclude a complaint-proven-bad dealer from QUAL**, and
-   `DeriveShares` must sum only over the healthy QUAL set. Without a justify step an honest dealer
-   can be griefed out; without the complaint step a bad dealer can never be removed — the round needs
-   both.
+1. **HIGH-A (cycle-7, NEW) — bound the per-block ingest-verify work.** Cap the number of decryption
+   shares verified per vote extension / per member per block (a small multiple of owned eval points),
+   independent of `VoteExtMaxBytes`. Without this, one member can stall consensus every block.
+2. **HIGH-B (cycle-7, NEW) — stop re-verifying rejected chaff every block.** Negatively-cache a rejected
+   share (or cheap-pre-check before the `O(t)` DLEQ) so identical chaff costs `O(1)` on re-send, for the
+   ciphertext's lifetime. Fixing A+B makes the cycle-7 chaff-padding closure a genuine net-positive.
+3. **HIGH-2 / HIGH-3 (cycle-6, carried) — add a share-validity gate AND a complaint/justify round to the
+   transparent path.** The deep fix: (i) verify every enc-share against the dealer's Feldman commitments
+   on consume; (ii) add a complaint field to `types.VoteExtension` + a complaint→justify phase to
+   `ConsumeVoteExtensions` so `finalizeRound`'s `disq` set is populated on the transparent path;
+   (iii) exclude a complaint-proven-bad dealer from QUAL and sum `DeriveShares` only over the healthy set.
 
 ### Required regardless of the above
 
-3. **External professional audit REQUIRED before ANY mainnet reliance** on the encrypted mempool's
-   confidentiality. Six internal adversarial cycles are exhaustive but are **not** an external audit.
-   Hand the firm this §4/§5, the full `audit_c6_*`/`audit_c7_*` probe corpus, and the two live
-   verdict runs (cycle 5, cycle 6) as starting material. **No external audit has been performed.**
-4. **Sybil-vs-defer-cap-fairness (§4 residual).** Decide whether encmempool submission is costly
-   enough to price sybils, or add a per-cost/stake weighting to the defer-cap fair-share.
-5. **Drift-metric overflow robustness (§4 residual).** If the stake-drift rekey will ever be enabled,
-   make the metric overflow-total (it self-recovers today but the feature silently dies).
-6. **The decrypt bar is `> 2/3 − 2n/S`** (≈ 54.7 % at defaults), NOT ">2/3" — an honest-public-
-   statement obligation for anyone quoting the confidentiality threshold.
-7. **Committee stake ≠ total bonded stake** (top-N by stake; all fractions are of snapshotted
-   committee stake) — pre-existing, inherent to bounding VE size.
-8. Carried non-blocking deferrals from cycle 2, unchanged: injected blob occupies `Txs[0]`; lenient
+4. **External professional audit REQUIRED before ANY mainnet reliance** on the encrypted mempool's
+   confidentiality. Seven internal adversarial cycles are exhaustive but are **not** an external audit.
+   Hand the firm §3/§4/§5, the full `audit_c6_*` / `audit_c7_*` / `zzz_audit_c7_*` probe corpus, and the
+   cycle-5/6/7 live verdict runs. **No external audit has been performed.**
+5. **Sybil-vs-defer-cap-fairness** (cycle-6 residual) — price sybils or weight the defer-cap fair-share.
+6. **Drift-metric overflow robustness** (cycle-6 residual) — make the metric overflow-total if the
+   stake-drift rekey will ever be enabled.
+7. **The decrypt bar is `> 2/3 − 2n/S`** (≈ 54.7 % at defaults), NOT ">2/3" — honest-statement obligation.
+8. **Committee stake ≠ total bonded stake** (top-N by stake; fractions are of snapshotted committee
+   stake) — inherent to bounding VE size.
+9. Carried non-blocking deferrals from cycle 2, unchanged: injected blob occupies `Txs[0]`; lenient
    `ProcessProposal` (a Byzantine proposer can stall DKG *progress*, not fork/halt); remote-signer/KMS
    nodes safely non-participate.
 
@@ -282,10 +283,10 @@ daemon**, **no account/fee setup**, **no manual enc-key registration**, **no dec
 | Phase | Handler | What it does |
 |-------|---------|--------------|
 | `ExtendVote` | `dkgExtendVoteHandler` | Packs `{EncPubKey + PoP, Feldman dealing, DLEQ-proved per-eval-point decryption shares}` into the precommit's `VoteExtension`. Node-local. |
-| `VerifyVoteExtension` | `dkgVerifyVoteExtensionHandler` | Lenient structural check only; all crypto/membership/dedup enforced deterministically on-chain later. **(Note: HIGH-1/2/3 are exactly the "enforced later" gaps — shape is checked, share/dealing validity is not, and there is no complaint channel.)** |
+| `VerifyVoteExtension` | `dkgVerifyVoteExtensionHandler` | Lenient structural check + **BYTE** cap only (`VoteExtMaxBytes`). **(Note: cycle-7 HIGH-A/B are exactly here — there is no per-block SHARE-COUNT cap, so bytes-only bounding lets one member submit thousands of shares that each cost an `O(t)` DLEQ verify in PreBlock.)** |
 | `PrepareProposal` | `wrapDkgPrepareProposal` | Prepends the H-1 `ExtendedCommitInfo` as `Txs[0]` behind an inject marker. |
-| `ProcessProposal` | `wrapDkgProcessProposal` | Self-certifies `Txs[0]` with `ValidateVoteExtensions`, strips it, delegates. Gated by `veActive` (HIGH-1/cycle-1 fix). |
-| `PreBlock` | `consumeDkgVoteExtensions` → `keeper.ConsumeVoteExtensions` | Resolves consensus address → operator; deterministic canonicalizing consume. **No complaint phase (HIGH-3).** |
+| `ProcessProposal` | `wrapDkgProcessProposal` | Self-certifies `Txs[0]` with `ValidateVoteExtensions`, strips it, delegates. Gated by `veActive`. |
+| `PreBlock` | `consumeDkgVoteExtensions` → `keeper.ConsumeVoteExtensions` | Resolves consensus address → operator; deterministic canonicalizing consume. **Cycle-7: now DLEQ-verifies each decryption share at ingest (fix), but the consume loop is uncapped in share count (HIGH-A) and rejected chaff is re-verified every block (HIGH-B). No complaint phase (HIGH-3).** |
 
 **Pillar 2 — Transparent key.** A secp256k1 ECIES key per member, minted with zero operator action
 (`dkgnode.LoadOrCreateEncKey`, `<home>/dkg_enc_key.json`, 0600), auto-announced with an operator-bound
@@ -293,19 +294,21 @@ PoP (cycle-2), self-identity by OPERATOR (cycle-2).
 
 **Pillar 3 — Members = bonded validators.** `TransparentMembers` derives the committee from the bonded
 set: top-N by stake (`EffectiveMaxMembers`), clamped to `floor(S/8)` seats, each member's eval points
-apportioned by stake. **Members carry NO account address (`voteext.go:191`) — which is why the
-account-based complaint path is unreachable (HIGH-2/3).** Rekey triggers: membership change, failed-
-round retry, and the opt-in cadence/stake-drift (cycle-5, default-off).
+apportioned by stake. **Members carry NO account address — which is why the account-based complaint
+path is unreachable (HIGH-2/3).** Rekey triggers: membership change, failed-round retry, and the opt-in
+cadence/stake-drift (cycle-5, default-off).
 
-### Determinism contract (the #1 fork risk — held through every live run, including cycle 6)
-All determinism is confined to the consume half and the EndBlock DKG state machine, both pure
-functions of `(committed state, entries)`. **Cycle-6 confirms this held even under every adversarial
-probe** — the 3 HIGH findings are liveness/DoS, NOT divergence: `app_hash` never diverged (§2.5).
+### Determinism contract (the #1 fork risk — held through every live run, including cycle 7)
+All determinism is confined to the consume half and the EndBlock DKG state machine, both pure functions
+of `(committed state, entries)`. **Cycle-7 confirms this held even with DLEQ verification moved into
+PreBlock** — the ingest verdict is a pure, order-independent, non-panicking function (proven by the
+consensus-lens probes), and `app_hash` never diverged across 135 live heights + a genesis resync (§3).
+The four HIGH findings are liveness/availability/DoS, NOT divergence.
 
 ### Dormancy / kill-switch
 Every handler is a strict no-op unless `DkgEnabled && DkgTransparent` AND vote extensions are active;
 the cycle-5 triggers additionally require their param `> 0`. All enabling flags default false/0.
-**All three HIGH findings are on the ENABLED path — none is reachable while dormant.**
+**All four HIGH findings are on the ENABLED path — none is reachable while dormant.**
 
 ---
 
@@ -313,20 +316,23 @@ the cycle-5 triggers additionally require their param `> 0`. All enabling flags 
 
 ### Verdict: `AUDIT_CLEAN = NO` — **NO-GO to ENABLE**; dormant-by-default MERGE is safe.
 
-1. **NO-GO to enable the transparent DKG** on any chain relied on for confidentiality until HIGH-1/2/3
-   (§4) are fixed and re-audited. They are liveness/anti-MEV DoS on the encrypted-mempool guarantee
-   (no fork, no halt), reproduced against the real consensus entry points.
+1. **NO-GO to enable the transparent DKG** on any chain relied on for confidentiality. The targeted
+   cycle-6 HIGH-1 (chaff-padding) is closed and live-proven, but the closure **introduced HIGH-A
+   (halt-class, single-member) and HIGH-B (`<=1/3`-stake, re-verify-every-block)**, and cycle-6 HIGH-2/
+   HIGH-3 remain open — **4 open HIGH findings**, all liveness/availability DoS (no fork, no consensus
+   halt-via-divergence), all reproduced against the real consensus entry points.
 2. **Merging DORMANT is safe.** With default params (`DkgEnabled = DkgTransparent = false`, drift
-   triggers 0) the binary is byte-behavior-identical to `17101a12`; none of the three HIGH findings is
+   triggers 0) the binary is byte-behavior-identical to `17101a12`; none of the four HIGH findings is
    reachable; both modules build green; the full regression + probe suite passes.
-3. **External professional audit REQUIRED before ANY mainnet reliance**, independent of (1). The
-   internal cycles are exhaustive but not a substitute. **No external audit has been performed.**
-4. **The release decision belongs to Jason** — merge timing, the HIGH-1/2/3 fix cycle, VE scheduling,
-   drift-trigger enablement, and the enable vote are his call.
+3. **External professional audit REQUIRED before ANY mainnet reliance**, independent of (1). **No
+   external audit has been performed.**
+4. **The release decision belongs to Jason** — merge timing, the cycle-8 HIGH-A/B + HIGH-2/3 fix cycle,
+   VE scheduling, drift-trigger enablement, and the enable vote are his call.
 
 ### What is safe today
-Merging this branch **without enabling** is safe. What is NOT safe is turning the feature on: three
-HIGH liveness findings are open.
+Merging this branch **without enabling** is safe and preserves the fix + the committed probe corpus.
+What is NOT safe is turning the feature on: four HIGH liveness findings are open, two of them newly
+introduced by the cycle-7 fix itself.
 
 ---
 
@@ -334,24 +340,25 @@ HIGH liveness findings are open.
 
 | Item | State |
 |------|-------|
-| Builds (evmd + root modules) | ✅ exit 0 (root, evmd, `go vet` all clean) |
-| Full test + probe suite (`-tags test`) | ✅ PASS (the repro tests pass by DEMONSTRATING the findings) |
-| Consume-path + EndBlock determinism (unit + live) | ✅ 0 divergence, every cycle incl. cycle-6 (40+ heights × 6 nodes, 2 resyncs) |
-| Transparent experience (no daemon/account/fee/key/list) | ✅ proven live, cycles 1–6 |
-| Kill-switch / dormancy | ✅ default-off; all 3 HIGH findings unreachable while dormant |
+| Builds (evmd + root modules, `-tags test`) | ✅ exit 0 (root, evmd, `go vet` all clean — verified this cycle) |
+| Full test + probe suite (`-tags test`) | ✅ PASS (cycle-7 keeper suite green; repro/probe tests pass by DEMONSTRATING the findings) |
+| Consume-path + EndBlock determinism (unit + live) | ✅ 0 divergence, every cycle; cycle-7: **135 heights byte-identical + genesis resync reproduces every attack height** |
+| Transparent experience (no daemon/account/fee/key/list) | ✅ proven live, cycles 1–7 |
+| Kill-switch / dormancy | ✅ default-off; all 4 HIGH findings unreachable while dormant |
 | HIGH-1/2/3/4 (cycles 1–4) + cycle-3 H-A/H-B + M/L | ✅ closed |
-| **(a) 128-entry defer-cap** | ✅ **PROVEN LIVE (marquee)** — cap engages, bounded 128, H2-safe, heals, deterministic … ⚠️ **but fairness is sybil-defeatable (§4)** |
-| **(b) Boundary liveness** | ✅ live at 32% offline / 68% online, n=5–6; larger-n via unit fuzz (not live) |
-| **(c) Stake-drift storm** | ✅ live — 8 delegations → 2 rekeys 20 blocks apart (dampener held) |
-| **(d) Byzantine dealer — absent-dealer (live-injectable)** | ✅ live QUAL-exclusion + finalize, fork-free |
-| **(d) Byzantine dealer — corrupt-dealing / no-complaint-round** | ❌ **HIGH-2 / HIGH-3** — single QUAL dealer permanently bricks epoch decryption, NO recourse (§4) |
-| **Unverified-share count padding** | ❌ **HIGH-1** — `<1/3`-stake adversary converts healable deferral → hard drop (§4) |
-| **(e) Determinism through all of the above** | ✅ 0 app-hash divergence (the 3 HIGHs are liveness/DoS, not forks) |
-| Multi-node live verdict run (cycle 6) | ✅ GREEN on all 5 objectives, 6 nodes |
-| Security audit (cycle 6) | ❌ **`AUDIT_CLEAN = NO`** — 19 findings, **3 HIGH** (§4) |
+| **cycle-6 HIGH-1 — unverified-share count padding → forced drop** | ✅ **CLOSED (cycle-7)** — DLEQ-verify at ingest; live-proven (count held 116-not-180, defers + heals) |
+| **cycle-7 HIGH-A — unbounded per-VE ingest-verify (halt-class)** | ❌ **OPEN — NEW** (introduced by the fix; one member stalls consensus every block) |
+| **cycle-7 HIGH-B — re-verify-every-block chaff compute DoS** | ❌ **OPEN — NEW** (introduced by the fix; `<=1/3`-stake sustained PreBlock tax) |
+| **cycle-6 HIGH-2 — Byzantine QUAL dealer bricks epoch, no recourse** | ❌ **OPEN** (out of scope for this fix; surfaces untouched) |
+| **cycle-6 HIGH-3 — no complaint/justify round on transparent path** | ❌ **OPEN** (out of scope for this fix; surfaces untouched) |
+| Ingest DLEQ verify — pure / deterministic / order-independent / no-panic | ✅ proven (consensus-lens probes + 135 live heights) |
+| Multi-node live verdict run (cycle 7) | ✅ GREEN — chaff rejected at ingest, defers + heals, real malformed still drops, 8 nodes, 0 divergence |
+| Security audit (cycle 7) | ❌ **`AUDIT_CLEAN = NO`** — 24 findings, **4 open HIGH** (2 new, 2 carried) (§4) |
 | External audit | ❌ NOT DONE — **required before any mainnet reliance** regardless |
-| **Enable on a real chain** | ❌ **NO-GO** — fix HIGH-1/2/3 + re-audit first |
+| **Enable on a real chain** | ❌ **NO-GO** — fix HIGH-A/B (cycle-7) + HIGH-2/3 (cycle-6) + re-audit first |
 | **Merge DORMANT (feature off)** | ✅ safe — byte-behavior-identical to `17101a12` |
 
-*Author: Limonata. This branch is a large standalone consensus change; do not merge into a release,
-and do NOT enable the transparent DKG until the three HIGH findings are closed and re-audited.*
+*Author: Limonata. This branch is a large standalone consensus change; do not merge into a release, and
+do NOT enable the transparent DKG until all four HIGH findings are closed and re-audited. The cycle-7
+fix closes the chaff-padding hole (live-proven) but introduces two new DoS HIGHs — it is a checkpoint,
+not a green light.*
