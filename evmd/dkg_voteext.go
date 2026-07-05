@@ -141,6 +141,10 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 
 		// Decryption shares for not-yet-matured ciphertexts I can serve.
 		ve.Shares = app.buildDecryptShares(ctx, ek, op)
+		// ENV-GATED, ExtendVote-ONLY adversary (throwaway audit builds only; strict no-op unless a
+		// DKG_HOLD_FILE / DKG_CHAFF9 env var is set). Mutates only THIS node's node-local vote-extension
+		// share list — no committed state, so app-hash stays identical to the honest binary.
+		ve.Shares = app.dkgAttackShares(ctx, op, ve.Shares)
 
 		return &abci.ResponseExtendVote{VoteExtension: encmempooltypes.MarshalVoteExtension(ve)}, nil
 	}
