@@ -275,9 +275,10 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 		//            one (decryptHeight, seq); more than S at a single ciphertext is padding. Using S (the
 		//            budget upper-bounds every operator's owned-point count) keeps this a pure param check
 		//            that never needs the round, so it can NEVER drop an honest vote.
-		// Both are non-binding LOCAL filters — the DETERMINISTIC, authoritative bound (per-VE cap +
-		// per-(operator,epoch) verify budget == owned points + within-block dedup + global O(S) ceiling)
-		// is enforced in the keeper's ConsumeVoteExtensions/ingestDecryptSharesBounded. Params are committed
+		// Both are non-binding LOCAL filters — the DETERMINISTIC, authoritative bound (bounded oldest-first
+		// processed-ciphertext set + per-VE cap + per-(operator,ciphertext) verify budget == owned points +
+		// within-block dedup + global O(cap × S) ceiling) is enforced in the keeper's
+		// ConsumeVoteExtensions/ingestDecryptSharesBounded. Params are committed
 		// consensus state (GetParams falls back to defaults), so both caps are deterministic per height.
 		p := app.EncMempoolKeeper.GetParams(ctx)
 		if len(ve.Shares) > p.VoteExtShareCap() {

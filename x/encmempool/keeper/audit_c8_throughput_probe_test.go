@@ -11,16 +11,18 @@ import (
 )
 
 // ============================================================================
-// CYCLE-8 AUDIT (COMPUTE/HALT lens) — the honest-throughput cost of the O(S) verify bound.
+// CYCLE-9 FIX VERIFICATION (COMPUTE/HALT + honest-throughput lens).
 //
-// The committed cycle-8 probes only ever measure the ATTACKER view of the per-(operator,epoch)
-// verify budget ("a chaff spammer is pinned to its owned-point count"). This probe measures the
-// SAME budget from the HONEST view: the committee serving REAL, DLEQ-valid shares for several
-// in-flight ciphertexts of one epoch in one block. Because every honest operator serves oldest-
-// first and the budget caps it at len(owned points) verifications per (operator,epoch) per block,
-// the whole committee piles its entire budget onto the single OLDEST ciphertext, so only ONE
-// ciphertext accrues shares per block — no matter how many are matured and being served, and no
-// matter that the decrypt side (maxDecryptAttemptsPerBlock = 2048) would gladly drain far more.
+// Cycle-8 keyed the ingest verify budget per (operator, EPOCH) at owned-points. That closed the
+// compute-DoS but throttled the HONEST committee to ~1 decryptable ciphertext per block per epoch:
+// a decryption share is per-CIPHERTEXT (D = x*A), so an honest member owes owned-points shares PER
+// ciphertext, but the per-epoch budget only admitted owned-points TOTAL, piling the whole committee's
+// budget onto the single oldest ciphertext and hard-dropping the rest past the 32-block grace.
+//
+// Cycle-9 re-keys the budget per (operator, CIPHERTEXT). These probes assert (a) honest liveness is
+// RESTORED — every fully-served in-flight ciphertext of one epoch accrues its shares in ONE block, up
+// to the bounded processed set — and (b) the compute bound still HOLDS: total block DLEQ verification
+// is bounded by maxVerifyCiphertextsPerBlock * S regardless of attacker input.
 // ============================================================================
 
 // c8StoredAt returns how many decryption shares are stored for a specific ciphertext.
@@ -28,11 +30,11 @@ func c8StoredAt(c h3Committee, e types.EncTx) int {
 	return len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq))
 }
 
-// TestC8Audit_HonestMultiCiphertextThroughput_ThrottledToOnePerBlock demonstrates that the
-// per-(operator,epoch) verify budget throttles the HONEST committee to ~1 decryptable ciphertext
-// per block per epoch, even though every operator submits complete valid share sets for all of
-// them in the SAME block.
-func TestC8Audit_HonestMultiCiphertextThroughput_ThrottledToOnePerBlock(t *testing.T) {
+// TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock is the cycle-9 liveness proof (the
+// direct inverse of the cycle-8 regression): the full committee serves complete valid share sets for
+// SEVERAL in-flight ciphertexts of one epoch in ONE block, and the per-(operator,ciphertext) budget
+// lets EVERY one of them accrue >= t shares that block — not just the oldest.
+func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.T) {
 	c := c7Committee(t) // S=32, n=4, each owns 8 points, t=18
 	tThresh := int(c.ak.Threshold)
 	ops := []string{"attacker", "honest_A", "honest_B", "honest_C"} // canonical (operator-sorted) order
@@ -73,47 +75,49 @@ func TestC8Audit_HonestMultiCiphertextThroughput_ThrottledToOnePerBlock(t *testi
 
 	c.k.ConsumeVoteExtensions(ing, entries)
 
-	// COMPUTE-BOUND SANITY (the fix's stated guarantee): total DLEQ verifications this block are
-	// bounded by the O(S) ceiling. All served shares are valid, so verifications == shares stored.
+	// COMPUTE-BOUND SANITY: all served shares are valid so verifications == shares stored; the block
+	// must stay under the O(cap * S) ceiling.
 	stored := []int{c8StoredAt(c, es[0]), c8StoredAt(c, es[1]), c8StoredAt(c, es[2])}
-	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap()
-	if stored[0]+stored[1]+stored[2] > shareCap {
-		t.Fatalf("verify bound violated: stored %v exceeds O(S) ceiling %d", stored, shareCap)
+	s := c.k.GetParams(c.ctx).EffectiveShareBudget()
+	ceiling := keeper.MaxVerifyCiphertextsPerBlock * s
+	if stored[0]+stored[1]+stored[2] > ceiling {
+		t.Fatalf("verify bound violated: stored %v exceeds O(cap*S) ceiling %d", stored, ceiling)
 	}
 
-	t.Logf("owned points/op = 8, per-(op,epoch) budget = 8, O(S) ceiling = %d, decrypt capacity/block = 2048", shareCap)
+	t.Logf("owned points/op = 8, per-(op,ciphertext) budget = 8, O(cap*S) ceiling = %d, decrypt capacity/block = 2048", ceiling)
 	t.Logf("stored shares after ONE block of the FULL committee serving 3 matured ciphertexts: ct1=%d ct2=%d ct3=%d (t=%d needed each)",
 		stored[0], stored[1], stored[2], tThresh)
 
-	// THE FINDING: the whole committee's budget went to the OLDEST ciphertext; the others starved.
-	if stored[0] < tThresh {
-		t.Fatalf("expected the oldest ciphertext to accrue >= t=%d shares, got %d", tThresh, stored[0])
-	}
+	// THE FIX: ALL THREE ciphertexts accrued a full 32 shares (>= t) in the SAME block — no starve.
 	decryptable := 0
-	for _, s := range stored {
-		if s >= tThresh {
+	for i, sc := range stored {
+		if sc != 4*8 {
+			t.Fatalf("cycle-9 liveness: ciphertext %d must accrue all %d honest shares in one block, got %d", i, 4*8, sc)
+		}
+		if sc >= tThresh {
 			decryptable++
 		}
 	}
-	if decryptable != 1 {
-		t.Fatalf("THROUGHPUT FINDING NOT REPRODUCED: expected exactly 1 decryptable ciphertext/block, got %d (stored=%v)", decryptable, stored)
+	if decryptable != 3 {
+		t.Fatalf("cycle-9 liveness REGRESSION: expected all 3 ciphertexts decryptable in one block, got %d (stored=%v)", decryptable, stored)
 	}
-	t.Logf("REPRODUCED: only %d of 3 fully-served matured ciphertexts reached t in one block — honest throughput is throttled to ~1/block/epoch by the per-(operator,epoch) budget, independent of the 2048/block decrypt capacity", decryptable)
+	t.Logf("RESTORED: all %d fully-served matured ciphertexts reached t in ONE block — the per-(operator,ciphertext) budget no longer throttles honest throughput to ~1/block/epoch", decryptable)
 
-	// The starved ciphertexts are DEFERRED (not chaff-rejected): no reject events fired for them.
+	// No honest share was chaff-rejected.
 	if rej := countEvents(ing, "encmempool_dkg_ve_share_rejected"); rej != 0 {
 		t.Fatalf("no honest share should be chaff-rejected; got %d reject events", rej)
 	}
 }
 
-// TestC8Audit_ComputeBound_HoldsUnderFullCommitteeFlood is the POSITIVE proof for the primary
-// COMPUTE/HALT lens: even when EVERY committee member (not just one attacker) sprays a massive chaff
+// TestC9_ComputeBound_HoldsUnderFullCommitteeFlood is the POSITIVE proof for the COMPUTE/HALT lens
+// under the cycle-9 per-ciphertext budget: even when EVERY committee member sprays a massive chaff
 // flood across many ciphertexts in the SAME block, the total number of O(t) DLEQ verifications the
-// block performs is bounded by Sigma(owned points) == S and never exceeds the O(S) ceiling — so the
-// per-block verify work is provably attacker-independent (no halt-class escalation).
-func TestC8Audit_ComputeBound_HoldsUnderFullCommitteeFlood(t *testing.T) {
+// block performs is bounded by maxVerifyCiphertextsPerBlock * S and never scales with the raw flood
+// magnitude — so the per-block verify work is provably attacker-independent (no halt escalation).
+func TestC9_ComputeBound_HoldsUnderFullCommitteeFlood(t *testing.T) {
 	c := c7Committee(t)
-	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap() // 256
+	s := c.k.GetParams(c.ctx).EffectiveShareBudget() // 32
+	ceiling := keeper.MaxVerifyCiphertextsPerBlock * s
 	base := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 
 	var es []types.EncTx
@@ -125,37 +129,41 @@ func TestC8Audit_ComputeBound_HoldsUnderFullCommitteeFlood(t *testing.T) {
 		es = append(es, c.k.SubmitEncTx(base, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	// All 4 members flood: 8 owned points * 20 ciphertexts * 15 repeats = 2400 chaff shares EACH,
-	// 9600 across the committee — far above the O(S) ceiling. VerifyVoteExtension would clamp a real
-	// 1-MiB extension, but we bypass it to prove the keeper's authoritative bound alone suffices.
+	// (a) EXACT no-clamp full-committee flood: 5 ciphertexts, repeats=1. Each op serves 5*8=40 <= 256
+	// (no per-VE clamp); per ciphertext all 4 ops' 8 points == S=32 verify, so the block does exactly
+	// 5 * S = 160 verifications — the honest-liveness scaling, bounded by cap * S.
+	exactIng := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	var exact []keeper.VEEntry
+	for _, op := range []string{"attacker", "honest_A", "honest_B", "honest_C"} {
+		exact = append(exact, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: c8ChaffAcross(t, c, es[:5], op, 1)}})
+	}
+	c.k.ConsumeVoteExtensions(exactIng, exact)
+	if v := countEvents(exactIng, "encmempool_dkg_ve_share_rejected"); v != 5*s {
+		t.Fatalf("no-clamp full-committee flood over 5 cts must cost exactly 5*S=%d verifications, got %d", 5*s, v)
+	}
+
+	// (b) MASSIVE flood: 8 owned points * 20 ciphertexts * 15 repeats = 2400 chaff shares EACH, 9600
+	// across the committee — far above cap * S. VerifyVoteExtension would clamp a real 1-MiB extension,
+	// but we bypass it to prove the keeper's authoritative bound alone suffices.
 	var entries []keeper.VEEntry
 	for _, op := range []string{"attacker", "honest_A", "honest_B", "honest_C"} {
 		entries = append(entries, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: c8ChaffAcross(t, c, es, op, 15)}})
 	}
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	c.k.ConsumeVoteExtensions(ing, entries)
 
-	// All chaff => nothing stores => verifications == reject events.
-	verifs := countEvents(ing, "encmempool_dkg_ve_share_rejected")
-	sumOwned := 0
-	for _, op := range []string{"attacker", "honest_A", "honest_B", "honest_C"} {
-		sumOwned += len(c.memberPoints(op))
+	verifs := countEvents(ing, "encmempool_dkg_ve_share_rejected") // all chaff => verifications == rejects
+	t.Logf("full-committee flood: 9600 chaff shares submitted -> %d DLEQ verifications (O(cap*S) ceiling = %d)", verifs, ceiling)
+	if verifs > ceiling {
+		t.Fatalf("HALT-CLASS REGRESSION: %d verifications exceed the O(cap*S) ceiling %d", verifs, ceiling)
 	}
-	t.Logf("full-committee flood: 9600 chaff shares submitted -> %d DLEQ verifications (Sigma owned points = %d, O(S) ceiling = %d)", verifs, sumOwned, shareCap)
-	if verifs > shareCap {
-		t.Fatalf("HALT-CLASS REGRESSION: %d verifications exceed the O(S) ceiling %d", verifs, shareCap)
-	}
-	if verifs != sumOwned {
-		t.Fatalf("expected verifications pinned to Sigma owned points (%d), got %d", sumOwned, verifs)
-	}
-	t.Logf("COMPUTE BOUND HOLDS: a 9600-share full-committee flood costs exactly %d verifications (== Sigma owned points), independent of flood magnitude — HIGH-A closed", verifs)
+	t.Logf("COMPUTE BOUND HOLDS (cycle-9): a 9600-share full-committee flood costs %d verifications, bounded by cap*S=%d and independent of flood magnitude — HIGH-A closed", verifs, ceiling)
 }
 
-// TestC8Audit_DrainRateOnePerBlock shows the consequence over time: a backlog of C matured
-// ciphertexts (one epoch) drains at ~1 ciphertext per block, so ciphertext #k is not decryptable
-// until ~k blocks after maturity. With the 32-block StrandedDecryptGrace, a backlog that exceeds
-// the drain rate for long enough pushes the youngest past grace and into a LOUD honest drop.
-func TestC8Audit_DrainRateOnePerBlock(t *testing.T) {
+// TestC9_DrainRate_FullThroughput shows the consequence over time: a backlog of C matured ciphertexts
+// (one epoch) fully served each block now accrues t shares for ALL of them in the FIRST block — the
+// drain is bounded only by the decrypt budget (2048/block), not by a ~1-ct/block ingest throttle.
+func TestC9_DrainRate_FullThroughput(t *testing.T) {
 	c := c7Committee(t)
 	tThresh := int(c.ak.Threshold)
 	ops := []string{"attacker", "honest_A", "honest_B", "honest_C"}
@@ -173,8 +181,6 @@ func TestC8Audit_DrainRateOnePerBlock(t *testing.T) {
 		cts = append(cts, ct)
 	}
 
-	// Drive several blocks; each block the whole committee re-serves ALL still-in-flight ciphertexts
-	// (idempotent; stored shares are skipped O(1)). Count how many reach t after each block.
 	decryptableAfter := func() int {
 		n := 0
 		for _, e := range es {
@@ -185,24 +191,20 @@ func TestC8Audit_DrainRateOnePerBlock(t *testing.T) {
 		return n
 	}
 
-	for blk := int64(11); blk <= 14; blk++ {
-		ing := base.WithBlockHeight(blk).WithEventManager(sdk.NewEventManager())
-		var entries []keeper.VEEntry
-		for _, op := range ops {
-			var shares []types.VoteExtShare
-			for i := range es {
-				shares = append(shares, veSharesFor(t, c, base, es[i], cts[i], op)...)
-			}
-			entries = append(entries, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: shares}})
+	// ONE block of the full committee serving all 5 ciphertexts makes ALL 5 decryptable.
+	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	var entries []keeper.VEEntry
+	for _, op := range ops {
+		var shares []types.VoteExtShare
+		for i := range es {
+			shares = append(shares, veSharesFor(t, c, base, es[i], cts[i], op)...)
 		}
-		c.k.ConsumeVoteExtensions(ing, entries)
-		t.Logf("after block %d: %d/%d ciphertexts decryptable", blk, decryptableAfter(), C)
+		entries = append(entries, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: shares}})
 	}
+	c.k.ConsumeVoteExtensions(ing, entries)
 
-	// After 4 blocks of the FULL committee serving all 5, at ~1/block only ~4 are decryptable.
-	got := decryptableAfter()
-	if got >= C {
-		t.Fatalf("expected the drain to be throttled (< %d decryptable after 4 blocks), got %d — throttle not reproduced", C, got)
+	if got := decryptableAfter(); got != C {
+		t.Fatalf("cycle-9 full-throughput: expected all %d ciphertexts decryptable after ONE block, got %d", C, got)
 	}
-	t.Logf("REPRODUCED: %d/%d ciphertexts decryptable after 4 blocks of the full committee serving all of them — the drain is ~1/block, NOT the 2048/block the decrypt side allows", got, C)
+	t.Logf("RESTORED: %d/%d ciphertexts decryptable after ONE block of the full committee serving all of them — the ingest no longer throttles the drain to ~1/block", C, C)
 }

@@ -318,12 +318,16 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 	}
 
 	// Phase 3: decryption shares for in-flight ciphertexts, under a HARD, DETERMINISTIC per-block
-	// bound on DLEQ-verification work (cycle-8). ingestDecryptSharesBounded composes a per-VE
-	// share-count cap, a within-block eval-point dedup, a per-(operator,epoch) verify budget equal to
-	// the operator's owned eval-point count, and a global O(S) ceiling, so the block's TOTAL O(t) DLEQ
-	// verification is O(S) regardless of how much chaff any committee member sprays — closing the
-	// cycle-7 HIGH-A (unbounded ingest-verify halt) + HIGH-B (chaff re-verified every block) DoS
-	// WITHOUT weakening the cycle-7 drop-DoS fix (chaff is still DLEQ-rejected; honest defers + heals).
+	// bound on DLEQ-verification work (cycle-8 bound, cycle-9 granularity). ingestDecryptSharesBounded
+	// composes a bounded oldest-first PROCESSED-ciphertext set (cheap pre-classification of chaff aimed
+	// at non-processed / stranded / nonexistent ciphertexts), a per-VE share-count cap, a within-block
+	// eval-point dedup, a per-(operator,CIPHERTEXT) verify budget equal to the operator's owned
+	// eval-point count, and a global O(cap × S) ceiling, so the block's TOTAL O(t) DLEQ verification is
+	// O(maxVerifyCiphertextsPerBlock × S) regardless of how much chaff any committee member sprays —
+	// keeping the cycle-8 compute-DoS closed (HIGH-A/HIGH-B) while RESTORING honest liveness: a member
+	// serving many in-flight ciphertexts of one epoch now ingests owned-points shares for EACH within
+	// grace, instead of being throttled to one ciphertext/block and dropped. The cycle-7 drop-DoS fix is
+	// preserved (chaff is still DLEQ-rejected; honest defers + heals).
 	shared := k.ingestDecryptSharesBounded(ctx, canon, p)
 
 	if announced+dealt+shared > 0 {
@@ -476,14 +480,47 @@ type txKey struct {
 	seq           uint64
 }
 
-// opEpoch keys the PER-OPERATOR, PER-EPOCH verify budget. Within one block an operator may force at
-// most len(its owned eval points) DLEQ verifications for a given epoch — the exact number of shares it
-// could ever legitimately owe (one per point it owns). Because Σ owned points over the committee is
-// exactly the budget S, this per-operator cap ALSO bounds the block's total verify work to O(S).
+// opCiphertext keys the PER-OPERATOR, PER-CIPHERTEXT verify budget (cycle-9). Within one block an
+// operator may force at most len(its owned eval points) DLEQ verifications FOR EACH in-flight
+// ciphertext it serves — the exact number of decryption shares an honest member owes PER ciphertext
+// (a decryption share is D = x*A, bound to that ciphertext's ephemeral A, so a member owes one share
+// per owned point PER ciphertext, NOT one per owned point per epoch). A ciphertext (decryptHeight,
+// seq) fixes its epoch, so this IS the per-(operator, epoch, ciphertext) budget; epoch is redundant
+// in the key. Cycle-8 keyed this per (operator, epoch), which capped an honest member to ONE
+// ciphertext's worth of shares per block and hard-dropped the rest past grace — the HIGH this fixes.
+type opCiphertext struct {
+	operator      string
+	decryptHeight uint64
+	seq           uint64
+}
+
+// opEpoch memoizes the owned-eval-point COUNT for an (operator, epoch) — the per-(operator,
+// ciphertext) budget VALUE. Every ciphertext of the same epoch grants the same operator the same
+// owned-point budget, so len(OwnedEvalPoints()) is computed once per (operator, epoch) per block
+// rather than once per share.
 type opEpoch struct {
 	operator string
 	epoch    uint64
 }
+
+// maxVerifyCiphertextsPerBlock bounds how many DISTINCT in-flight ciphertexts may consume
+// per-(operator,ciphertext) verify budget in a single block (cycle-9). It is the multiplier that
+// takes the per-block DLEQ-verify bound from cycle-8's O(S) to O(maxVerifyCiphertextsPerBlock × S):
+// with the per-ciphertext budget summing to at most S over the committee (Σ owned points == S), and
+// at most this many distinct ciphertexts budgeted, the block's TOTAL verify work is bounded by
+// maxVerifyCiphertextsPerBlock × S — a constant × S, deterministic and NOT attacker-scalable. It is
+// tied to the decrypt-side defer cap (maxDeferredDecryptsPerBlock): the ciphertexts that legitimately
+// need shares in a block are exactly the bounded, oldest-first set the decrypt+defer machinery works,
+// so the share-ingest window and the decrypt/heal window advance in lockstep. An attacker CANNOT
+// inflate this count — shares for any ciphertext outside the oldest-maxVerifyCiphertextsPerBlock
+// processed set (future spam, stranded-past-grace, or nonexistent) are cheaply classified out by an
+// O(1) map lookup BEFORE any per-ciphertext verify budget is touched.
+const maxVerifyCiphertextsPerBlock = maxDeferredDecryptsPerBlock
+
+// MaxVerifyCiphertextsPerBlock exposes the cycle-9 per-block distinct-ciphertext verify cap for
+// regression tests (they assert the block's DLEQ-verify work never exceeds this * S under a flood,
+// and that an honest member serving up to this many in-flight ciphertexts is never throttled).
+const MaxVerifyCiphertextsPerBlock = maxVerifyCiphertextsPerBlock
 
 // consumeCaches memoizes the two committed-state decodes the cheap share classification repeats
 // across a block: the DKG round (which carries the whole member set) and the in-flight ciphertext. It
@@ -594,45 +631,82 @@ func (k Keeper) verifyAndStoreDecryptShare(ctx sdk.Context, epoch uint64, ctA []
 }
 
 // ingestDecryptSharesBounded is the DETERMINISTIC, HARD-BOUNDED consensus-path ingest of a block's
-// decryption shares (cycle-8). It caps the block's total O(t) DLEQ verification at O(S) REGARDLESS of
-// attacker input, via four composed, pure, NO-persistent-state controls applied to the CANONICAL
-// (operator-sorted, deduped) entries:
+// decryption shares (cycle-8 bound, cycle-9 granularity fix). It caps the block's total O(t) DLEQ
+// verification at O(maxVerifyCiphertextsPerBlock × S) REGARDLESS of attacker input, via five composed,
+// pure, NO-persistent-state controls applied to the CANONICAL (operator-sorted, deduped) entries:
 //
+//  0. PROCESSED-CIPHERTEXT PRE-CLASSIFICATION (cycle-9): once per block the ≤ maxVerifyCiphertextsPerBlock
+//     OLDEST in-flight ciphertexts from the start of the decrypt-deferral window (h - grace) are read
+//     from committed state into a set — byte-for-byte the head of the set the honest builder
+//     (buildDecryptShares) serves. A share whose (decryptHeight, seq) is NOT in this set targets a
+//     non-processed / stranded-past-grace / nonexistent ciphertext; it is dropped by an O(1) map lookup
+//     BEFORE any per-ciphertext verify budget is touched. This is what makes the count of budgeted
+//     ciphertexts attacker-UNinflatable: a flood of shares aimed at ciphertexts outside the bounded
+//     oldest-first window can neither exhaust an honest member's per-ciphertext budgets nor inflate work.
 //  1. PER-VE SHARE-COUNT CAP: a single extension may carry at most VoteExtShareCap == max(256, S)
-//     shares — the exact bound the honest builder (buildDecryptShares) stops at. Excess is dropped
-//     (deterministically: the committed share order fixes which survive) BEFORE any per-share work.
-//     This defeats the 1-MiB, thousands-of-shares extension (HIGH-A's raw magnitude).
+//     shares — the exact bound the honest builder stops at. Excess is dropped (deterministically: the
+//     committed share order fixes which survive) BEFORE any per-share work. This defeats the 1-MiB,
+//     thousands-of-shares extension (HIGH-A's raw magnitude).
 //  2. WITHIN-BLOCK EVAL-POINT DEDUP: each (decryptHeight, seq, index) slot is verified at most ONCE
 //     per block, so re-sending the same chaff slot many times costs one verify, not many.
-//  3. PER-(operator,epoch) VERIFY BUDGET == the operator's owned eval-point count: an operator can
-//     force at most as many DLEQ verifications as it owns points in that epoch — the most it could
-//     ever legitimately owe. Excess (chaff across many ciphertexts, or padding) is dropped BEFORE the
-//     verify. Summed over the committee this budget is exactly S, so it is ALSO what bounds the block's
-//     total verify work to O(S), it is the "short-circuit re-sent chaff" control (a spammer re-sending
-//     every block can still only ever burn its owned-point budget — HIGH-B), and it stops a single
-//     member from monopolizing the global budget.
-//  4. GLOBAL O(S) CEILING: a belt for the rare multi-epoch overlap where step 3's per-epoch sums could
-//     stack — capping the block's total verifications at VoteExtShareCap; the surplus DEFERS to a later
-//     block (re-sent idempotently), it is NOT rejected.
+//  3. PER-(operator,CIPHERTEXT) VERIFY BUDGET == the operator's owned eval-point count: for EACH
+//     processed ciphertext an operator can force at most as many DLEQ verifications as it owns points —
+//     the most it could ever legitimately owe for that ciphertext (one share per owned point per
+//     ciphertext). Excess (chaff re-aimed at a processed ciphertext, or padding) is dropped BEFORE the
+//     verify. Summed over the committee this budget is at most S PER CIPHERTEXT (Σ owned points == S),
+//     and control 0 caps the number of budgeted ciphertexts, so together they bound the block's total
+//     verify work to O(maxVerifyCiphertextsPerBlock × S). It is ALSO the "short-circuit re-sent chaff"
+//     control (a spammer re-sending every block still only burns its owned-point budget per processed
+//     ciphertext — HIGH-B) and stops a single member from monopolizing the budget of any ciphertext.
+//     CYCLE-9: keying this per (operator, ciphertext) rather than per (operator, epoch) is the fix —
+//     the per-epoch key throttled an honest member serving MANY in-flight ciphertexts of one epoch to
+//     ONE ciphertext's worth of shares per block, hard-dropping the rest past the 32-block grace.
+//  4. GLOBAL O(cap × S) CEILING: a belt at maxVerifyCiphertextsPerBlock × S (floored at VoteExtShareCap,
+//     never below cycle-8's O(S)) so a gap in the controls-0/3 accounting can never let the block exceed
+//     O(cap × S) verifications; the surplus DEFERS to a later block (re-sent idempotently), NOT rejected.
 //
-// A DEFERRED share (budget/ceiling) is NOT a chaff rejection: nothing is stored and NO reject event
-// fires, so an honest share throttled this block simply verifies on a later one — the cycle-7
-// defers+heals behavior is preserved. Every control is a pure function of committed state + the
-// canonical entries (the accounting maps are rebuilt each block, never persisted), so every node
-// accepts / rejects / defers identically — the fork-safety contract. Returns the number stored.
+// A DEFERRED share (not-processed / budget / ceiling) is NOT a chaff rejection: nothing is stored and
+// NO reject event fires, so an honest share throttled this block simply verifies on a later one — the
+// cycle-7 defers+heals behavior is preserved. Every control is a pure function of committed state + the
+// canonical entries (the accounting maps + processed set are rebuilt each block, never persisted, and
+// the processed set is bounded to maxVerifyCiphertextsPerBlock so the budget maps hold at most that many
+// distinct ciphertexts × committee entries), so every node accepts / rejects / defers identically — the
+// fork-safety contract. Returns the number stored.
 func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p types.Params) int {
-	shareCap := p.VoteExtShareCap() // per-VE cap AND global ceiling: both == max(256, S) == O(S)
+	shareCap := p.VoteExtShareCap() // (1) per-VE cap == max(256, S) == O(S)
+	// (4) GLOBAL O(cap × S) CEILING belt. The authoritative bound is control 0 (≤ cap distinct
+	// ciphertexts) × control 3 (≤ S verifications/ciphertext); this ceiling is a hard defense-in-depth
+	// stop at cap × S so a gap in that accounting can never exceed O(cap × S). Floored at shareCap so
+	// it is never below cycle-8's O(S).
+	globalCeiling := maxVerifyCiphertextsPerBlock * p.EffectiveShareBudget()
+	if globalCeiling < shareCap {
+		globalCeiling = shareCap
+	}
+	// (0) PROCESSED-CIPHERTEXT SET: the ≤ maxVerifyCiphertextsPerBlock oldest in-flight ciphertexts from
+	// the start of the decrypt-deferral window (h - grace) — the exact window the honest builder serves.
+	// Pure committed-state read in deterministic (decryptHeight, seq) order (identical on every node).
+	h := uint64(ctx.BlockHeight())
+	from := uint64(0)
+	if h > strandedDecryptGraceBlocks {
+		from = h - strandedDecryptGraceBlocks
+	}
+	processed := make(map[txKey]bool, maxVerifyCiphertextsPerBlock)
+	k.IterateInFlightFrom(ctx, from, maxVerifyCiphertextsPerBlock, func(e types.EncTx) bool {
+		processed[txKey{decryptHeight: e.DecryptHeight, seq: e.Seq}] = true
+		return true
+	})
+
 	c := newConsumeCaches()
-	seen := make(map[shareSlot]bool) // (2) within-block eval-point dedup
-	spent := make(map[opEpoch]int)   // (3) per-(operator,epoch) verifications performed this block
-	budget := make(map[opEpoch]int)  // (3) memoized owned-eval-point count per (operator,epoch)
-	globalSpent := 0                 // (4) total verifications performed this block
+	seen := make(map[shareSlot]bool)    // (2) within-block eval-point dedup
+	spent := make(map[opCiphertext]int) // (3) per-(operator,ciphertext) verifications performed this block
+	owned := make(map[opEpoch]int)      // (3) memoized owned-eval-point count per (operator,epoch) == the budget value
+	globalSpent := 0                    // (4) total verifications performed this block
 	shared := 0
 	deferred := false
 	for _, e := range canon {
-		if globalSpent >= shareCap {
+		if globalSpent >= globalCeiling {
 			deferred = true
-			break // (4) global O(S) ceiling reached — defer the rest to a later block
+			break // (4) global O(cap × S) ceiling reached — defer the rest to a later block
 		}
 		shares := e.VE.Shares
 		if len(shares) > shareCap { // (1) per-VE share-count cap
@@ -645,11 +719,15 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 			shares = shares[:shareCap]
 		}
 		for i := range shares {
-			if globalSpent >= shareCap {
+			if globalSpent >= globalCeiling {
 				deferred = true
 				break // (4) global ceiling reached mid-extension
 			}
 			s := shares[i]
+			tk := txKey{decryptHeight: s.DecryptHeight, seq: s.Seq}
+			if !processed[tk] {
+				continue // (0) not a processed ciphertext — cheap O(1) drop BEFORE any budget/verify
+			}
 			slot := shareSlot{decryptHeight: s.DecryptHeight, seq: s.Seq, index: s.Index}
 			if seen[slot] {
 				continue // (2) this eval-point slot was already verified this block
@@ -658,18 +736,19 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 			if !ok {
 				continue // cheap-rejected / already-stored: no DLEQ work, no budget consumed
 			}
+			oc := opCiphertext{operator: e.Operator, decryptHeight: s.DecryptHeight, seq: s.Seq}
 			oe := opEpoch{operator: e.Operator, epoch: epoch}
-			b, hit := budget[oe]
+			b, hit := owned[oe]
 			if !hit {
-				b = len(member.OwnedEvalPoints()) // (3) == the operator's owned eval-point count
-				budget[oe] = b
+				b = len(member.OwnedEvalPoints()) // (3) budget value == the operator's owned eval-point count
+				owned[oe] = b
 			}
-			if spent[oe] >= b {
-				continue // (3) per-operator cap: excess dropped BEFORE the O(t) DLEQ verify
+			if spent[oc] >= b {
+				continue // (3) per-(operator,ciphertext) cap: excess dropped BEFORE the O(t) DLEQ verify
 			}
 			// ---- bounded: charge the budgets, then perform the one DLEQ verification + store ----
 			seen[slot] = true
-			spent[oe]++
+			spent[oc]++
 			globalSpent++
 			if k.verifyAndStoreDecryptShare(ctx, epoch, ctA, e.Operator, s) {
 				shared++
@@ -681,7 +760,7 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 			"encmempool_dkg_ve_verify_bounded",
 			sdk.NewAttribute("height", u64str(uint64(ctx.BlockHeight()))),
 			sdk.NewAttribute("verified", u64str(uint64(globalSpent))),
-			sdk.NewAttribute("cap", u64str(uint64(shareCap))),
+			sdk.NewAttribute("cap", u64str(uint64(globalCeiling))),
 		))
 	}
 	return shared

@@ -20,11 +20,13 @@ import (
 //   HIGH-B (<=1/3-stake compute DoS): a REJECTED chaff share is never stored, so first-wins never
 //     suppressed it and the identical chaff was re-verified from scratch every block.
 //
-// Cycle-8 (ingestDecryptSharesBounded) caps the block's total DLEQ verification at O(S) regardless
-// of attacker input, via: (1) per-VE share-count cap == VoteExtShareCap; (2) within-block eval-point
-// dedup; (3) per-(operator,epoch) verify budget == the operator's owned eval-point count; (4) a
-// global O(S) ceiling. These probes drive each control and assert the bound holds WITHOUT weakening
-// the cycle-7 drop-DoS fix (chaff still rejected, honest defers + heals) or fork-safety.
+// Cycle-8 (ingestDecryptSharesBounded) caps the block's total DLEQ verification regardless of attacker
+// input, via: (0, cycle-9) a bounded oldest-first PROCESSED-ciphertext set that classifies out chaff
+// aimed at non-processed/stranded/nonexistent ciphertexts; (1) per-VE share-count cap == VoteExtShareCap;
+// (2) within-block eval-point dedup; (3, cycle-9) per-(operator,CIPHERTEXT) verify budget == the
+// operator's owned eval-point count; (4) a global O(cap * S) ceiling. Together they bound block verify
+// work to O(maxVerifyCiphertextsPerBlock * S). These probes drive each control and assert the bound holds
+// WITHOUT weakening the cycle-7 drop-DoS fix (chaff still rejected, honest defers + heals) or fork-safety.
 //
 // MEASUREMENT: every share that reaches the O(t) DLEQ verify either STORES (verify passed) or emits
 // exactly one encmempool_dkg_ve_share_rejected event (verify failed). A share dropped by the per-VE
@@ -95,15 +97,19 @@ func TestC8_PerOperatorCap_ExcessDroppedBeforeVerify(t *testing.T) {
 	t.Logf("CLOSED (per-op cap): %d submitted shares -> exactly %d DLEQ verifications (owned points), 0 stored", len(chaff), owned)
 }
 
-// TestC8_PerOperatorEpochBudget_AcrossManyCiphertexts: the per-(operator,epoch) verify budget caps an
-// operator to its owned-point count across ALL ciphertexts of an epoch in one block — not per
-// ciphertext. The attacker sprays its 8 owned points across 12 DISTINCT real ciphertexts (96 distinct
-// chaff slots); only 8 (= owned points) are verified this block, the other 88 are budget-deferred
-// (re-tried on later blocks), so the attacker cannot scale its per-block verify tax with ciphertext count.
-func TestC8_PerOperatorEpochBudget_AcrossManyCiphertexts(t *testing.T) {
+// TestC9_PerCiphertextBudget_ScalesWithRealCiphertextsNotRepeats: the CYCLE-9 granularity fix. The
+// verify budget is per (operator, CIPHERTEXT) == owned points, so an operator serving N distinct real
+// ciphertexts of an epoch may verify owned points FOR EACH — owned*N, not the cycle-8 owned-for-the-
+// whole-epoch. That is the honest-liveness necessity (an honest member owes owned-points shares PER
+// ciphertext). The bound stays hard: PADDING at a ciphertext (repeats of the same owned points) is
+// deduped to owned, so verifications track the count of DISTINCT REAL ciphertexts — which control 0
+// caps at maxVerifyCiphertextsPerBlock — NOT the raw chaff magnitude. Here the attacker sprays its 8
+// owned points across 12 real ciphertexts; repeats do not inflate the cost past owned*12.
+func TestC9_PerCiphertextBudget_ScalesWithRealCiphertextsNotRepeats(t *testing.T) {
 	c := c7Committee(t)
 	owned := len(c.memberPoints("attacker")) // 8
 	ctx := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
+	s := c.k.GetParams(c.ctx).EffectiveShareBudget() // 32
 
 	const nct = 12
 	var es []types.EncTx
@@ -115,37 +121,39 @@ func TestC8_PerOperatorEpochBudget_AcrossManyCiphertexts(t *testing.T) {
 		es = append(es, c.k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	chaff := c8ChaffAcross(t, c, es, "attacker", 1) // 12 ct * 8 points = 96 DISTINCT slots
-	if len(chaff) != nct*owned {
-		t.Fatalf("precondition: expected %d distinct chaff slots, built %d", nct*owned, len(chaff))
+	// repeats 1 and 2 both stay under the per-VE cap (12*2*8=192 <= 256), so the ONLY variable is the
+	// padding magnitude — which the within-block dedup collapses. Verifications must be owned*nct in BOTH.
+	for _, repeats := range []int{1, 2} {
+		branch, _ := ctx.CacheContext()
+		ing := branch.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+		chaff := c8ChaffAcross(t, c, es, "attacker", repeats)
+		c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
+			{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
+		})
+		rej := countEvents(ing, "encmempool_dkg_ve_share_rejected") // all chaff -> nothing stores
+		if rej != owned*nct {
+			t.Fatalf("per-(operator,ciphertext) budget: %d chaff shares across %d ciphertexts (repeats=%d) must cost exactly owned*nct=%d verifications, got %d", len(chaff), nct, repeats, owned*nct, rej)
+		}
+		// Attacker-scaling ceiling: never exceeds the O(cap * S) block bound regardless of ciphertext count.
+		if rej > keeper.MaxVerifyCiphertextsPerBlock*s {
+			t.Fatalf("O(cap*S) REGRESSION: %d verifications exceed cap*S=%d", rej, keeper.MaxVerifyCiphertextsPerBlock*s)
+		}
 	}
-
-	ing := ctx.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
-	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
-		{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
-	})
-
-	// verifications == rejected (nothing stores; all chaff). Bounded to owned points for the whole
-	// epoch, NOT owned*nct.
-	rej := countEvents(ing, "encmempool_dkg_ve_share_rejected")
-	if rej != owned {
-		t.Fatalf("per-(operator,epoch) budget: %d distinct chaff slots across %d ciphertexts must cost exactly %d verifications, got %d", len(chaff), nct, owned, rej)
-	}
-	if !hasEvent(ing, "encmempool_dkg_ve_verify_bounded") {
-		// The attacker submitted 96 slots but only 8 were verified: the rest were budget/ceiling-deferred.
-		t.Log("note: verify-bounded event not emitted (per-operator budget dropped excess via continue, not the global ceiling) — acceptable")
-	}
-	t.Logf("CLOSED (per-op-epoch budget): 96 slots across %d ciphertexts -> exactly %d verifications for the block", nct, owned)
+	t.Logf("CYCLE-9: %d real ciphertexts * %d owned points = %d verifications/block (per-ciphertext budget), invariant to padding repeats, bounded by cap*S=%d", nct, owned, owned*nct, keeper.MaxVerifyCiphertextsPerBlock*s)
 }
 
-// TestC8_ChaffSpammer_BoundedPerBlock_Independent is the money probe for HIGH-A/HIGH-B: the number of
-// DLEQ verifications an attacker can force per block is bounded by its owned-point count and is
-// INDEPENDENT of how much chaff it sprays (repeats or ciphertext fan-out) — so it can never scale the
-// per-block verify work with attacker input, and re-sending the same chaff every block cannot escalate.
-func TestC8_ChaffSpammer_BoundedPerBlock_Independent(t *testing.T) {
+// TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS is the money probe for HIGH-A/HIGH-B under the
+// cycle-9 per-ciphertext budget: the number of DLEQ verifications an attacker can force per block is
+// bounded by owned_points * min(distinct real ciphertexts, maxVerifyCiphertextsPerBlock) and NEVER
+// exceeds the global O(cap * S) ceiling — so it cannot scale with the raw chaff magnitude (repeats)
+// and re-sending the same chaff every block cannot escalate. Unlike cycle-8 the cost DOES track the
+// number of distinct real ciphertexts (that is the honest-liveness necessity), but that count is
+// itself hard-capped by control 0, keeping the block work O(cap * S).
+func TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS(t *testing.T) {
 	c := c7Committee(t)
 	owned := len(c.memberPoints("attacker"))
-	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap() // == max(256, S)=256 here (the documented O(S) ceiling)
+	s := c.k.GetParams(c.ctx).EffectiveShareBudget() // 32
+	ceiling := keeper.MaxVerifyCiphertextsPerBlock * s
 	base := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 
 	// A pool of 30 real ciphertexts so the attacker can fan out across many + repeat.
@@ -158,8 +166,10 @@ func TestC8_ChaffSpammer_BoundedPerBlock_Independent(t *testing.T) {
 		es = append(es, c.k.SubmitEncTx(base, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	// Attacker-input-INDEPENDENCE: whatever the flood magnitude, verifications stay <= shareCap and,
-	// for this single attacker, are pinned to its owned-point count.
+	// (a) NO-CLAMP EXACT case: with repeats=1 every ciphertext's 8 owned points fit under the per-VE cap
+	// (30*8=240 <= 256), so verifications are EXACTLY owned*floodCts — the per-ciphertext budget, proving
+	// the honest-liveness scaling. (b) UPPER-BOUND case: whatever the flood magnitude (repeats), the cost
+	// never exceeds owned*min(floodCts,cap) and never the O(cap*S) ceiling — proving attacker-boundedness.
 	for _, floodCts := range []int{1, 5, 15, 30} {
 		for _, repeats := range []int{1, 10, 40} {
 			branch, _ := base.CacheContext()
@@ -169,28 +179,38 @@ func TestC8_ChaffSpammer_BoundedPerBlock_Independent(t *testing.T) {
 				{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
 			})
 			rej := countEvents(ing, "encmempool_dkg_ve_share_rejected")
-			if rej > shareCap {
-				t.Fatalf("HIGH-A REGRESSION: %d chaff shares forced %d verifications > O(S) ceiling %d", len(chaff), rej, shareCap)
+			upper := owned * floodCts // floodCts <= 30 < cap, so min(floodCts,cap)=floodCts
+			if rej > upper {
+				t.Fatalf("per-ciphertext budget breach: %d chaff shares forced %d verifications > owned*floodCts=%d", len(chaff), rej, upper)
 			}
-			if rej != owned {
-				t.Fatalf("attacker verifications must be pinned to its %d owned points regardless of a %d-share flood, got %d", owned, len(chaff), rej)
+			if rej > ceiling {
+				t.Fatalf("O(cap*S) REGRESSION: %d chaff shares forced %d verifications > cap*S ceiling %d", len(chaff), rej, ceiling)
+			}
+			if repeats == 1 && rej != owned*floodCts {
+				t.Fatalf("no-clamp per-ciphertext budget: expected exactly owned*floodCts=%d verifications, got %d", owned*floodCts, rej)
 			}
 		}
 	}
 
-	// HIGH-B: re-sending the SAME chaff every block cannot re-burn more than the owned-point budget.
-	chaff := c8ChaffAcross(t, c, es, "attacker", 3) // fat, re-sent verbatim each block
+	// HIGH-B: re-sending the SAME fat chaff every block cannot escalate — a FIXED per-block cost.
+	chaff := c8ChaffAcross(t, c, es, "attacker", 1) // 30 cts * 8 pts = 240 distinct slots, re-sent verbatim
+	var prev = -1
 	for h := int64(11); h <= 16; h++ {
 		branch, _ := base.CacheContext()
 		ing := branch.WithBlockHeight(h).WithEventManager(sdk.NewEventManager())
 		c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 			{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
 		})
-		if rej := countEvents(ing, "encmempool_dkg_ve_share_rejected"); rej != owned {
-			t.Fatalf("HIGH-B REGRESSION @h%d: re-sent chaff must cost a fixed %d verifications/block, got %d", h, owned, rej)
+		rej := countEvents(ing, "encmempool_dkg_ve_share_rejected")
+		if rej > ceiling {
+			t.Fatalf("HIGH-B REGRESSION @h%d: re-sent chaff exceeded cap*S ceiling %d, got %d", h, ceiling, rej)
 		}
+		if prev >= 0 && rej != prev {
+			t.Fatalf("HIGH-B REGRESSION @h%d: re-sent chaff must cost a FIXED count/block, got %d then %d", h, prev, rej)
+		}
+		prev = rej
 	}
-	t.Logf("CLOSED (HIGH-A+B): floods of up to thousands of chaff shares -> a fixed %d verifications/block (<= O(S) ceiling %d), invariant across blocks", owned, shareCap)
+	t.Logf("CLOSED (HIGH-A+B, cycle-9): attacker verifications bounded by owned*min(cts,cap)=<=%d and the O(cap*S) ceiling %d, fixed at %d/block when re-sent", owned*keeper.MaxVerifyCiphertextsPerBlock, ceiling, prev)
 }
 
 // TestC8_PerVECap_ClampsOversizedExtension drives control (1): a single extension carrying MORE than

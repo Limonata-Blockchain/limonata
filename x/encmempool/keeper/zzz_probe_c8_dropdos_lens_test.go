@@ -12,36 +12,34 @@ import (
 )
 
 // ============================================================================
-// AUDIT PROBE (cycle-8, DROP-DoS lens): does the per-(operator,EPOCH) verify budget
-// wrongly DEFER *honest* shares — the exact "defers + heals" guarantee the cycle-7 fix
-// promised — when there is MORE THAN ONE in-flight ciphertext in the same epoch?
+// CYCLE-9 FIX VERIFICATION (DROP-DoS lens): the per-(operator,CIPHERTEXT) verify budget no longer
+// DEFERS *honest* shares — the "defers + heals" guarantee cycle-7 promised — when there is MORE
+// THAN ONE in-flight ciphertext in the same epoch.
 //
-// A decryption share is per-CIPHERTEXT (D = x*A, A is the ciphertext's ephemeral). An
-// honest member owes owned_points shares PER ciphertext. buildDecryptShares emits exactly
-// that: owned_points * (#in-flight ciphertexts) shares in ONE vote extension. But
-// ingestDecryptSharesBounded caps spent[{operator,epoch}] at owned_points — a SINGLE
-// ciphertext's worth — so with C ciphertexts in an epoch, only the oldest ciphertext's
-// honest shares are stored per block; C-1 ciphertexts' honest shares are budget-deferred
-// EVERY block. No attacker involved.
+// A decryption share is per-CIPHERTEXT (D = x*A, A is the ciphertext's ephemeral). An honest member
+// owes owned_points shares PER ciphertext. buildDecryptShares emits exactly that: owned_points *
+// (#in-flight ciphertexts) shares in ONE vote extension. Cycle-8 capped spent[{operator,epoch}] at
+// owned_points — a SINGLE ciphertext's worth — starving the rest. Cycle-9 keys the budget per
+// (operator, ciphertext) at owned_points, so ALL in-flight ciphertexts of an epoch accrue their honest
+// shares each block (up to the bounded processed set), and nothing ages into a HARD strand.
 // ============================================================================
 
-// TestProbeC8_MultiHonestCiphertextsPerEpoch_HonestSharesStarved: the in-block smoking gun.
-// TWO honest ciphertexts, same epoch, same maturity height. ALL FOUR committee members serve
-// their FULL real share sets for BOTH (16 shares each: 8 for ct1, 8 for ct2 — exactly what
-// buildDecryptShares produces). The per-(operator,epoch) budget of 8 stores only ct1; ct2 gets
-// ZERO stored shares, despite zero attacker and the block using only 32 of its 256-share
-// O(S) ceiling. Under cycle-7 (no budget) every honest share was stored and BOTH would heal.
-func TestProbeC8_MultiHonestCiphertextsPerEpoch_HonestSharesStarved(t *testing.T) {
+// TestC9_MultiHonestCiphertextsPerEpoch_BothHeal: the in-block proof. TWO honest ciphertexts, same
+// epoch, same maturity height. ALL FOUR committee members serve their FULL real share sets for BOTH
+// (16 shares each: 8 for ct1, 8 for ct2 — exactly what buildDecryptShares produces). The per-
+// (operator,ciphertext) budget stores BOTH ciphertexts' 32 shares — under cycle-8 ct2 was starved.
+func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 	c := c7Committee(t)
 	servers := []string{"honest_A", "honest_B", "honest_C", "attacker"} // all serve REAL shares
-	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap()                   // 256
+	s := c.k.GetParams(c.ctx).EffectiveShareBudget()
+	ceiling := keeper.MaxVerifyCiphertextsPerBlock * s
 
 	base := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 	ct1, err := threshold.Encrypt(c.ak.Pub, []byte("ct1 - oldest"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ct2, err := threshold.Encrypt(c.ak.Pub, []byte("ct2 - starved"))
+	ct2, err := threshold.Encrypt(c.ak.Pub, []byte("ct2 - was starved"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,40 +64,33 @@ func TestProbeC8_MultiHonestCiphertextsPerEpoch_HonestSharesStarved(t *testing.T
 	rejected := countEvents(ing, "encmempool_dkg_ve_share_rejected")
 	verified := stored1 + stored2 + rejected
 
-	t.Logf("ct1 stored=%d  ct2 stored=%d  chaff rejected=%d  total DLEQ verifies=%d  O(S) ceiling=%d",
-		stored1, stored2, rejected, verified, shareCap)
+	t.Logf("ct1 stored=%d  ct2 stored=%d  chaff rejected=%d  total DLEQ verifies=%d  O(cap*S) ceiling=%d",
+		stored1, stored2, rejected, verified, ceiling)
 
 	if rejected != 0 {
 		t.Fatalf("no attacker: expected 0 chaff rejections, got %d", rejected)
 	}
-	// The regression: every honest member served ct2, the block had 224 spare ceiling slots,
-	// yet the per-epoch budget stored NONE of ct2's honest shares.
-	if stored2 != 0 {
-		t.Logf("NOTE: ct2 got %d shares — throttle weaker than modeled; still a partial starve if < 32", stored2)
+	// THE FIX: both honest ciphertexts got ALL 32 of their shares stored in the same block.
+	if stored1 != 4*8 || stored2 != 4*8 {
+		t.Fatalf("cycle-9: both ciphertexts must accrue all 32 honest shares in one block, got ct1=%d ct2=%d", stored1, stored2)
 	}
-	if stored2 >= 24 { // >= t=18 worth would mean ct2 could also decrypt this block
-		t.Fatalf("expected ct2 honest shares to be budget-DEFERRED (starved), but %d were stored", stored2)
+	if verified > ceiling {
+		t.Fatalf("sanity: verifications %d exceeded O(cap*S) ceiling %d", verified, ceiling)
 	}
-	if verified > shareCap {
-		t.Fatalf("sanity: verifications %d exceeded ceiling %d", verified, shareCap)
-	}
-	t.Logf("CONFIRMED: with 2 honest ciphertexts in one epoch, honest ct2 was starved to %d stored "+
-		"shares (ct1=%d) despite %d/%d spare O(S) ceiling and NO attacker — cycle-8 defers honest "+
-		"shares cycle-7 would have stored+healed.", stored2, stored1, shareCap-verified, shareCap)
+	t.Logf("RESTORED: with 2 honest ciphertexts in one epoch BOTH accrued their full %d shares (ct1=%d ct2=%d) in one block — cycle-8 would have starved ct2 to 0.", 4*8, stored1, stored2)
 }
 
-// TestProbeC8_DrainRateOneCtPerBlock_TailStrands: escalate the in-block starve to a DROP. A burst
-// of K honest ciphertexts matures together in one epoch; every committee member faithfully serves
-// every in-flight ciphertext each block (oldest-first, capped at VoteExtShareCap, exactly as
-// buildDecryptShares does). The per-(operator,epoch) budget drains only ONE ciphertext's honest
-// shares per block, so throughput is ~1 decrypt/block regardless of the 2048/block decrypt budget.
-// With K > StrandedDecryptGraceBlocks, the tail ciphertexts age past their 32-block grace and
-// HARD-STRAND — the cycle-7 "defers + heals" turned into "defers + DROPS", all-honest, no attacker.
-func TestProbeC8_DrainRateOneCtPerBlock_TailStrands(t *testing.T) {
+// TestC9_BurstOfManyCiphertexts_NoTailStrand: the cross-block proof. A burst of K honest ciphertexts
+// matures together in one epoch; every committee member faithfully serves every in-flight ciphertext
+// each block (oldest-first, capped at VoteExtShareCap, exactly as buildDecryptShares does). Under the
+// per-(operator,ciphertext) budget the whole burst is served within a couple of blocks (bounded only
+// by the per-VE cap and the decrypt budget), so NONE of the K age past the 32-block grace — the cycle-7
+// "defers + heals" guarantee is intact, all-honest, no attacker. Cycle-8 hard-STRANDED the tail here.
+func TestC9_BurstOfManyCiphertexts_NoTailStrand(t *testing.T) {
 	c := c7Committee(t)
 	servers := []string{"honest_A", "honest_B", "honest_C"} // 24 pts >= t=18: enough to decrypt any ct
-	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap()       // 256
-	const K = 40                                             // > grace(32): forces a tail strand
+	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap()      // 256
+	const K = 40                                            // > grace(32): cycle-8 forced a tail strand here
 
 	base := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 
@@ -172,23 +163,26 @@ func TestProbeC8_DrainRateOneCtPerBlock_TailStrands(t *testing.T) {
 	t.Logf("K=%d honest ciphertexts (all mature @12, one epoch, %d honest servers, NO attacker): "+
 		"totalDecrypted=%d  totalStranded=%d", K, len(servers), totalDecrypted, totalStranded)
 
-	// Throughput throttle: at least one block decrypted <= 1 ct even though the decrypt budget is 2048.
+	// THE FIX: every honest ciphertext decrypts, none strand. The per-(operator,ciphertext) budget
+	// serves the whole burst within a couple of blocks (bounded by the per-VE cap, then the 2048/block
+	// decrypt budget), so nothing ages past the 32-block grace.
+	if totalStranded != 0 {
+		t.Fatalf("cycle-9 REGRESSION: honest burst must NOT strand any ciphertext, got %d stranded", totalStranded)
+	}
+	if totalDecrypted != K {
+		t.Fatalf("cycle-9 liveness: expected all %d honest ciphertexts to decrypt, got %d", K, totalDecrypted)
+	}
+	// Full throughput: at least one block decrypted MANY ciphertexts (not throttled to ~1/block).
 	maxPerBlock := 0
 	for _, n := range decByBlock {
 		if n > maxPerBlock {
 			maxPerBlock = n
 		}
 	}
-	if maxPerBlock > 2 {
-		t.Fatalf("expected the ingest budget to throttle decryption to ~1 ct/block, saw %d in a block", maxPerBlock)
+	if maxPerBlock <= 2 {
+		t.Fatalf("cycle-9: expected high per-block throughput (not ~1/block), max decrypted in a block was %d", maxPerBlock)
 	}
-	// The DROP: honest ciphertexts stranded purely because their honest shares were budget-deferred
-	// past the 32-block grace. This is the cycle-7 heal guarantee broken by the cycle-8 bound.
-	if totalStranded == 0 {
-		t.Fatalf("expected the tail (K=%d > grace=%d) to HARD-STRAND under the 1-ct/block drain, but none did", K, keeper.StrandedDecryptGraceBlocks)
-	}
-	t.Logf("CONFIRMED (drop): %d/%d honest ciphertexts HARD-STRANDED (encmempool_decrypt_stranded) with a "+
-		"fully honest committee — the per-(operator,epoch) verify budget throttled honest healing to "+
-		"~1 ct/block, so the burst aged past grace. Cycle-7 'defers + heals' regressed to 'defers + DROPS'.",
-		totalStranded, K)
+	t.Logf("RESTORED (no drop): all %d/%d honest ciphertexts decrypted, 0 stranded, up to %d decrypted in a single block — "+
+		"the per-(operator,ciphertext) budget serves the whole burst well within grace. Cycle-7 'defers + heals' preserved.",
+		totalDecrypted, K, maxPerBlock)
 }
