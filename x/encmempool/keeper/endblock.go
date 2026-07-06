@@ -31,6 +31,24 @@ const dkgBackoffCeilingBlocks uint64 = 1000
 // (HIGH-2/HIGH-3 reopen). The default DkgComplaintWindow (10) provides ample operational margin.
 const minComplaintWindowBlocks uint64 = 2
 
+// complaintWindowFloor scales the complaint window with committee size n so a single honest victim
+// targeted by a poisoning coalition can clear its complaints against EVERY other dealer within the
+// window despite the per-accuser verify quota (which admits only maxComplaintVerifiesPerAccuser DLEQ
+// verifies/block/accuser). A victim needs up to n-1 complaints => ceil((n-1)/quota) usable blocks, +1
+// for the ABCI++ build->consume lag, floored at minComplaintWindowBlocks. This keeps per-block verify
+// work bounded (quota x accusers) while guaranteeing capacity — closing the re-audit's floor-vs-quota
+// interaction. Small committees (the common case, n<=quota+1) still get the minimum floor of 2.
+func complaintWindowFloor(n int) uint64 {
+	if n <= 1 {
+		return minComplaintWindowBlocks
+	}
+	blocks := uint64((n-1+maxComplaintVerifiesPerAccuser-1)/maxComplaintVerifiesPerAccuser) + 1
+	if blocks < minComplaintWindowBlocks {
+		return minComplaintWindowBlocks
+	}
+	return blocks
+}
+
 // EndBlockDKG drives the on-chain validator DKG. It is fully deterministic (reads
 // only committed state + the bonded validator set) so every node runs an identical
 // state machine — the same consensus-safety property BeginBlock relies on.
@@ -271,12 +289,14 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 		Epoch:        epoch,
 		OpenHeight:   h,
 		DealDeadline: dealDeadline,
-		// AUDIT FIX (complaint-window floor): the complaint round spans the ABCI++ 1-block lag — a
-		// complaint is BUILT in ExtendVote(X>DealDeadline) and CONSUMED at PreBlock(X+1) — so a window < 2
-		// makes NO complaint both buildable AND ingestable, silently no-opping the whole channel
-		// (HIGH-2/HIGH-3 reopen). Floor at minComplaintWindowBlocks so a governance-set DkgComplaintWindow
-		// of 1 cannot dead-round the complaint path.
-		ComplaintDeadline: addSat(dealDeadline, max64(p.DkgComplaintWindow, minComplaintWindowBlocks)),
+		// AUDIT FIX (complaint-window floor, COMMITTEE-SCALED): the complaint round spans the ABCI++
+		// 1-block lag — a complaint is BUILT in ExtendVote(X>DealDeadline) and CONSUMED at PreBlock(X+1) —
+		// so a window < 2 dead-rounds the channel (HIGH-2/HIGH-3 reopen). RE-AUDIT FIX: a single victim
+		// targeted by a coalition must file up to n-1 complaints, but the per-accuser verify quota caps it
+		// to maxComplaintVerifiesPerAccuser/block; a flat floor of 2 gave only one usable block, so a large
+		// (governance-set) committee let poisoners survive into QUAL. Scale the floor with the ACTUAL
+		// committee size so one victim can clear complaints against every other dealer within the window.
+		ComplaintDeadline: addSat(dealDeadline, max64(p.DkgComplaintWindow, complaintWindowFloor(len(members)))),
 		Members:           members,
 		Threshold:         t,
 		MembersHash:       hash,

@@ -333,10 +333,15 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 	// so garbage cannot re-charge the O(t) DLEQ.
 	if haveOpen && h > openRound.DealDeadline && h <= openRound.ComplaintDeadline {
 		complained := 0
+		// Defense-in-depth (re-audit): the len(ve.Complaints) count-cap in VerifyVoteExtension is a
+		// node-local, non-binding filter; re-cap the number PROCESSED per VE here on the deterministic
+		// PreBlock path too, so an injected oversized extension (or one that slipped VerifyVoteExtension)
+		// cannot force unbounded cheap-reject work (cheap rejects do not charge the per-accuser verify quota).
+		maxPerVE := len(openRound.Members)
 		for _, e := range canon {
 			opVerifies := 0 // independent per-accuser verify quota (anti-starvation)
 			for i := range e.VE.Complaints {
-				if opVerifies >= maxComplaintVerifiesPerAccuser {
+				if i >= maxPerVE || opVerifies >= maxComplaintVerifiesPerAccuser {
 					break
 				}
 				if k.IngestComplaintFromVE(ctx, openRound, e.Operator, e.VE.Complaints[i], &opVerifies) {
@@ -432,6 +437,13 @@ func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, ope
 	}
 	if c.Against == 0 || c.Against == accuserIdx {
 		return false // null target / self-complaint
+	}
+	// RE-AUDIT FIX: c.Against must be a real member of this round BEFORE any store write. Without this a
+	// byzantine accuser could pack complaints against arbitrary non-member indices, each writing a
+	// negative-cache entry (SetComplaintRejected in the no-dealing path) for a bogus target — bounded
+	// state-write amplification keyed on an unvalidated index.
+	if _, ok := memberByIndex(round, c.Against); !ok {
+		return false // complaint against a non-member index
 	}
 	accuser, ok := memberByIndex(round, accuserIdx)
 	if !ok {
