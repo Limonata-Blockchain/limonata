@@ -47,6 +47,32 @@ env-gated ExtendVote adversary harness for the live multi-ciphertext + compute-D
 > remaining work is DESIGN + implementation, which is why (Jason, 2026-07-05) we STOP the DKG audit loop
 > here and pivot to designing the complaint round + admission/scheduler. Dormant merge stays safe.
 
+---
+
+## BUILD UPDATE 2026-07-06 — remediation implemented (design v2), NO adversarial audit run yet
+
+Both remediation fixes from `DESIGN_REMEDIATION_v2.md` are now BUILT (not pushed; DKG still dormant).
+The verifying adversarial audit is **not** run yet (owner instruction), so these are `AUDIT_PENDING`.
+
+- **HIGH-2 / HIGH-3 → CLOSED by FIX 2 (commit `d251dbc1`).** Accountless, EVAL-POINT-keyed complaint/
+  justify round: detector `buildDkgComplaints` (ExtendVote) → Phase 4 `IngestComplaintFromVE`
+  (operator-authed, `OwnsEvalPoint(p)`, enc-share by point, verify-before-store via
+  `VerifyJustifiedComplaint(evalPoint,...)`, first-wins, negative-cache 0x1C anti-spam) → existing
+  `finalizeRound`/`FinalizePublicWeighted` disq/QUAL machinery lights up; QUAL frozen once at finalize.
+  Weighted-path safety fix (v1 used member-index → single-member frame-out-of-QUAL). MF4 (derive-belt +
+  early-rekey for the offline-victim residual) deferred; DLEQ backstop already prevents silent corruption.
+- **HIGH-T-skew + HIGH-U admission clause → CLOSED by FIX 1 partial (commit `a3a4a1e2`).** C2 marginal
+  supply (emit only not-stored owned points, skip complete cts — the whale reaches grace-critical cts)
+  + C3' per-SUBMITTER per-block admission rate-limit (key 0x1D, NOT a global slot).
+- **HIGH-U halt-class → STILL OPEN (deferred).** C1' (bound the in-state matured-short set +
+  maturity-eviction, K_max resize) and C4' (chunked + epoch-pinned `Y_1..Y_S` verify-key precompute)
+  need **live 8-node drain tuning** of K_max / rate before they can ship — shipping blind risks a strand.
+
+Suite: `-tags test ./x/encmempool/...` GREEN (keeper 95s), evmd build 0, `go vet` 0, `gofmt` clean.
+External professional audit still required before enable, regardless.
+
+---
+
 The cycle-9 fix **genuinely closes HIGH-T** — the cycle-8 honest-throughput / forced-strand regression.
 Cycle-8 keyed the per-operator ingest DLEQ-verify budget by **`(operator, EPOCH)`**, but a decryption
 share is **per-CIPHERTEXT** (`D = x·A`, bound to the ciphertext ephemeral `A`), so with `C` in-flight
