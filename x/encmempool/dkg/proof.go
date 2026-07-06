@@ -70,8 +70,14 @@ func ProveDecryptShare(share threshold.Share, ct *threshold.Ciphertext) (*thresh
 	var Y secp256k1.JacobianPoint
 	secp256k1.ScalarBaseMultNonConst(share.Xi, &Y) // Y = x*G
 
-	// Commit: T1 = k*G, T2 = k*A. k is derived deterministically (no RNG rail).
-	k := deriveDLEQNonce(share.Xi, A, D, &Y)
+	// Commit: T1 = k*G, T2 = k*A. k is derived deterministically (no RNG rail). CRITICAL AUDIT FIX:
+	// the nonce MUST bind the SAME index the challenge binds (dleqChallenge). Otherwise two proofs over
+	// the same (x, A) — hence the same D=x*A and Y=x*G — at DIFFERENT indices reuse k while the challenge
+	// c differs, and any observer recovers x=(z1-z2)/(c1-c2). This is reachable in the complaint path,
+	// where a node proves S=x*A with x = its ONE persistent enc private key at several owned eval-points
+	// (indices) against dealer-chosen A: a malicious dealer sealing the same A to two of a victim's points
+	// makes the victim leak its enc private key on-chain. Binding index makes k distinct per index.
+	k := deriveDLEQNonce(share.Index, share.Xi, A, D, &Y)
 	var T1, T2 secp256k1.JacobianPoint
 	secp256k1.ScalarBaseMultNonConst(k, &T1)
 	secp256k1.ScalarMultNonConst(k, A, &T2)
@@ -161,13 +167,16 @@ func dleqChallenge(index uint64, A, D, Y, T1, T2 *secp256k1.JacobianPoint) *secp
 // catastrophic k-reuse that extracts x via (z1-z2)/(c1-c2) is unreachable no matter
 // what io.Reader an integrator wires up. Rejection sampling with a counter keeps the
 // output uniform and non-zero mod q, matching threshold.randScalar's convention.
-func deriveDLEQNonce(x *secp256k1.ModNScalar, A, D, Y *secp256k1.JacobianPoint) *secp256k1.ModNScalar {
+func deriveDLEQNonce(index uint64, x *secp256k1.ModNScalar, A, D, Y *secp256k1.JacobianPoint) *secp256k1.ModNScalar {
 	xb := x.Bytes()
 	aC, dC, yC := compressCopy(A), compressCopy(D), compressCopy(Y)
+	var idx [8]byte
+	binary.BigEndian.PutUint64(idx[:], index) // CRITICAL: bind the index the challenge also binds (no k-reuse across indices)
 	var ctr [4]byte
 	for {
 		h := sha256.New()
 		h.Write([]byte(dleqNonceContext))
+		h.Write(idx[:])
 		h.Write(xb[:])
 		h.Write(aC)
 		h.Write(dC)

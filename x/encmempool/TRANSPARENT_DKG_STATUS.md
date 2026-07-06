@@ -49,6 +49,17 @@ env-gated ExtendVote adversary harness for the live multi-ciphertext + compute-D
 
 ---
 
+## EXTERNAL-AUDIT SIMULATION 2026-07-06 — see `AUDIT_REPORT_external_sim.md`
+
+A full-surface simulated external audit (5 domains: crypto/consensus/liveness/protocol/governance)
+raised 23, confirmed **19: 3 CRITICAL, 4 HIGH, 5 MED, 6 LOW, 1 INFO(+)**. **VERDICT: NO-GO to enable;
+dormant merge SAFE** (committed-write path independently verified fork-safe). **CRIT-1 (DLEQ nonce →
+on-chain key extraction) is FIXED** (`deriveDLEQNonce` binds the index + regression). Remaining enable-
+blockers: CRIT-2 (sybil PreBlock DoS = the deferred C1' backlog bound), CRIT-3 (O(t²) decrypt — extend
+the Y-cache to RecoverVerified), 4 HIGH, and the topology reality (**a ~70%-VP validator voids
+confidentiality** — needs stake redistribution, not a code fix). Full report + must-fix roadmap: §5 of
+`AUDIT_REPORT_external_sim.md`. A REAL third-party firm (crypto scope) is still required before enable.
+
 ## BUILD UPDATE 2026-07-06 — remediation implemented (design v2), NO adversarial audit run yet
 
 Both remediation fixes from `DESIGN_REMEDIATION_v2.md` are now BUILT (not pushed; DKG still dormant).
