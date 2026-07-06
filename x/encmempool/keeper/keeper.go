@@ -310,6 +310,43 @@ func (k Keeper) incSubmitterEncCount(ctx context.Context, submitter string) {
 	_ = k.store(ctx).Set(submitterEncCountKey(submitter), u64(k.GetSubmitterEncCount(ctx, submitter)+1))
 }
 
+// maxEncSubmitsPerBlockPerSubmitter is the PER-SUBMITTER per-block admission RATE limit (Fix 1 C3'):
+// the missing rate dimension on top of the standing MaxInFlightPerSubmitter inventory cap. Being
+// per-submitter (NEVER a single global slot) avoids the one-address permanent-DoS + proposer-censorship
+// a global slot would create; a small constant keeps maturing-ciphertext inflow bounded so per-block
+// DLEQ-verify work stays near marginal decryption progress (the "no admission rate limit => HIGH-U
+// sustainable" clause). Final sizing + a sybil price on the submitter are tuned against a live drain;
+// this const is the safe always-on backstop.
+const maxEncSubmitsPerBlockPerSubmitter = 4
+
+func encSubmitRateKey(submitter string) []byte {
+	return concat(types.EncSubmitRatePrefix, []byte(submitter))
+}
+
+// bumpEncSubmitsThisBlock increments and returns this submitter's admission count for `height`. The
+// record (be(height)||be(count)) lazily resets to 1 the first time the submitter submits at a new
+// height, so there is exactly ONE record per submitter (reused across blocks, no leak) and the
+// increment is O(1) in canonical DeliverTx order — deterministic on every node. A rejected submit's
+// bump is discarded with its branched store, so the persisted count tracks ADMITTED submits.
+func (k Keeper) bumpEncSubmitsThisBlock(ctx context.Context, submitter string, height uint64) uint64 {
+	key := encSubmitRateKey(submitter)
+	bz, _ := k.store(ctx).Get(key)
+	var sh, cnt uint64
+	if len(bz) == 16 {
+		sh = binary.BigEndian.Uint64(bz[:8])
+		cnt = binary.BigEndian.Uint64(bz[8:])
+	}
+	if sh != height {
+		cnt = 0 // first submit at a new height: reset
+	}
+	cnt++
+	out := make([]byte, 16)
+	binary.BigEndian.PutUint64(out[:8], height)
+	binary.BigEndian.PutUint64(out[8:], cnt)
+	_ = k.store(ctx).Set(key, out)
+	return cnt
+}
+
 func (k Keeper) decSubmitterEncCount(ctx context.Context, submitter string) {
 	c := k.GetSubmitterEncCount(ctx, submitter)
 	if c > 0 {

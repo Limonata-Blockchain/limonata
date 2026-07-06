@@ -33,8 +33,14 @@ func TestSubmitEncrypted_AdmissionCeilings(t *testing.T) {
 	a := make([]byte, 33)
 	nonce := make([]byte, threshold.NonceSize)
 	body := []byte("x")
+	// Spread submits across successive block heights so the STANDING-inventory ceilings under test
+	// (per-submitter, global) are exercised independently of the Fix-1 C3' per-BLOCK admission rate
+	// limit (which resets each block; tested separately in TestSubmitEncrypted_PerBlockRate). Nothing
+	// matures during the test (DecryptDelay 100), so inventory still accumulates across heights.
+	height := int64(10)
 	submit := func(sub string) error {
-		_, err := ms.SubmitEncrypted(ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager()),
+		height++
+		_, err := ms.SubmitEncrypted(ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager()),
 			&types.MsgSubmitEncrypted{Submitter: sub, A: a, Nonce: nonce, Body: body})
 		return err
 	}
@@ -70,6 +76,43 @@ func TestSubmitEncrypted_AdmissionCeilings(t *testing.T) {
 	// State stays bounded AT the ceiling — the rejection did not store anything.
 	if g := k.GetGlobalEncCount(ctx); g != 20 {
 		t.Fatalf("global in-flight grew past the ceiling: %d", g)
+	}
+}
+
+// TestSubmitEncrypted_PerBlockRate verifies the Fix-1 C3' per-SUBMITTER per-BLOCK admission rate limit:
+// a submitter may admit at most maxEncSubmitsPerBlockPerSubmitter (4) ciphertexts in a single block; the
+// next in the SAME block is rejected, and the allowance RESETS the next block. Being per-submitter (not a
+// global slot) is exactly what prevents one address from monopolizing ingress / a proposer from censoring.
+func TestSubmitEncrypted_PerBlockRate(t *testing.T) {
+	k, ctx := newKeeper(t, 10)
+	ms := keeper.NewMsgServerImpl(k)
+	if err := k.SetParams(ctx, types.Params{
+		EncEnabled: true, Threshold: 1, DecryptDelay: 100,
+		MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0, // isolate the RATE dimension
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := make([]byte, 33)
+	nonce := make([]byte, threshold.NonceSize)
+	body := []byte("x")
+	submitAt := func(sub string, h int64) error {
+		_, err := ms.SubmitEncrypted(ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager()),
+			&types.MsgSubmitEncrypted{Submitter: sub, A: a, Nonce: nonce, Body: body})
+		return err
+	}
+	for i := 0; i < 4; i++ { // 4 accepted in block 100
+		if err := submitAt("r1", 100); err != nil {
+			t.Fatalf("r1 submit %d in block 100 rejected early: %v", i, err)
+		}
+	}
+	if err := submitAt("r1", 100); err == nil { // the 5th in the same block is rejected
+		t.Fatal("per-block rate limit not enforced: 5th submit from r1 in one block was accepted")
+	}
+	if err := submitAt("r1", 101); err != nil { // allowance resets next block
+		t.Fatalf("per-block rate limit did not reset at the new block: %v", err)
+	}
+	if err := submitAt("r2", 100); err != nil { // PER-SUBMITTER: a different submitter is unaffected
+		t.Fatalf("per-block rate limit leaked across submitters (r2 blocked in a block r1 saturated): %v", err)
 	}
 }
 

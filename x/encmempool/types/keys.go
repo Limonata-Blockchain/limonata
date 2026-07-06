@@ -73,4 +73,11 @@ var (
 	// byzantine accuser gets at most ONE verify per targeted dealer per epoch, never a
 	// per-block re-charge that would starve honest complaints out of the per-block budget.
 	DkgComplaintRejectedPrefix = []byte{0x1C} // 0x1C | be(epoch) | be(against) | be(accuser) -> {1}
+	// EncSubmitRatePrefix is the PER-SUBMITTER per-block admission RATE counter (Fix 1 C3'): the
+	// missing rate dimension on top of the standing MaxInFlightPerSubmitter inventory cap. One record
+	// per submitter (reused across blocks, lazily height-reset), storing be(height)||be(count), so the
+	// increment is O(1) in canonical DeliverTx order and never leaks. It is PER-SUBMITTER (never a
+	// single global slot) so no one address can monopolize ingress or let a proposer censor the
+	// encrypted mempool by ordering its own ciphertexts first.
+	EncSubmitRatePrefix = []byte{0x1D} // 0x1D | submitter -> be(height)||be(count) (16 bytes)
 )

@@ -213,9 +213,26 @@ func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey, op stri
 		if !sc.ok {
 			return true // not a member / not finalized: nothing to contribute
 		}
+		// C2 (MARGINAL supply, HIGH-T-skew fix): emit only owned points NOT already stored on-chain,
+		// and skip a ciphertext already at threshold. This stops a high-stake member (a whale — the
+		// ~70%-VP validator case) from re-burning its per-VE budget re-serving shares already stored on
+		// a saturated OLDEST ciphertext, so it advances to the grace-critical ciphertexts BEHIND it
+		// instead of being throttled to ~1 ct/block. All reads are committed-state, so honest nodes
+		// converge on the same marginal, oldest-first schedule. (Node-local ExtendVote: app-hash-invariant.)
+		stored := k.CollectShares(ctx, e.DecryptHeight, e.Seq)
+		if ak, okk := k.GetActiveKey(ctx, e.Epoch); okk && int(ak.Threshold) > 0 && len(stored) >= int(ak.Threshold) {
+			return true // threshold-complete: it will decrypt; no marginal work needed
+		}
+		storedIdx := make(map[uint64]bool, len(stored))
+		for i := range stored {
+			storedIdx[stored[i].Index] = true
+		}
 		for _, sh := range sc.shares {
 			if len(out) >= shareCap {
 				break
+			}
+			if storedIdx[sh.Index] {
+				continue // this owned point is already stored on-chain; do not re-serve it (marginal)
 			}
 			d, proof, err := dkgnode.ProveShareFor(sh, e.A)
 			if err != nil {

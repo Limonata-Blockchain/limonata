@@ -181,6 +181,16 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "submitter is at its in-flight ceiling (%d ciphertexts)", p.MaxInFlightPerSubmitter)
 	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
+	// PER-SUBMITTER per-block admission RATE limit (Fix 1 C3'): the missing rate dimension on top of
+	// the standing per-submitter inventory cap. Being per-submitter (NOT a global slot) means no single
+	// address can monopolize ingress or let a proposer censor the encrypted mempool by ordering its own
+	// ciphertexts first. It bounds maturing-ciphertext inflow so the per-block DLEQ-verify work stays
+	// near marginal decryption progress (closing HIGH-U's "sustainable because there is no admission
+	// rate limit" clause).
+	if m.bumpEncSubmitsThisBlock(goCtx, msg.Submitter, uint64(ctx.BlockHeight())) > maxEncSubmitsPerBlockPerSubmitter {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"submitter exceeded the per-block admission rate (%d ciphertexts this block)", maxEncSubmitsPerBlockPerSubmitter)
+	}
 	// Stamp the ciphertext with the DKG epoch whose active key it was encrypted to,
 	// so decryptMatured decrypts it under the SAME key/members even after a re-key.
 	// Epoch 0 = the legacy trusted-setup path (params.ThresholdPub).
