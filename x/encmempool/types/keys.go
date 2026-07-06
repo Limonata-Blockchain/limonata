@@ -80,4 +80,10 @@ var (
 	// single global slot) so no one address can monopolize ingress or let a proposer censor the
 	// encrypted mempool by ordering its own ciphertexts first.
 	EncSubmitRatePrefix = []byte{0x1D} // 0x1D | submitter -> be(height)||be(count) (16 bytes)
+	// ActiveShareKeyPrefix caches the epoch's PUBLIC share keys Y_index = SharePubKey(PublicCommitments,
+	// index), precomputed once at finalize (Fix 1 C4'), so each decryption-share DLEQ verify is an O(1)
+	// cache read instead of an O(t) Horner recompute — the block-time flattener that closes HIGH-U's
+	// per-verify cost. Pinned to the epoch: deleted together with the ActiveThresholdKey when the epoch
+	// is superseded + drained (so it always outlives every in-flight ciphertext of the epoch).
+	ActiveShareKeyPrefix = []byte{0x1E} // 0x1E | be(epoch) | be(index) -> 33-byte compressed Y_index
 )

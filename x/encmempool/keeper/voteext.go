@@ -899,13 +899,21 @@ func (k Keeper) verifyDecryptShareDLEQ(ctx sdk.Context, epoch uint64, ctA []byte
 	if !ok || len(ak.PublicCommitments) == 0 {
 		return false
 	}
-	commitments, err := dkg.ParseCommitmentPoints(ak.PublicCommitments)
-	if err != nil {
-		return false
-	}
 	proof, err := dkg.ParseDLEQProof(proofBz)
 	if err != nil {
 		return false // absent / short / non-canonical proof — a chaff share
+	}
+	// Fix 1 C4' (HIGH-U flattener): use the O(1) cached public share key Y_index precomputed at finalize;
+	// a single point-decompress here replaces the O(t) SharePubKey Horner recompute. Falls back to the
+	// on-the-fly recompute only for a cold / pre-C4' epoch whose cache was never populated.
+	if yb := k.getShareKeyCache(ctx, epoch, index); len(yb) > 0 {
+		if pts, perr := dkg.ParseCommitmentPoints([][]byte{yb}); perr == nil && len(pts) == 1 {
+			return dkg.VerifyDecryptShare(ctA, &threshold.DecryptShare{Index: index, D: d}, &pts[0], proof)
+		}
+	}
+	commitments, cerr := dkg.ParseCommitmentPoints(ak.PublicCommitments)
+	if cerr != nil {
+		return false
 	}
 	Y := dkg.SharePubKey(commitments, index)
 	return dkg.VerifyDecryptShare(ctA, &threshold.DecryptShare{Index: index, D: d}, Y, proof)

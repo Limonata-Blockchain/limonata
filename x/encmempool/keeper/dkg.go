@@ -222,6 +222,65 @@ func (k Keeper) GetActiveKey(ctx context.Context, epoch uint64) (types.ActiveThr
 // decryption can lose its key.
 func (k Keeper) DeleteActiveKey(ctx context.Context, epoch uint64) {
 	_ = k.store(ctx).Delete(activeKeyKey(epoch))
+	k.deleteShareKeyCache(ctx, epoch) // Fix 1 C4': the Y-cache is pinned to the epoch — drop it together
+}
+
+// ---- Fix 1 C4': precomputed public share-key cache (Y_index per epoch) ----
+
+func activeShareKeyKey(epoch, index uint64) []byte {
+	return concat(types.ActiveShareKeyPrefix, u64(epoch), u64(index))
+}
+
+// setShareKeyCache stores the compressed public share key Y_index for (epoch, index).
+func (k Keeper) setShareKeyCache(ctx context.Context, epoch, index uint64, yCompressed []byte) {
+	_ = k.store(ctx).Set(activeShareKeyKey(epoch, index), yCompressed)
+}
+
+// getShareKeyCache returns the cached compressed Y_index for (epoch, index), or nil if not cached
+// (a cold / pre-C4' epoch, where verifyDecryptShareDLEQ falls back to recomputing SharePubKey).
+func (k Keeper) getShareKeyCache(ctx context.Context, epoch, index uint64) []byte {
+	bz, err := k.store(ctx).Get(activeShareKeyKey(epoch, index))
+	if err != nil {
+		return nil
+	}
+	return bz
+}
+
+// PrecomputeShareKeys computes + caches Y_1..Y_S for a finalized epoch (Fix 1 C4'), so every later
+// decryption-share DLEQ verify is an O(1) cache read instead of an O(t) SharePubKey recompute. Called
+// once at finalize. At the default budget (S=256) this is a sub-100ms one-shot; for a governance-max
+// S=2048 committee it is a one-time ~1-2s finalize cost that a future change should chunk across the
+// first blocks of the epoch (the verify fallback keeps it correct meanwhile). Deterministic (pure
+// function of the committed PublicCommitments), so every node caches identical bytes.
+func (k Keeper) PrecomputeShareKeys(ctx context.Context, epoch uint64, publicCommitments [][]byte, budgetS int) {
+	if budgetS <= 0 {
+		return
+	}
+	keys, err := dkg.ShareKeysCompressedUpTo(publicCommitments, uint64(budgetS))
+	if err != nil {
+		return // malformed commitments: verify falls back to on-the-fly recompute
+	}
+	for i, yb := range keys {
+		k.setShareKeyCache(ctx, epoch, uint64(i+1), yb)
+	}
+}
+
+// deleteShareKeyCache removes the whole Y-cache for an epoch (keys collected first, then deleted, so
+// the store iterator is not mutated mid-scan — deterministic). Called from DeleteActiveKey.
+func (k Keeper) deleteShareKeyCache(ctx context.Context, epoch uint64) {
+	pfx := concat(types.ActiveShareKeyPrefix, u64(epoch))
+	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
+	if err != nil {
+		return
+	}
+	var keys [][]byte
+	for ; it.Valid(); it.Next() {
+		keys = append(keys, append([]byte(nil), it.Key()...))
+	}
+	it.Close()
+	for _, key := range keys {
+		_ = k.store(ctx).Delete(key)
+	}
 }
 
 // ---- epoch in-flight ciphertext ref-count (pins an epoch's records until drained) ----
@@ -436,6 +495,10 @@ func (k Keeper) finalizeRound(ctx sdk.Context, round types.DkgRound) {
 		Threshold: round.Threshold, Qual: res.Qual,
 	}
 	_ = k.SetActiveKey(ctx, ak)
+	// Fix 1 C4' (HIGH-U block-time flattener): precompute + cache the epoch's public share keys
+	// Y_1..Y_S now, so every later decryption-share DLEQ verify is an O(1) cache read instead of an
+	// O(t) SharePubKey recompute. Pinned to the epoch (dropped by DeleteActiveKey once drained).
+	k.PrecomputeShareKeys(ctx, round.Epoch, ak.PublicCommitments, types.TotalEvalPoints(round.Members))
 	// Capture the epoch this finalize SUPERSEDES before advancing the active pointer.
 	prevActive := k.GetActiveEpoch(ctx)
 	k.SetActiveEpoch(ctx, round.Epoch)

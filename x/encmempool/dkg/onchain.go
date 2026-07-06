@@ -188,6 +188,23 @@ func ParseCommitmentPoints(cbz [][]byte) ([]secp256k1.JacobianPoint, error) {
 	return out, nil
 }
 
+// ShareKeysCompressedUpTo precomputes the compressed public share keys Y_index = SharePubKey(V, index)
+// for index in [1, upTo], where V = the aggregate PUBLIC commitments (ActiveThresholdKey.PublicCommitments).
+// Y_index is the value the on-chain DLEQ verify checks a decryption share against; the caller caches these
+// per (epoch, index) so each verify becomes an O(1) lookup instead of an O(t) SharePubKey Horner recompute
+// (Fix 1 C4', HIGH-U block-time flattener). The commitments are parsed ONCE and reused across all indices.
+func ShareKeysCompressedUpTo(publicCommitments [][]byte, upTo uint64) ([][]byte, error) {
+	comm, err := ParseCommitmentPoints(publicCommitments)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]byte, 0, upTo)
+	for idx := uint64(1); idx <= upTo; idx++ {
+		out = append(out, compressCopy(SharePubKey(comm, idx)))
+	}
+	return out, nil
+}
+
 // Deal generates dealer `index`'s Feldman dealing for the given member set: the
 // compressed public commitments and the SECRET point-to-point share f_index(m) for
 // each member m. The daemon then ECIES-encrypts each share to the matching member
