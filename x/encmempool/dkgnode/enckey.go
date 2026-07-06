@@ -213,6 +213,16 @@ func DeriveShares(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []u
 	return out, nil
 }
 
+// NOTE (Fix 2 MF4, deferred refinement): a share-validity BELT here — VerifyShare(commitments, p, s)
+// against each QUAL dealer's Feldman commitments — would catch the offline-victim residual (a dealer
+// that poisoned only points whose owner was offline for the whole complaint window) at derive time
+// rather than downstream at RecoverVerified's DLEQ. It is NOT strictly required for safety (the
+// on-chain DLEQ over Y_p already drops a wrong partial, never silently corrupting decryption), and to
+// be useful it must ALSO trigger an early rekey (a threshold-witnessed signal that opens a fresh
+// epoch) instead of just skipping the point. That rekey-trigger is a consensus mechanism left as a
+// follow-up; the CORE HIGH-2/HIGH-3 closure is the complaint round (a bad dealer is DQ'd from QUAL
+// before it can poison anyone), which does not need this belt.
+
 // ProveShareFor produces a DLEQ-proved decryption share for ciphertext component A (r*G,
 // compressed) under this node's derived share. It wraps dkg.ProveDecryptShare.
 func ProveShareFor(share threshold.Share, a []byte) (d []byte, proof []byte, err error) {

@@ -322,6 +322,38 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 		}
 	}
 
+	// Phase 4: justified complaints against QUAL-candidate dealers, only inside the complaint
+	// window (after dealing closes, before finalize). This is the ingestion channel that finally
+	// reaches the ACCOUNTLESS transparent path — it populates the disq set finalizeRound reads, so
+	// a byzantine dealer that sealed a bad/missing share to a point an honest member owns is
+	// excluded from QUAL and the epoch decrypts over the healthy set (HIGH-2 / HIGH-3). Verify work
+	// is bounded by committee size and a per-block cap; a verified-and-rejected complaint is
+	// negative-cached in IngestComplaintFromVE so garbage cannot re-charge the O(t) DLEQ.
+	if haveOpen && h > openRound.DealDeadline && h <= openRound.ComplaintDeadline {
+		complaintVerifies := 0
+		complained := 0
+		for _, e := range canon {
+			if complaintVerifies >= maxComplaintVerifiesPerBlock {
+				break
+			}
+			for i := range e.VE.Complaints {
+				if k.IngestComplaintFromVE(ctx, openRound, e.Operator, e.VE.Complaints[i], &complaintVerifies) {
+					complained++
+				}
+				if complaintVerifies >= maxComplaintVerifiesPerBlock {
+					break
+				}
+			}
+		}
+		if complained > 0 {
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_ve_complaints",
+				sdk.NewAttribute("height", u64str(h)),
+				sdk.NewAttribute("stored", u64str(uint64(complained))),
+			))
+		}
+	}
+
 	// Phase 3: decryption shares for in-flight ciphertexts, under a HARD, DETERMINISTIC per-block
 	// bound on DLEQ-verification work (cycle-8 bound, cycle-9 granularity). ingestDecryptSharesBounded
 	// composes a bounded oldest-first PROCESSED-ciphertext set (cheap pre-classification of chaff aimed
@@ -379,6 +411,78 @@ func (k Keeper) IngestDealingFromVE(ctx sdk.Context, round types.DkgRound, opera
 	if k.SetDealing(ctx, dealing) != nil {
 		return false
 	}
+	return true
+}
+
+// IngestComplaintFromVE verifies + stores a justified complaint carried on a vote extension,
+// authorizing the accuser by OPERATOR identity (Pillar 3: transparent members carry no account).
+// It is the accountless equivalent of msgServer.DkgComplaint, wired for the STAKE-WEIGHTED path:
+// the complaint disputes a specific EVAL-POINT the accuser owns (member index != eval point on a
+// weighted committee), so the enc-share is selected BY that point and the point (not the member
+// index) is fed into the Feldman VerifyShare inside VerifyJustifiedComplaint. A verified-and-
+// rejected complaint is negative-cached so a byzantine accuser cannot re-charge the O(t) DLEQ every
+// block. `verifies` is bumped for each EC verification actually performed so the caller can cap
+// per-block complaint work. Returns true only when a NEW complaint is stored (a real dealer fault).
+func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, operator string, c types.VoteExtComplaint, verifies *int) bool {
+	if c.Epoch != round.Epoch {
+		return false // stale (round rolled over)
+	}
+	accuserIdx := memberIndexByOperator(round, operator)
+	if accuserIdx == 0 {
+		return false // accuser is not a member of this round
+	}
+	if c.Against == 0 || c.Against == accuserIdx {
+		return false // null target / self-complaint
+	}
+	accuser, ok := memberByIndex(round, accuserIdx)
+	if !ok {
+		return false
+	}
+	// SAFETY (weighted path, the load-bearing check): the accuser must actually OWN the disputed
+	// eval-point. Without it a member could dispute a point sealed to a DIFFERENT member — that
+	// point's enc-share will not open under the accuser's key, so VerifyJustifiedComplaint would
+	// return cheated=true against an HONEST dealer (a single-member frame-out-of-QUAL).
+	if !accuser.OwnsEvalPoint(c.EvalPoint) {
+		return false
+	}
+	// first-wins: an already-accepted complaint from this pair needs no re-verify.
+	if k.GetComplaint(ctx, round.Epoch, c.Against, accuserIdx) {
+		return false
+	}
+	// negative-cache: a prior verified-and-rejected complaint from this pair is dropped O(1),
+	// before any EC work, so garbage cannot re-charge the DLEQ or starve honest complaints.
+	if k.HasComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx) {
+		return false
+	}
+	dealing, ok := k.GetDealing(ctx, round.Epoch, c.Against)
+	if !ok {
+		return false // no dealing to complain about (a no-deal dealer is excluded at finalize anyway)
+	}
+	// Select the enc-share the dealer sealed AT the disputed eval-point (weighted: keyed by point).
+	var enc *types.DkgStoredEncShare
+	for i := range dealing.EncShares {
+		if dealing.EncShares[i].MemberIndex == c.EvalPoint {
+			enc = &dealing.EncShares[i]
+			break
+		}
+	}
+	if enc == nil {
+		// The dealer never sealed a share to a point the accuser provably owns -> disqualifying
+		// (no crypto needed; the accuser's ownership of the point was checked above).
+		_ = k.SetComplaint(ctx, types.DkgComplaintRec{Epoch: round.Epoch, Against: c.Against, AccuserIndex: accuserIdx})
+		return true
+	}
+	*verifies++ // charge the O(t) DLEQ before performing it
+	cheated, proofValid := dkg.VerifyJustifiedComplaint(
+		c.EvalPoint, accuser.EncPubKey, dealing.Commitments,
+		enc.A, enc.Nonce, enc.Body, c.SharedPoint, c.DleqProof,
+	)
+	if !proofValid || !cheated {
+		// framing (bad DLEQ) or frivolous (share is actually valid): reject, negative-cache, do NOT store.
+		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx)
+		return false
+	}
+	_ = k.SetComplaint(ctx, types.DkgComplaintRec{Epoch: round.Epoch, Against: c.Against, AccuserIndex: accuserIdx})
 	return true
 }
 
@@ -526,6 +630,16 @@ const maxVerifyCiphertextsPerBlock = maxDeferredDecryptsPerBlock
 // regression tests (they assert the block's DLEQ-verify work never exceeds this * S under a flood,
 // and that an honest member serving up to this many in-flight ciphertexts is never throttled).
 const MaxVerifyCiphertextsPerBlock = maxVerifyCiphertextsPerBlock
+
+// maxComplaintVerifiesPerBlock caps the number of framing-resistant complaint DLEQ verifications a
+// single block may perform (Phase 4). UNLIKE decryption-share verify work — which scales with the
+// UNBOUNDED in-flight ciphertext count and needs the O(cap*S) ceiling — complaint work is bounded by
+// COMMITTEE SIZE: at most n accusers x (n-1) targets distinct (accuser,against) pairs, and the
+// negative-cache makes each pair cost at most ONE verify per epoch. This per-block cap only bounds a
+// single-block spike; surplus complaints verify on a later block within the window (defer-and-heal).
+// Sized to a small multiple of the default member cap (2 * DefaultDkgMaxMembers = 32) so the whole
+// n(n-1) set clears well inside the complaint window (DkgComplaintWindow, default 10).
+const maxComplaintVerifiesPerBlock = 2 * 16
 
 // consumeCaches memoizes the two committed-state decodes the cheap share classification repeats
 // across a block: the DKG round (which carries the whole member set) and the in-flight ciphertext. It

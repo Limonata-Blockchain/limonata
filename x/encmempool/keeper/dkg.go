@@ -85,6 +85,31 @@ func (k Keeper) SetComplaint(ctx context.Context, c types.DkgComplaintRec) error
 	return k.store(ctx).Set(dkgComplaintKey(c.Epoch, c.Against, c.AccuserIndex), mustJSON(c))
 }
 
+// GetComplaint reports whether a complaint from accuser against dealer is already stored
+// for the epoch. The transparent Phase-4 ingest uses it as a first-wins short-circuit so a
+// re-sent (already-accepted) complaint costs an O(1) lookup instead of a fresh O(t) DLEQ.
+func (k Keeper) GetComplaint(ctx context.Context, epoch, against, accuser uint64) bool {
+	bz, err := k.store(ctx).Get(dkgComplaintKey(epoch, against, accuser))
+	return err == nil && bz != nil
+}
+
+func dkgComplaintRejectedKey(epoch, against, accuser uint64) []byte {
+	return concat(types.DkgComplaintRejectedPrefix, u64(epoch), u64(against), u64(accuser))
+}
+
+// SetComplaintRejected records that a complaint from accuser against dealer was verified and
+// REJECTED (framing/frivolous), so a re-send is dropped before re-charging the DLEQ verify.
+func (k Keeper) SetComplaintRejected(ctx context.Context, epoch, against, accuser uint64) error {
+	return k.store(ctx).Set(dkgComplaintRejectedKey(epoch, against, accuser), []byte{1})
+}
+
+// HasComplaintRejected reports whether (accuser vs dealer) already produced a rejected
+// complaint this epoch (the negative-cache lookup, O(1), before any EC work).
+func (k Keeper) HasComplaintRejected(ctx context.Context, epoch, against, accuser uint64) bool {
+	bz, err := k.store(ctx).Get(dkgComplaintRejectedKey(epoch, against, accuser))
+	return err == nil && bz != nil
+}
+
 // purgeDealings deletes every stored dealing + complaint (the BULK point-to-point
 // state) for an epoch, leaving the small DkgRound record intact. Keys are collected
 // first (a store iterator must not be mutated mid-scan) then deleted — deterministic

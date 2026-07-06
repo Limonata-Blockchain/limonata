@@ -146,6 +146,20 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 
 		// Decryption shares for not-yet-matured ciphertexts I can serve.
 		ve.Shares = app.buildDecryptShares(ctx, ek, op)
+
+		// Justified complaints against QUAL-candidate dealers, ONLY inside the complaint window
+		// (after dealing closes, before finalize). The share-validity gate: I open each other
+		// dealer's enc-share to a point I own and, on a bad/missing share, emit a framing-resistant
+		// complaint so finalizeRound disqualifies the cheater (HIGH-2 / HIGH-3). Node-local, so it
+		// never touches the app-hash; the consume side re-verifies deterministically.
+		if cur := k.GetCurrentEpoch(ctx); cur > 0 {
+			if round, ok := k.GetDkgRound(ctx, cur); ok &&
+				round.Status == encmempooltypes.DkgStatusOpen &&
+				uint64(ctx.BlockHeight()) > round.DealDeadline &&
+				uint64(ctx.BlockHeight()) <= round.ComplaintDeadline {
+				ve.Complaints = app.buildDkgComplaints(ctx, ek, op, round)
+			}
+		}
 		// ENV-GATED, ExtendVote-ONLY adversary (throwaway audit builds only; strict no-op unless a
 		// DKG_HOLD_FILE / DKG_CHAFF9 env var is set). Mutates only THIS node's node-local vote-extension
 		// share list — no committed state, so app-hash stays identical to the honest binary.
@@ -255,6 +269,78 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 		return &sharedCache{}
 	}
 	return &sharedCache{ok: true, shares: shares}
+}
+
+// buildDkgComplaints is the share-validity DETECTOR: for each OTHER dealer, it opens the enc-share
+// the dealer sealed to a point THIS node owns and runs the Feldman VerifyShare; a bad (inconsistent
+// with the dealer's public commitments, unopenable) or MISSING share yields a framing-resistant
+// justified complaint (SharedPoint = encPriv·A_p + a DLEQ binding it to my EncPubKey and to point p).
+// This is the accountless complaint channel that populates finalizeRound's disq set so a byzantine
+// QUAL-candidate dealer is excluded (HIGH-2 / HIGH-3). It runs in ExtendVote (node-local): the list
+// changes only this node's own signed vote extension, never committed state, so the app-hash is
+// identical across nodes; IngestComplaintFromVE re-verifies every complaint deterministically before
+// it can affect QUAL. Bounded to <= one complaint per other dealer (the first owned point it mistreats).
+func (app *EVMD) buildDkgComplaints(ctx sdk.Context, ek *dkgnode.EncKey, op string, round encmempooltypes.DkgRound) []encmempooltypes.VoteExtComplaint {
+	k := app.EncMempoolKeeper
+	myIdx := encmempooltypes.MemberIndexByOperator(round.Members, op)
+	if myIdx == 0 {
+		return nil // not a member of this round
+	}
+	var myPoints []uint64
+	for _, m := range round.Members {
+		if m.Index == myIdx {
+			myPoints = m.OwnedEvalPoints()
+			break
+		}
+	}
+	if len(myPoints) == 0 {
+		return nil
+	}
+	var out []encmempooltypes.VoteExtComplaint
+	for _, m := range round.Members {
+		d := m.Index
+		if d == myIdx {
+			continue // never complain about myself
+		}
+		dealing, ok := k.GetDealing(ctx, round.Epoch, d)
+		if !ok {
+			continue // dealer has not dealt (yet): nothing to check
+		}
+		commitments, err := encmempooldkg.ParseCommitmentPoints(dealing.Commitments)
+		if err != nil {
+			continue // malformed commitments are a structural fault caught at ingest; skip here
+		}
+		for _, p := range myPoints { // one complaint per dealer: the first owned point it mistreats
+			var enc *encmempooltypes.DkgStoredEncShare
+			for i := range dealing.EncShares {
+				if dealing.EncShares[i].MemberIndex == p {
+					enc = &dealing.EncShares[i]
+					break
+				}
+			}
+			if enc == nil {
+				// no share dealt to a point I own -> disqualifying NO-DEAL complaint (no crypto).
+				out = append(out, encmempooltypes.VoteExtComplaint{Epoch: round.Epoch, Against: d, EvalPoint: p})
+				break
+			}
+			ct := &threshold.Ciphertext{A: enc.A, Nonce: enc.Nonce, Body: enc.Body}
+			s, derr := encmempooldkg.DecryptShareFrom(ek.Priv, p, ct)
+			if derr == nil && encmempooldkg.VerifyShare(commitments, p, s) {
+				continue // valid share at this point -> nothing to complain about
+			}
+			// bad / unopenable share at a point I own -> build the DLEQ-proved complaint.
+			ds, proof, perr := encmempooldkg.ProveDecryptShare(threshold.Share{Index: p, Xi: ek.Priv}, &threshold.Ciphertext{A: enc.A})
+			if perr != nil {
+				continue // cannot prove (malformed A); the no-deal/structural path covers it at ingest
+			}
+			out = append(out, encmempooltypes.VoteExtComplaint{
+				Epoch: round.Epoch, Against: d, EvalPoint: p,
+				SharedPoint: ds.D, DleqProof: encmempooldkg.MarshalDLEQProof(proof),
+			})
+			break
+		}
+	}
+	return out
 }
 
 // ---- VerifyVoteExtension: lenient structural check (heavy validation is on-chain) ----

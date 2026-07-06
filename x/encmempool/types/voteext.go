@@ -57,6 +57,31 @@ type VoteExtension struct {
 	// in-flight ciphertexts that have not yet matured (it replaces the
 	// MsgSubmitDecryptionShare tx path).
 	Shares []VoteExtShare `json:"shares,omitempty"`
+
+	// Complaints, when present, are this node's framing-resistant justified complaints
+	// that a QUAL-candidate dealer sealed a bad/missing share to an eval-point this node
+	// owns. It is the ingestion channel that finally reaches the transparent (accountless)
+	// path, so finalizeRound's disq set can be populated and a cheating dealer excluded
+	// from QUAL (HIGH-2 / HIGH-3). Bounded by committee size (<= n-1 per node).
+	Complaints []VoteExtComplaint `json:"complaints,omitempty"`
+}
+
+// VoteExtComplaint is a framing-resistant justified complaint that a dealer sealed a bad
+// (or missing) share to an eval-point the accuser OWNS. The accuser is NOT named here — its
+// identity is the operator/consensus address CometBFT tags the signed extension with
+// (Pillar 3: transparent members carry no account). On the stake-WEIGHTED transparent path
+// a member owns a contiguous block of eval-points that is NOT equal to its member index, so
+// the disputed EvalPoint is carried explicitly and checked against the accuser's owned set;
+// the enc-share and its ECIES ephemeral A are read from the committed dealing at that point,
+// and SharedPoint = encPriv·A + DleqProof let every node replay the opening + Feldman
+// VerifyShare deterministically. (SharedPoint/DleqProof are empty for a NO-DEAL complaint —
+// the dealer simply never sealed a share to the owned point, which is disqualifying on its own.)
+type VoteExtComplaint struct {
+	Epoch       uint64 `json:"epoch"`
+	Against     uint64 `json:"against"`                // accused dealer's member index
+	EvalPoint   uint64 `json:"eval_point"`             // the disputed eval-point (accuser MUST own it)
+	SharedPoint []byte `json:"shared_point,omitempty"` // S = encPriv·A_p (compressed secp256k1)
+	DleqProof   []byte `json:"dleq_proof,omitempty"`   // proves S = x·A_p ∧ encPub = x·G, x = accuser encPriv
 }
 
 // VoteExtDealing is a dealer's contribution for one epoch, carried on a vote.

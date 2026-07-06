@@ -278,7 +278,14 @@ func DecryptShareFrom(encPriv *secp256k1.ModNScalar, memberIndex uint64, ct *thr
 //     dealer MUST be disqualified.
 //   - proofValid=true, cheated=false => the dealer's share is valid; reject the
 //     (frivolous) complaint.
-func VerifyJustifiedComplaint(accuserIndex uint64, accuserEncPub []byte, dealerCommitments [][]byte, encA, encNonce, encBody, sharedPoint, dleqProof []byte) (cheated, proofValid bool) {
+//
+// evalPoint is the sharing-polynomial EVALUATION POINT the complaint disputes — NOT the
+// accuser's member index. On the stake-weighted transparent path a member owns a block of
+// eval-points that differ from its member index, and both the DLEQ challenge (which binds the
+// index, see dleqChallenge) and the Feldman VerifyShare are keyed by the eval-point at which the
+// dealer sealed the share. The caller MUST have verified that the accuser owns evalPoint and MUST
+// pass the encA/encNonce/encBody of the enc-share stored AT evalPoint.
+func VerifyJustifiedComplaint(evalPoint uint64, accuserEncPub []byte, dealerCommitments [][]byte, encA, encNonce, encBody, sharedPoint, dleqProof []byte) (cheated, proofValid bool) {
 	// DEFENSE-IN-DEPTH (HIGH-1): a structurally-malformed enc-share is a PUBLIC,
 	// incontrovertible dealer fault — the dealer's OWN on-chain bytes do not form an
 	// openable sealed share (A is not a curve point, or the AES-GCM nonce is the wrong
@@ -304,7 +311,7 @@ func VerifyJustifiedComplaint(accuserIndex uint64, accuserEncPub []byte, dealerC
 	if err != nil {
 		return false, false
 	}
-	ds := &threshold.DecryptShare{Index: accuserIndex, D: sharedPoint}
+	ds := &threshold.DecryptShare{Index: evalPoint, D: sharedPoint}
 	if !VerifyDecryptShare(encA, ds, Y, proof) {
 		return false, false // accuser did not prove S is its real ECDH secret
 	}
@@ -327,7 +334,7 @@ func VerifyJustifiedComplaint(accuserIndex uint64, accuserEncPub []byte, dealerC
 	if s.SetBytes(&sb) != 0 {
 		return true, true // non-canonical share scalar => cheated
 	}
-	if VerifyShare(commitments, accuserIndex, s) {
+	if VerifyShare(commitments, evalPoint, s) {
 		return false, true // the dealt share is valid — frivolous complaint
 	}
 	return true, true // share inconsistent with public commitments => cheated

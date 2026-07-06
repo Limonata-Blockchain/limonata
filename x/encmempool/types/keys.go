@@ -66,4 +66,11 @@ var (
 	// without an O(committee) scan. Maintained in lock-step with the forward index: written
 	// on first announce / rotation, deleted when an operator rotates its key. (HIGH-2/HIGH-4.)
 	EncKeyOwnerPrefix = []byte{0x1B} // 0x1B | 33-byte compressed pubkey -> operatorAddr
+	// DkgComplaintRejectedPrefix is the deterministic NEGATIVE-CACHE for the transparent
+	// complaint path: once a complaint from (accuser) against (dealer) has been DLEQ-verified
+	// and REJECTED (framing / frivolous), a marker is written here so a re-sent garbage
+	// complaint is dropped by an O(1) lookup BEFORE re-charging the O(t) DLEQ verify — a
+	// byzantine accuser gets at most ONE verify per targeted dealer per epoch, never a
+	// per-block re-charge that would starve honest complaints out of the per-block budget.
+	DkgComplaintRejectedPrefix = []byte{0x1C} // 0x1C | be(epoch) | be(against) | be(accuser) -> {1}
 )
