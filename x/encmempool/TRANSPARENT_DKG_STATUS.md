@@ -64,9 +64,14 @@ The verifying adversarial audit is **not** run yet (owner instruction), so these
 - **HIGH-T-skew + HIGH-U admission clause → CLOSED by FIX 1 partial (commit `a3a4a1e2`).** C2 marginal
   supply (emit only not-stored owned points, skip complete cts — the whale reaches grace-critical cts)
   + C3' per-SUBMITTER per-block admission rate-limit (key 0x1D, NOT a global slot).
-- **HIGH-U halt-class → STILL OPEN (deferred).** C1' (bound the in-state matured-short set +
-  maturity-eviction, K_max resize) and C4' (chunked + epoch-pinned `Y_1..Y_S` verify-key precompute)
-  need **live 8-node drain tuning** of K_max / rate before they can ship — shipping blind risks a strand.
+- **HIGH-U per-verify O(t) → CLOSED by FIX 1 C4' (commit `5bfa1d78`).** `Y_1..Y_S` precomputed once at
+  finalize + cached (0x1E), epoch-PINNED (dropped by DeleteActiveKey once drained, no prune race);
+  `verifyDecryptShareDLEQ` is now an O(1) cache read (fallback recompute only for a cold epoch). With
+  C2+C3'+C4', **HIGH-U block time is FLAT for the default config (S=256)**.
+- **HIGH-U at governance-max S=2048 → remaining (C1', live-drain-gated).** The K_max=128 distinct-
+  ciphertext width + the finalize precompute's one-shot cost only bite at gov-max S; C1' (bound the
+  in-state matured-short set to a small K_max + maturity-eviction, and chunk the precompute) needs
+  **live 8-node drain tuning** of K_max/rate to size without a drop-storm/strand. DORMANT, so no urgency.
 
 Suite: `-tags test ./x/encmempool/...` GREEN (keeper 95s), evmd build 0, `go vet` 0, `gofmt` clean.
 External professional audit still required before enable, regardless.
