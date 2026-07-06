@@ -23,6 +23,14 @@ import (
 // instant >= t members return — liveness is preserved, never traded away.
 const dkgBackoffCeilingBlocks uint64 = 1000
 
+// minComplaintWindowBlocks floors the complaint window so the ABCI++ 1-block build->consume lag always
+// leaves at least one height where a complaint about a last-block dealing is both buildable AND
+// ingestable: a complaint built at ExtendVote(DealDeadline+1) is consumed at PreBlock(DealDeadline+2),
+// in the SAME block as finalize's EndBlock(>=ComplaintDeadline), so ComplaintDeadline must be
+// >= DealDeadline+2, i.e. the window >= 2. Below this the complaint channel silently no-ops
+// (HIGH-2/HIGH-3 reopen). The default DkgComplaintWindow (10) provides ample operational margin.
+const minComplaintWindowBlocks uint64 = 2
+
 // EndBlockDKG drives the on-chain validator DKG. It is fully deterministic (reads
 // only committed state + the bonded validator set) so every node runs an identical
 // state machine — the same consensus-safety property BeginBlock relies on.
@@ -260,10 +268,15 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 	// "closed" and jam the round machine).
 	dealDeadline := addSat(h, max64(p.DkgDealWindow, 1))
 	round := types.DkgRound{
-		Epoch:             epoch,
-		OpenHeight:        h,
-		DealDeadline:      dealDeadline,
-		ComplaintDeadline: addSat(dealDeadline, max64(p.DkgComplaintWindow, 1)),
+		Epoch:        epoch,
+		OpenHeight:   h,
+		DealDeadline: dealDeadline,
+		// AUDIT FIX (complaint-window floor): the complaint round spans the ABCI++ 1-block lag — a
+		// complaint is BUILT in ExtendVote(X>DealDeadline) and CONSUMED at PreBlock(X+1) — so a window < 2
+		// makes NO complaint both buildable AND ingestable, silently no-opping the whole channel
+		// (HIGH-2/HIGH-3 reopen). Floor at minComplaintWindowBlocks so a governance-set DkgComplaintWindow
+		// of 1 cannot dead-round the complaint path.
+		ComplaintDeadline: addSat(dealDeadline, max64(p.DkgComplaintWindow, minComplaintWindowBlocks)),
 		Members:           members,
 		Threshold:         t,
 		MembersHash:       hash,

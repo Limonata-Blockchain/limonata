@@ -326,22 +326,21 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 	// window (after dealing closes, before finalize). This is the ingestion channel that finally
 	// reaches the ACCOUNTLESS transparent path — it populates the disq set finalizeRound reads, so
 	// a byzantine dealer that sealed a bad/missing share to a point an honest member owns is
-	// excluded from QUAL and the epoch decrypts over the healthy set (HIGH-2 / HIGH-3). Verify work
-	// is bounded by committee size and a per-block cap; a verified-and-rejected complaint is
-	// negative-cached in IngestComplaintFromVE so garbage cannot re-charge the O(t) DLEQ.
+	// excluded from QUAL and the epoch decrypts over the healthy set (HIGH-2 / HIGH-3). Verify work is
+	// bounded by committee size x a PER-ACCUSER quota (each operator gets its own budget, so a byzantine
+	// accuser cannot starve honest complaints — audit fix); the VE complaint COUNT is capped in
+	// VerifyVoteExtension; a verified-and-rejected complaint is negative-cached in IngestComplaintFromVE
+	// so garbage cannot re-charge the O(t) DLEQ.
 	if haveOpen && h > openRound.DealDeadline && h <= openRound.ComplaintDeadline {
-		complaintVerifies := 0
 		complained := 0
 		for _, e := range canon {
-			if complaintVerifies >= maxComplaintVerifiesPerBlock {
-				break
-			}
+			opVerifies := 0 // independent per-accuser verify quota (anti-starvation)
 			for i := range e.VE.Complaints {
-				if k.IngestComplaintFromVE(ctx, openRound, e.Operator, e.VE.Complaints[i], &complaintVerifies) {
-					complained++
-				}
-				if complaintVerifies >= maxComplaintVerifiesPerBlock {
+				if opVerifies >= maxComplaintVerifiesPerAccuser {
 					break
+				}
+				if k.IngestComplaintFromVE(ctx, openRound, e.Operator, e.VE.Complaints[i], &opVerifies) {
+					complained++
 				}
 			}
 		}
@@ -456,7 +455,11 @@ func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, ope
 	}
 	dealing, ok := k.GetDealing(ctx, round.Epoch, c.Against)
 	if !ok {
-		return false // no dealing to complain about (a no-deal dealer is excluded at finalize anyway)
+		// No dealing from c.Against: a non-dealing dealer is structurally excluded from QUAL anyway, so
+		// this complaint is pointless. Negative-cache it (audit fix) so a byzantine accuser cannot re-send
+		// it every block to re-force the membership / ownership / store-read work on the PreBlock path.
+		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx)
+		return false // no dealing to complain about
 	}
 	// Select the enc-share the dealer sealed AT the disputed eval-point (weighted: keyed by point).
 	var enc *types.DkgStoredEncShare
@@ -631,15 +634,18 @@ const maxVerifyCiphertextsPerBlock = maxDeferredDecryptsPerBlock
 // and that an honest member serving up to this many in-flight ciphertexts is never throttled).
 const MaxVerifyCiphertextsPerBlock = maxVerifyCiphertextsPerBlock
 
-// maxComplaintVerifiesPerBlock caps the number of framing-resistant complaint DLEQ verifications a
-// single block may perform (Phase 4). UNLIKE decryption-share verify work — which scales with the
-// UNBOUNDED in-flight ciphertext count and needs the O(cap*S) ceiling — complaint work is bounded by
-// COMMITTEE SIZE: at most n accusers x (n-1) targets distinct (accuser,against) pairs, and the
-// negative-cache makes each pair cost at most ONE verify per epoch. This per-block cap only bounds a
-// single-block spike; surplus complaints verify on a later block within the window (defer-and-heal).
-// Sized to a small multiple of the default member cap (2 * DefaultDkgMaxMembers = 32) so the whole
-// n(n-1) set clears well inside the complaint window (DkgComplaintWindow, default 10).
-const maxComplaintVerifiesPerBlock = 2 * 16
+// maxComplaintVerifiesPerAccuser caps the framing-resistant complaint DLEQ verifications ONE accuser
+// (operator) may charge per block in Phase 4. AUDIT FIX: a single GLOBAL per-block cap processed in
+// operator-address order let a byzantine accuser (grinding its address to sort first) fill the whole
+// budget with framing spam and STARVE honest accusers' complaints past ComplaintDeadline on a large
+// (governance-set) committee. A PER-ACCUSER quota gives every operator its own independent budget, so
+// a byzantine accuser can only exhaust its OWN — honest complaints always reach the DLEQ. Total block
+// verify work is then bounded by (committee size) x this quota, independent of address ordering.
+// UNLIKE decryption-share work (scales with the UNBOUNDED in-flight ciphertext count, needs the O(cap*S)
+// ceiling), complaint work is bounded by COMMITTEE SIZE and the negative-cache makes each (accuser,
+// against) pair cost at most ONE verify per epoch; a quota of 8/block over the window (default 10)
+// clears every honest accuser's real complaints (a round with > that many bad dealers fails QUAL anyway).
+const maxComplaintVerifiesPerAccuser = 8
 
 // consumeCaches memoizes the two committed-state decodes the cheap share classification repeats
 // across a block: the DKG round (which carries the whole member set) and the in-flight ciphertext. It

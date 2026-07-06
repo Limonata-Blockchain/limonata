@@ -407,6 +407,13 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 				}
 			}
 		}
+		// AUDIT FIX (COMPLAINT-COUNT CAP, mirroring the share caps): an honest node emits at most one
+		// complaint per OTHER dealer (<= committee size). VerifyVoteExtension otherwise bounds only bytes
+		// (VoteExtMaxBytes 1 MiB) — a peer could pack ~20k minimal complaints, each forcing membership /
+		// ownership / store-read work on the deterministic PreBlock complaint path. Refuse the padding early.
+		if len(ve.Complaints) > p.EffectiveMaxMembers() {
+			return reject, nil
+		}
 		// Everything else (crypto validity, membership, dedup) is enforced deterministically on-chain in
 		// ProcessProposal + PreBlock, so accept structurally-valid extensions generously — an honest
 		// node's extension always passes, preserving liveness.
