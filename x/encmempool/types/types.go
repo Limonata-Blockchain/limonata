@@ -29,6 +29,13 @@ type Params struct {
 	MaxInFlightEncTx        uint64 `json:"max_in_flight_enc_tx"`        // global ceiling on un-matured EncTx (0 = disabled)
 	MaxInFlightPerSubmitter uint64 `json:"max_in_flight_per_submitter"` // per-submitter ceiling on un-matured EncTx (0 = disabled)
 
+	// MaxVerifyOpsPerBlock is the HARD per-block budget on first-time decryption-share DLEQ verifications
+	// (CRIT-2 K_max). It caps the O(t) EC verify work a single block performs REGARDLESS of the share
+	// budget S, so consensus block time stays flat under any valid S or a sybil share flood (excess
+	// ciphertexts defer + heal over later blocks). Governance-tunable so the live validator fleet can set
+	// it to its measured per-block hardware budget. 0 => the built-in defaultMaxVerifyOps.
+	MaxVerifyOpsPerBlock uint64 `json:"max_verify_ops_per_block"`
+
 	// --- on-chain validator DKG (OPT-IN; supersedes the LEGACY trusted setup
 	// above when enabled). The active threshold key is then produced by the
 	// validators' DKG (stored per-epoch), not by params.ThresholdPub. ---
@@ -440,6 +447,11 @@ func (p Params) Validate() error {
 	if p.MaxInFlightEncTx > maxInFlightCeiling || p.MaxInFlightPerSubmitter > maxInFlightCeiling {
 		return fmt.Errorf("max_in_flight ceilings must be <= %d", maxInFlightCeiling)
 	}
+	// CRIT-2 K_max: a governance-set per-block verify budget must stay in a safe range — the floor keeps
+	// honest decryption progressing (at least one VE's shares/block), the ceiling is a sanity guard.
+	if p.MaxVerifyOpsPerBlock != 0 && (p.MaxVerifyOpsPerBlock < minMaxVerifyOps || p.MaxVerifyOpsPerBlock > maxMaxVerifyOps) {
+		return fmt.Errorf("max_verify_ops_per_block (%d) must be 0 (default) or in [%d, %d]", p.MaxVerifyOpsPerBlock, minMaxVerifyOps, maxMaxVerifyOps)
+	}
 	if p.MaxInFlightEncTx > 0 && p.MaxInFlightPerSubmitter > p.MaxInFlightEncTx {
 		return fmt.Errorf("max_in_flight_per_submitter (%d) must be <= max_in_flight_enc_tx (%d)", p.MaxInFlightPerSubmitter, p.MaxInFlightEncTx)
 	}
@@ -586,6 +598,14 @@ const (
 	// bound would exceed the VE size limit once the share cap scales with S — a node would
 	// then reject its OWN extension (liveness break).
 	maxDkgShareBudget uint32 = 1024
+
+	// defaultMaxVerifyOps is the built-in per-block first-time DLEQ-verify budget (CRIT-2 K_max) used when
+	// Params.MaxVerifyOpsPerBlock is 0. PROVISIONAL: sized to keep worst-case verify work under a block
+	// budget on target hardware — re-measure on the live fleet. min/max bound a governance value: the floor
+	// keeps at least one honest VE's worth of shares clearable per block; the ceiling is a sanity guard.
+	defaultMaxVerifyOps uint64 = 4096
+	minMaxVerifyOps     uint64 = 256
+	maxMaxVerifyOps     uint64 = 1 << 20
 )
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
@@ -675,6 +695,15 @@ func (p Params) EffectiveShareBudget() int {
 		return int(DefaultDkgShareBudget)
 	}
 	return int(p.DkgShareBudget)
+}
+
+// EffectiveMaxVerifyOps is the per-block first-time DLEQ-verify budget (CRIT-2 K_max), governance-tunable
+// via MaxVerifyOpsPerBlock, defaulting to defaultMaxVerifyOps when unset.
+func (p Params) EffectiveMaxVerifyOps() int {
+	if p.MaxVerifyOpsPerBlock == 0 {
+		return int(defaultMaxVerifyOps)
+	}
+	return int(p.MaxVerifyOpsPerBlock)
 }
 
 // EffectiveMaxMembers returns the committee cap actually applied: DkgMaxMembers, or

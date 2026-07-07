@@ -42,6 +42,14 @@ import (
 // (protobuf field 0 is invalid), so this cannot collide with a genuine tx.
 var veInjectMarker = []byte("\x00LIMO-DKG-VE\x00")
 
+// isVeInjectMarkerTx reports whether txBytes is the transparent-DKG injected ExtendedCommitInfo
+// pseudo-tx. The tx decoder uses it to reject the pseudo-tx EXPLICITLY (DKG-5) so it is never run as a
+// normal tx — instead of relying on it happening to fail protobuf decode (a future tx type could break
+// that). No genuine tx can begin with the NUL-prefixed marker, so this rejects nothing real.
+func isVeInjectMarkerTx(txBytes []byte) bool {
+	return bytes.HasPrefix(txBytes, veInjectMarker)
+}
+
 // veActive reports whether the transparent in-node DKG is switched on FOR THIS HEIGHT. It
 // requires BOTH switches: the module params (DkgEnabled && DkgTransparent) AND CometBFT
 // vote extensions active at this height (the consensus param VoteExtensionsEnableHeight).

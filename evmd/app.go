@@ -266,6 +266,20 @@ func NewExampleApp(
 	interfaceRegistry := encodingConfig.InterfaceRegistry
 	txConfig := encodingConfig.TxConfig
 	txDecoder := encodingConfig.TxConfig.TxDecoder()
+	// DKG-5 (defense-in-depth): the transparent-DKG PrepareProposal injects the ExtendedCommitInfo as a
+	// marker-prefixed pseudo-tx at index 0, which PreBlock consumes deterministically before the tx loop.
+	// Wrap the decoder to EXPLICITLY reject any marker-prefixed bytes so the pseudo-tx is never executed as
+	// a normal tx (rather than relying on it happening to fail protobuf decode). Applies to every decode
+	// path (baseapp + the STM runner). No genuine tx begins with the NUL marker, so nothing real is dropped.
+	{
+		base := txDecoder
+		txDecoder = func(txBytes []byte) (sdk.Tx, error) {
+			if isVeInjectMarkerTx(txBytes) {
+				return nil, fmt.Errorf("encmempool: injected vote-extension marker is not an executable tx")
+			}
+			return base(txBytes)
+		}
+	}
 
 	// enable optimistic execution
 	baseAppOptions = append(

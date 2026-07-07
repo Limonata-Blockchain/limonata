@@ -642,17 +642,11 @@ type opEpoch struct {
 // O(1) map lookup BEFORE any per-ciphertext verify budget is touched.
 const maxVerifyCiphertextsPerBlock = maxDeferredDecryptsPerBlock
 
-// maxVerifyOpsPerBlock is a HARD EC-op budget on first-time DLEQ verifications per block (CRIT-2 K_max).
-// maxVerifyCiphertextsPerBlock × S alone is deterministic and not ATTACKER-scalable, but it IS
-// GOVERNANCE-scalable: at the valid max S=maxDkgShareBudget=1024 that ceiling is 128×1024 = 131,072
-// verifications, multi-second inside consensus-blocking PreBlock — a practical halt. Capping the TOTAL
-// by a constant independent of S keeps block time flat under any valid S, at the cost of decrypt
-// throughput (~maxVerifyOpsPerBlock/S ciphertexts fully verified per block; the rest defer + heal over
-// later blocks, which the grace machinery already tolerates). PROVISIONAL: the exact K_max must be
-// re-measured on the live validator fleet under a sustained attacker (the audit's CRIT-2 remediation);
-// 4096 keeps the worst-case DLEQ work well under a block budget while still clearing an honest
-// oldest-first set within the grace window at the default budget.
-const maxVerifyOpsPerBlock = 4096
+// The CRIT-2 K_max — the HARD per-block first-time DLEQ-verify budget — is now the governance-tunable
+// param MaxVerifyOpsPerBlock (types.Params.EffectiveMaxVerifyOps(), default defaultMaxVerifyOps). It caps
+// the TOTAL O(t) verify work a block performs independent of the share budget S, so block time stays flat
+// under any valid S at the cost of decrypt throughput (~K_max/S ciphertexts fully verified per block; the
+// rest defer + heal). The live fleet re-measures and sets it to its hardware budget.
 
 // MaxVerifyCiphertextsPerBlock exposes the cycle-9 per-block distinct-ciphertext verify cap for
 // regression tests (they assert the block's DLEQ-verify work never exceeds this * S under a flood,
@@ -833,8 +827,8 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 	// stop at cap × S so a gap in that accounting can never exceed O(cap × S). Floored at shareCap so
 	// it is never below cycle-8's O(S).
 	globalCeiling := maxVerifyCiphertextsPerBlock * p.EffectiveShareBudget()
-	if globalCeiling > maxVerifyOpsPerBlock {
-		globalCeiling = maxVerifyOpsPerBlock // CRIT-2 K_max: bound per-block DLEQ work by a constant, not × S
+	if kmax := p.EffectiveMaxVerifyOps(); globalCeiling > kmax {
+		globalCeiling = kmax // CRIT-2 K_max: bound per-block DLEQ work by the (governance-tunable) budget, not × S
 	}
 	if globalCeiling < shareCap {
 		globalCeiling = shareCap
