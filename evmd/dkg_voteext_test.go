@@ -101,6 +101,40 @@ func TestBoundedInjectedCommit_TrimsHighStakeCartelBloat(t *testing.T) {
 	}
 }
 
+// TestBoundedInjectedCommit_NearWhaleUsesPowerGreedy: a large high-power (but < 2/3) extension is needed
+// to reach 2/3, but two tiny higher-DENSITY extensions get picked first by the density pass and leave no
+// room for it -> the density greedy fails; the POWER-desc fallback keeps the big one + one small and
+// clears 2/3. Confirms the dual-greedy handles the case a density-only trim would stall on.
+func TestBoundedInjectedCommit_NearWhaleUsesPowerGreedy(t *testing.T) {
+	ec := abci.ExtendedCommitInfo{Votes: []abci.ExtendedVoteInfo{
+		extVote(1, 50, 500_000), // 50% power, large (low density) — needed for 2/3
+		extVote(2, 25, 50_000),  // 25% power, small (high density)
+		extVote(3, 25, 50_000),  // 25% power, small (high density)
+	}}
+	// Budget fits the big one + ONE small (power-desc) but not both smalls + the big (density order).
+	blob, ok := boundedInjectedCommit(ec, 657_150)
+	if !ok {
+		t.Fatal("dual-greedy must find A+B via the power-desc fallback when density order fails")
+	}
+	var ext abci.ExtendedCommitInfo
+	if err := ext.Unmarshal(blob[len(veInjectMarker):]); err != nil {
+		t.Fatal(err)
+	}
+	var keptVP int64
+	bigKept := false
+	for _, v := range ext.Votes {
+		if v.BlockIdFlag == cmtproto.BlockIDFlagCommit && len(v.VoteExtension) > 0 {
+			keptVP += v.Validator.Power
+			if v.Validator.Power == 50 {
+				bigKept = true
+			}
+		}
+	}
+	if keptVP < (100*2)/3+1 || !bigKept {
+		t.Fatalf("power-desc fallback must keep the big 50%%-power extension and clear 2/3 (kept VP=%d, big=%v)", keptVP, bigKept)
+	}
+}
+
 // TestBoundedInjectedCommit_MajorityBloatFallsBack: a dominant (>2/3) validator's extension does not fit,
 // so no injection carrying > 2/3 power is possible -> fall back (false), never a sub-2/3 partial commit.
 func TestBoundedInjectedCommit_MajorityBloatFallsBack(t *testing.T) {

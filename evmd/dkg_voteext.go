@@ -500,8 +500,6 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 	}
 	requiredVP := (totalVP*2)/3 + 1
 
-	// Consider extending votes HIGHEST-STAKE FIRST (deterministic tie-break by address) so each kept byte
-	// buys the most voting power toward the 2/3 bar.
 	// Only a COMMIT vote carrying a valid (non-empty) extension + signature is usable; everything else
 	// becomes Absent (it could not pass ValidateVoteExtensions as a committed-but-unextended vote).
 	type cand struct {
@@ -520,31 +518,48 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 			cost: int64(len(v.VoteExtension)+len(v.ExtensionSignature)) + perVoteMarshalOverhead,
 		})
 	}
-	// Keep by VOTING-POWER-PER-BYTE (density) DESC — the fractional-knapsack heuristic for reaching the
-	// 2/3 bar with the FEWEST bytes. AUDIT FIX (knapsack stall): a greedy by STAKE kept a high-stake
-	// bloated extension FIRST, exhausting the budget so honest cheaper extensions could not reach 2/3 ->
-	// permanent no-injection stall under a < 1/3 high-stake cartel (the exact minority-bloat vector HIGH-2
-	// exists to close). Density order instead drops any low-density bloat (high OR low stake) in favor of
-	// the many cheap honest extensions, which reach 2/3 within the budget. Deterministic: integer
-	// cross-multiply (vp_l/cost_l > vp_r/cost_r) with an address tie-break, no floating point. cost >= 1.
-	sort.SliceStable(cands, func(a, b int) bool {
-		l, r := cands[a], cands[b]
-		if lv, rv := l.vp*r.cost, r.vp*l.cost; lv != rv {
+	// Greedily fill the budget in a given order, returning which votes to keep and their total power.
+	greedy := func(order []cand) ([]bool, int64) {
+		keep := make([]bool, len(votes))
+		used := int64(len(veInjectMarker))
+		var keptVP int64
+		for _, c := range order {
+			if used+c.cost > budget {
+				continue // over budget: dropped (marked Absent below)
+			}
+			used += c.cost
+			keep[c.idx] = true
+			keptVP += c.vp
+		}
+		return keep, keptVP
+	}
+	addr := func(c cand) []byte { return votes[c.idx].Validator.Address }
+	// AUDIT FIX (knapsack stall): a greedy by STAKE kept a high-stake BLOATED extension first, exhausting
+	// the budget so honest cheaper extensions could not reach 2/3 -> a permanent no-injection stall under a
+	// < 1/3 high-stake cartel (the exact minority-bloat vector HIGH-2 exists to close). This is a byte-
+	// budgeted maximize-power knapsack; no single greedy is optimal, so try TWO deterministic orderings and
+	// take the first that clears 2/3: (1) VP-per-byte DENSITY desc — drops low-density bloat (any stake) in
+	// favor of many cheap honest extensions (closes the cartel); (2) raw POWER desc — keeps a single large
+	// high-power extension a density fill could skip behind tiny high-density ones (closes the near-whale).
+	byDensity := append([]cand(nil), cands...)
+	sort.SliceStable(byDensity, func(a, b int) bool {
+		l, r := byDensity[a], byDensity[b]
+		if lv, rv := l.vp*r.cost, r.vp*l.cost; lv != rv { // l.vp/l.cost > r.vp/r.cost, integer, no floats
 			return lv > rv
 		}
-		return bytes.Compare(votes[l.idx].Validator.Address, votes[r.idx].Validator.Address) < 0
+		return bytes.Compare(addr(l), addr(r)) < 0
 	})
-
-	keep := make([]bool, len(votes))
-	used := int64(len(veInjectMarker))
-	var keptVP int64
-	for _, c := range cands {
-		if used+c.cost > budget {
-			continue // over budget: drop this extension (marked Absent below)
-		}
-		used += c.cost
-		keep[c.idx] = true
-		keptVP += c.vp
+	keep, keptVP := greedy(byDensity)
+	if keptVP < requiredVP {
+		byPower := append([]cand(nil), cands...)
+		sort.SliceStable(byPower, func(a, b int) bool {
+			l, r := byPower[a], byPower[b]
+			if l.vp != r.vp {
+				return l.vp > r.vp
+			}
+			return bytes.Compare(addr(l), addr(r)) < 0
+		})
+		keep, keptVP = greedy(byPower)
 	}
 	if keptVP < requiredVP {
 		return nil, false // cannot fit > 2/3 of the extensions in the budget: fall back to no injection
