@@ -23,6 +23,12 @@ import (
 // instant >= t members return — liveness is preserved, never traded away.
 const dkgBackoffCeilingBlocks uint64 = 1000
 
+// decryptHealthStrandThreshold is the number of CONSECUTIVE stranded decrypt maturities (with no
+// successful decrypt in between) that trips the MED-2 recovery rekey: a sustained streak this high means
+// the active key genuinely cannot decrypt (not a transient late-share blip), so the committee re-genesises
+// against the current set. Any single success resets the streak, so a healthy epoch never trips it.
+const decryptHealthStrandThreshold uint64 = 32
+
 // minComplaintWindowBlocks floors the complaint window so the ABCI++ 1-block build->consume lag always
 // leaves at least one height where a complaint about a last-block dealing is both buildable AND
 // ingestable: a complaint built at ExtendVote(DealDeadline+1) is consumed at PreBlock(DealDeadline+2),
@@ -200,8 +206,10 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		// (no storm) and deterministic (a pure function of committed state), so every node rekeys
 		// at the identical height.
 		driftBps := committeeMaxCoalitionDriftBps(lastRound.Members, active)
+		strandStreak := k.GetDecryptStrandStreak(ctx)
 		k.purgeDealings(ctx, cur)
 		k.SetLastRekeyHeight(ctx, h)
+		k.resetDecryptStrandStreak(ctx) // MED-2: fresh epoch starts with a clean decrypt-health streak
 		ctx.EventManager().EmitEvent(sdk.NewEvent(
 			"encmempool_dkg_stake_drift_rekey",
 			sdk.NewAttribute("epoch", u64str(cur)),
@@ -211,6 +219,7 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 			sdk.NewAttribute("drift_bps", u64str(driftBps)),
 			sdk.NewAttribute("cadence_blocks", u64str(p.DkgMaxEpochBlocks)),
 			sdk.NewAttribute("drift_threshold_bps", u64str(p.DkgRekeyOnStakeDriftBps)),
+			sdk.NewAttribute("strand_streak", u64str(strandStreak)), // >= threshold => decrypt-health recovery
 		))
 		k.openRound(ctx, cur+1, active, hash, h, p, 1, "stake_drift")
 
@@ -338,13 +347,24 @@ func (k Keeper) stakeDriftRekeyDue(ctx sdk.Context, round types.DkgRound, live [
 	if !p.DkgTransparent {
 		return false // stake weighting (and thus drift) only exists on the transparent path
 	}
-	if p.DkgMaxEpochBlocks == 0 && p.DkgRekeyOnStakeDriftBps == 0 {
-		return false // feature disabled: dormant behavior byte-identical
-	}
 	// Respect the flap-dampener: never rekey more than once per DkgMinRekeyGap. This bounds the
-	// rekey rate (no storm) and shares the exact guard the member-change path uses.
+	// rekey rate (no storm) and shares the exact guard the member-change path uses. Applies to EVERY
+	// trigger below.
 	last := k.GetLastRekeyHeight(ctx)
 	if p.DkgMinRekeyGap > 0 && last != 0 && h < addSat(last, p.DkgMinRekeyGap) {
+		return false
+	}
+	// (c) DECRYPT HEALTH (MED-2, always-on recovery backstop): a sustained streak of stranded decrypt
+	// maturities with NO successful decrypt in between means the active key cannot decrypt — e.g. a
+	// poison-and-hide dealer that slipped a bad share past the complaint round into QUAL (HIGH-1). Force
+	// a fresh round against the CURRENT set so the epoch re-genesises and heals instead of stranding
+	// every ciphertext forever. This is a safety backstop, so it is always considered when the DKG is
+	// live, independent of the opt-in cadence/drift params. The streak is reset when the rekey fires.
+	if k.GetDecryptStrandStreak(ctx) >= decryptHealthStrandThreshold {
+		return true
+	}
+	// (a)/(b) cadence + stake-drift triggers are opt-in (0 = disabled => dormant behavior byte-identical).
+	if p.DkgMaxEpochBlocks == 0 && p.DkgRekeyOnStakeDriftBps == 0 {
 		return false
 	}
 	// (a) EPOCH CADENCE: the frozen snapshot is at most DkgMaxEpochBlocks blocks old.

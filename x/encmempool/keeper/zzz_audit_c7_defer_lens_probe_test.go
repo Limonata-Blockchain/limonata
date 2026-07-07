@@ -123,6 +123,11 @@ func TestAudit_C7_NeverHeals_DropsStrandedAtGraceEnd_H2Safe(t *testing.T) {
 	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 0 {
 		t.Fatalf("stranded drop must delete the ct's shares too (no share leak), got %d", n)
 	}
+	// MED-2: the LOUD strand bumped the decrypt-health streak; a sustained streak (>= threshold) with no
+	// successful decrypt in between force-rekeys the committee to heal a poisoned/undecryptable epoch.
+	if streak := c.k.GetDecryptStrandStreak(c.ctx); streak != 1 {
+		t.Fatalf("MED-2: a stranded maturity must bump the decrypt-health streak to 1, got %d", streak)
+	}
 	t.Log("SAFE: insufficient-verified defer that never heals drops STRANDED at exactly grace end, via releaseEncTx (epoch ref-count 0) — no defer-forever, no leak")
 }
 

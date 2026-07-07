@@ -92,4 +92,11 @@ var (
 	// halt-class burst at finalize (HIGH-3). Absent/zero once the epoch's cache is fully warm. Pinned to
 	// the epoch (cleared with the ActiveThresholdKey).
 	ShareKeyCursorPrefix = []byte{0x1F} // 0x1F | be(epoch) -> uint64 (be): next index to precompute
+
+	// DecryptStrandStreakKey counts CONSECUTIVE stranded decrypt maturities with no successful decrypt in
+	// between. A sustained streak means the active key cannot decrypt (e.g. a poison-and-hide dealer that
+	// survived the complaint round into QUAL), so EndBlockDKG force-rekeys the committee to heal instead
+	// of stranding forever (MED-2, the recovery backstop for HIGH-1). Reset to 0 on any successful decrypt
+	// or when a rekey fires.
+	DecryptStrandStreakKey = []byte{0x20} // -> uint64 (be): consecutive strands since last success
 )

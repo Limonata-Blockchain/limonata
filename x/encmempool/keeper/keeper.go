@@ -288,6 +288,20 @@ func (k Keeper) incGlobalEncCount(ctx context.Context) {
 	_ = k.store(ctx).Set(types.GlobalEncCountKey, u64(k.GetGlobalEncCount(ctx)+1))
 }
 
+// --- decrypt-health streak (MED-2): consecutive stranded maturities since the last successful decrypt.
+// A sustained streak signals the active key cannot decrypt, triggering a recovery rekey in EndBlockDKG.
+func (k Keeper) GetDecryptStrandStreak(ctx context.Context) uint64 {
+	return k.readU64(ctx, types.DecryptStrandStreakKey)
+}
+
+func (k Keeper) bumpDecryptStrandStreak(ctx context.Context) {
+	_ = k.store(ctx).Set(types.DecryptStrandStreakKey, u64(k.GetDecryptStrandStreak(ctx)+1))
+}
+
+func (k Keeper) resetDecryptStrandStreak(ctx context.Context) {
+	_ = k.store(ctx).Delete(types.DecryptStrandStreakKey)
+}
+
 func (k Keeper) decGlobalEncCount(ctx context.Context) {
 	c := k.GetGlobalEncCount(ctx)
 	if c > 0 {
