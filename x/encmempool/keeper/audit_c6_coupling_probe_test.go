@@ -43,7 +43,13 @@ func TestC6_Coupling_GovValidationBoundary(t *testing.T) {
 		p.DkgShareBudget = budget
 		return p
 	}
-	for _, mm := range []uint32{1, 2, 3, 16, 32, 64, 128} {
+	// mm must be >= minDkgCommittee (gov sweep GOV-2); below that the committee is rejected outright.
+	for _, mm := range []uint32{1, 2, 3} {
+		if err := base(mm, uint32(types.MinShareBudgetPerMember)*mm).Validate(); err == nil {
+			t.Fatalf("sub-min committee ACCEPTED: maxMembers=%d must be rejected (< minDkgCommittee)", mm)
+		}
+	}
+	for _, mm := range []uint32{4, 8, 16, 32, 64, 128} {
 		need := uint32(types.MinShareBudgetPerMember) * mm // = 8*mm
 		// exactly at the coupling: MUST validate.
 		if err := base(mm, need).Validate(); err != nil {
@@ -61,10 +67,15 @@ func TestC6_Coupling_GovValidationBoundary(t *testing.T) {
 	if err := base(128, 256).Validate(); err == nil {
 		t.Fatal("config maxMembers=128 S=256 must be rejected (256 < 8*128=1024)")
 	}
-	// The max cap paired with the max budget (128, 2048) is accepted, and is the largest
-	// gov-passable committee: S=2048 >= 8*128.
-	if err := base(128, 2048).Validate(); err != nil {
-		t.Fatalf("maxMembers=128 S=2048 must pass: %v", err)
+	// The max cap paired with the max budget (128, 1024) is accepted, and is the largest
+	// gov-passable committee: S=1024 == 8*128 == maxDkgShareBudget (lowered from 2048 in the
+	// governance sweep so finalize/verify stay bounded).
+	if err := base(128, 1024).Validate(); err != nil {
+		t.Fatalf("maxMembers=128 S=1024 must pass: %v", err)
+	}
+	// One above the ceiling is rejected.
+	if err := base(128, 1025).Validate(); err == nil {
+		t.Fatal("S=1025 > maxDkgShareBudget=1024 must be rejected")
 	}
 }
 

@@ -252,16 +252,101 @@ func (k Keeper) getShareKeyCache(ctx context.Context, epoch, index uint64) []byt
 // S=2048 committee it is a one-time ~1-2s finalize cost that a future change should chunk across the
 // first blocks of the epoch (the verify fallback keeps it correct meanwhile). Deterministic (pure
 // function of the committed PublicCommitments), so every node caches identical bytes.
+// precomputeChunkSize bounds how many Y-cache indices are warmed per block, so the O(S*t) share-key
+// precompute is spread over ceil(S/chunk) blocks instead of one halt-class finalize burst (HIGH-3).
+// At the governance max S it caps per-block precompute EC work at chunk*O(t); the on-the-fly SharePubKey
+// fallback in verify/recover keeps every not-yet-warmed index correct meanwhile.
+const precomputeChunkSize uint64 = 128
+
+func shareKeyCursorKey(epoch uint64) []byte {
+	return concat(types.ShareKeyCursorPrefix, u64(epoch))
+}
+
+func (k Keeper) setShareKeyCursor(ctx context.Context, epoch, next uint64) {
+	_ = k.store(ctx).Set(shareKeyCursorKey(epoch), u64(next))
+}
+
+func (k Keeper) getShareKeyCursor(ctx context.Context, epoch uint64) uint64 {
+	bz, err := k.store(ctx).Get(shareKeyCursorKey(epoch))
+	if err != nil || len(bz) < 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(bz)
+}
+
+func (k Keeper) deleteShareKeyCursor(ctx context.Context, epoch uint64) {
+	_ = k.store(ctx).Delete(shareKeyCursorKey(epoch))
+}
+
+// PrecomputeShareKeys warms the FIRST chunk of the epoch's public-share-key cache at finalize and, if the
+// point budget S exceeds one chunk, records a cursor so advancePrecomputeShareKeys warms the rest one
+// bounded slice per block (HIGH-3: no O(S*t) finalize burst). The common small indices are hot
+// immediately; every not-yet-warmed index is still correct via the on-the-fly SharePubKey fallback.
 func (k Keeper) PrecomputeShareKeys(ctx context.Context, epoch uint64, publicCommitments [][]byte, budgetS int) {
 	if budgetS <= 0 {
 		return
 	}
-	keys, err := dkg.ShareKeysCompressedUpTo(publicCommitments, uint64(budgetS))
+	S := uint64(budgetS)
+	end := S
+	if end > precomputeChunkSize {
+		end = precomputeChunkSize
+	}
+	k.warmShareKeyRange(ctx, epoch, publicCommitments, 1, end)
+	if S > end {
+		k.setShareKeyCursor(ctx, epoch, end+1)
+	}
+}
+
+// warmShareKeyRange computes + caches the compressed Y_from..Y_to for an epoch. Bounded EC work when the
+// range is a chunk. A parse error leaves those indices cold (verify/recover recompute on the fly).
+func (k Keeper) warmShareKeyRange(ctx context.Context, epoch uint64, publicCommitments [][]byte, from, to uint64) {
+	keys, err := dkg.ShareKeysCompressedRange(publicCommitments, from, to)
 	if err != nil {
-		return // malformed commitments: verify falls back to on-the-fly recompute
+		return
 	}
 	for i, yb := range keys {
-		k.setShareKeyCache(ctx, epoch, uint64(i+1), yb)
+		k.setShareKeyCache(ctx, epoch, from+uint64(i), yb)
+	}
+}
+
+// advancePrecomputeShareKeys warms the next chunk of the ACTIVE epoch's Y-cache, one bounded slice per
+// block, until [1, S] is fully cached (then it clears the cursor). Fully deterministic: it reads only
+// committed state (active epoch, its cursor, its stored round + active key) and computes SharePubKey, so
+// every node warms the exact same indices at the exact same heights. Called once per block from
+// EndBlockDKG; a no-op when there is no pending precompute.
+func (k Keeper) advancePrecomputeShareKeys(ctx context.Context) {
+	epoch := k.GetActiveEpoch(ctx)
+	if epoch == 0 {
+		return
+	}
+	cursor := k.getShareKeyCursor(ctx, epoch)
+	if cursor == 0 {
+		return // nothing pending: never started (S <= chunk) or already fully warm
+	}
+	ak, ok := k.GetActiveKey(ctx, epoch)
+	if !ok {
+		k.deleteShareKeyCursor(ctx, epoch)
+		return
+	}
+	round, ok := k.GetDkgRound(ctx, epoch)
+	if !ok {
+		k.deleteShareKeyCursor(ctx, epoch)
+		return
+	}
+	S := uint64(types.TotalEvalPoints(round.Members))
+	if cursor > S {
+		k.deleteShareKeyCursor(ctx, epoch)
+		return
+	}
+	end := cursor + precomputeChunkSize - 1
+	if end > S {
+		end = S
+	}
+	k.warmShareKeyRange(ctx, epoch, ak.PublicCommitments, cursor, end)
+	if end >= S {
+		k.deleteShareKeyCursor(ctx, epoch) // fully warm
+	} else {
+		k.setShareKeyCursor(ctx, epoch, end+1)
 	}
 }
 
@@ -281,6 +366,7 @@ func (k Keeper) deleteShareKeyCache(ctx context.Context, epoch uint64) {
 	for _, key := range keys {
 		_ = k.store(ctx).Delete(key)
 	}
+	k.deleteShareKeyCursor(ctx, epoch) // drop any pending precompute cursor with the cache
 }
 
 // ---- epoch in-flight ciphertext ref-count (pins an epoch's records until drained) ----

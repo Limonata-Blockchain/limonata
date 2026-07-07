@@ -223,6 +223,17 @@ type VerifiedShare struct {
 // corrupting the shared secret and failing the AES-GCM open with no culprit — which
 // is exactly the anti-MEV DoS the raw path leaves open.
 func RecoverVerified(commitments []secp256k1.JacobianPoint, ctA []byte, t int, partials []VerifiedShare) (*secp256k1.JacobianPoint, error) {
+	return RecoverVerifiedWithKeys(commitments, ctA, t, partials, nil)
+}
+
+// RecoverVerifiedWithKeys is RecoverVerified with an optional precomputed public-share-key lookup.
+// CRIT-3 AUDIT FIX (O(t^2) decrypt halt): the plain path recomputes SharePubKey — an O(t) Horner over
+// the public commitments — for EVERY partial, so one decrypt is O(t^2); at governance-max threshold that
+// scaled BeginBlock time to a practical halt. When cachedKey(index) returns the compressed Y for that
+// keyper (the epoch Y-cache populated at/after finalize), we parse it (O(1)) instead of recomputing —
+// turning the recover into O(t). A cache miss or parse error transparently falls back to SharePubKey, so
+// the RESULT is identical whether or not the cache is warm: correctness never depends on the cache.
+func RecoverVerifiedWithKeys(commitments []secp256k1.JacobianPoint, ctA []byte, t int, partials []VerifiedShare, cachedKey func(index uint64) []byte) (*secp256k1.JacobianPoint, error) {
 	if t < 1 {
 		return nil, fmt.Errorf("invalid threshold %d", t)
 	}
@@ -251,7 +262,17 @@ func RecoverVerified(commitments []secp256k1.JacobianPoint, ctA []byte, t int, p
 		if seen[vs.Share.Index] { // reject duplicate indices (a Lagrange-poisoning vector)
 			continue
 		}
-		Y := SharePubKey(commitments, vs.Share.Index)
+		var Y *secp256k1.JacobianPoint
+		if cachedKey != nil {
+			if yb := cachedKey(vs.Share.Index); yb != nil {
+				if p, perr := parsePoint(yb); perr == nil {
+					Y = p // cache hit: O(1) parse instead of an O(t) SharePubKey recompute
+				}
+			}
+		}
+		if Y == nil {
+			Y = SharePubKey(commitments, vs.Share.Index) // cold cache / parse error: recompute
+		}
 		if !VerifyDecryptShare(ctA, vs.Share, Y, vs.Proof) {
 			continue // provably-bad partial: drop it, do not abort the honest majority
 		}

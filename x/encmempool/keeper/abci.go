@@ -537,7 +537,14 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 				Share: &threshold.DecryptShare{Index: s.Index, D: s.D}, Proof: proof,
 			})
 		}
-		shared, err = dkg.RecoverVerified(commitments, e.A, need, partials)
+		// CRIT-3 AUDIT FIX: resolve each partial's public share key Y from the epoch Y-cache
+		// (getShareKeyCache, populated at/after finalize for THIS epoch's commitments) instead of an
+		// O(t) SharePubKey recompute per partial, so the on-chain combine is O(t), not O(t^2). ak is the
+		// e.Epoch key (GetActiveKey above), so the cache and ak.PublicCommitments agree; a cache miss
+		// falls back to SharePubKey inside RecoverVerifiedWithKeys, keeping the result identical.
+		shared, err = dkg.RecoverVerifiedWithKeys(commitments, e.A, need, partials, func(index uint64) []byte {
+			return k.getShareKeyCache(ctx, e.Epoch, index)
+		})
 		if errors.Is(err, dkg.ErrInsufficientVerified) {
 			// CYCLE-7 (belt-and-suspenders, fix #3): fewer than `need` partials survived DLEQ
 			// verification — the SAME healable condition as a raw share shortfall, not a

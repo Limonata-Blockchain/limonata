@@ -162,12 +162,13 @@ func TestReg_HA_ValidateRejectsBudgetBelowCommitteeCap(t *testing.T) {
 		name               string
 		budget, maxMembers uint32
 	}{
-		{"S6_cap16_auditor_repro", 6, 0},     // the reproduced hole: t reachable by 31.2% stake
-		{"S24_cap128", 24, 128},              // 13.28%-stake minority reached t=17 pre-fix
-		{"S256_cap128", 256, 128},            // even the default budget cannot secure the max cap
-		{"S127_cap16_boundary", 127, 0},      // one below the 8*16 coupling
-		{"S4096_over_ve_bound", 4096, 128},   // M-2: budget above the VE-size-derived ceiling
-		{"S2049_over_ve_bound_min", 2049, 0}, // M-2 boundary
+		{"S6_cap16_auditor_repro", 6, 0},    // the reproduced hole: t reachable by 31.2% stake
+		{"S24_cap128", 24, 128},             // 13.28%-stake minority reached t=17 pre-fix
+		{"S256_cap128", 256, 128},           // even the default budget cannot secure the max cap
+		{"S127_cap16_boundary", 127, 0},     // one below the 8*16 coupling
+		{"S4096_over_ve_bound", 4096, 128},  // M-2: budget above the VE-size-derived ceiling
+		{"S2048_over_ceiling", 2048, 128},   // gov sweep: now above the lowered maxDkgShareBudget=1024
+		{"S1025_over_ceiling_min", 1025, 0}, // one above the lowered ceiling
 	}
 	for _, c := range bad {
 		p := base()
@@ -184,8 +185,7 @@ func TestReg_HA_ValidateRejectsBudgetBelowCommitteeCap(t *testing.T) {
 	}{
 		{"defaults", 0, 0},              // 256 >= 8*16
 		{"S128_cap16_boundary", 128, 0}, // exactly 8*16
-		{"S1024_cap128", 1024, 128},     // exactly 8*128 — the full committee range stays usable
-		{"S2048_cap128_max", 2048, 128}, // the M-2 budget ceiling itself is valid
+		{"S1024_cap128", 1024, 128},     // exactly 8*128 == maxDkgShareBudget — the full committee range stays usable
 	}
 	for _, c := range good {
 		p := base()

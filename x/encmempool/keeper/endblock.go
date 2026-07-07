@@ -97,6 +97,11 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		return
 	}
 
+	// HIGH-3: warm the next chunk of the active epoch's public-share-key cache (a bounded slice per
+	// block) so finalize never does the whole O(S*t) precompute in one EndBlock. Runs every block
+	// regardless of round state; a no-op once the cache is fully warm.
+	k.advancePrecomputeShareKeys(ctx)
+
 	cur := k.GetCurrentEpoch(ctx)
 	var lastRound types.DkgRound
 	haveLast := false

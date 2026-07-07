@@ -86,4 +86,10 @@ var (
 	// per-verify cost. Pinned to the epoch: deleted together with the ActiveThresholdKey when the epoch
 	// is superseded + drained (so it always outlives every in-flight ciphertext of the epoch).
 	ActiveShareKeyPrefix = []byte{0x1E} // 0x1E | be(epoch) | be(index) -> 33-byte compressed Y_index
+
+	// ShareKeyCursorPrefix tracks the next uncomputed Y-cache index for an epoch, so the O(S*t) share-key
+	// precompute is CHUNKED over the first blocks of the epoch (a fixed slice per block) instead of one
+	// halt-class burst at finalize (HIGH-3). Absent/zero once the epoch's cache is fully warm. Pinned to
+	// the epoch (cleared with the ActiveThresholdKey).
+	ShareKeyCursorPrefix = []byte{0x1F} // 0x1F | be(epoch) -> uint64 (be): next index to precompute
 )

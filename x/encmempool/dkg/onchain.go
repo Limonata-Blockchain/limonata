@@ -205,6 +205,28 @@ func ShareKeysCompressedUpTo(publicCommitments [][]byte, upTo uint64) ([][]byte,
 	return out, nil
 }
 
+// ShareKeysCompressedRange is ShareKeysCompressedUpTo for a bounded index window [from, to] (inclusive,
+// 1-based). It lets the caller build the Y-cache INCREMENTALLY — a fixed-size chunk per block over the
+// first blocks of an epoch — instead of one O(S*t) burst at finalize (HIGH-3 finalize-halt). The i-th
+// returned entry is Y_(from+i). Returns an empty slice when the window is empty (from > to).
+func ShareKeysCompressedRange(publicCommitments [][]byte, from, to uint64) ([][]byte, error) {
+	comm, err := ParseCommitmentPoints(publicCommitments)
+	if err != nil {
+		return nil, err
+	}
+	if from < 1 {
+		from = 1
+	}
+	if to < from {
+		return [][]byte{}, nil
+	}
+	out := make([][]byte, 0, to-from+1)
+	for idx := from; idx <= to; idx++ {
+		out = append(out, compressCopy(SharePubKey(comm, idx)))
+	}
+	return out, nil
+}
+
 // Deal generates dealer `index`'s Feldman dealing for the given member set: the
 // compressed public commitments and the SECRET point-to-point share f_index(m) for
 // each member m. The daemon then ECIES-encrypts each share to the matching member

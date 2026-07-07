@@ -432,8 +432,8 @@ func (p Params) Validate() error {
 	// with the global in-flight ceiling, which bounds the COUNT of pinned epochs) keeps the
 	// key-retention window finite. This is a sanity bound and applies regardless of which
 	// decrypt path is active.
-	if p.DecryptDelay > maxDkgWindowBlocks {
-		return fmt.Errorf("decrypt_delay (%d) must be <= %d (it drives the key-retention window)", p.DecryptDelay, maxDkgWindowBlocks)
+	if p.DecryptDelay > maxDkgPhaseWindow {
+		return fmt.Errorf("decrypt_delay (%d) must be <= %d (it drives the key-retention window)", p.DecryptDelay, maxDkgPhaseWindow)
 	}
 	// Admission ceilings: a per-submitter ceiling above the global one is meaningless (the
 	// global one binds first), so reject that misconfig; also cap both far below overflow.
@@ -525,6 +525,12 @@ func (p Params) Validate() error {
 const (
 	minDkgWindowBlocks uint64 = 1
 	maxDkgWindowBlocks uint64 = 10_000_000
+	// maxDkgPhaseWindow is the OPERATIONAL upper bound (well below the 10M overflow guard) on the
+	// per-round phase windows and the decrypt delay. AUDIT FIX (GOV-1/GOV-5): a governance value near
+	// maxDkgWindowBlocks would open a round EndBlockDKG can never close (a years-away deadline) or pin
+	// an epoch's key/state for effectively ever. ~100k blocks (a couple of days at ~2s) is generous for
+	// any real phase yet always terminates.
+	maxDkgPhaseWindow uint64 = 100_000
 	// maxInFlightCeiling bounds the admission ceilings so a governance-set value cannot
 	// approach a uint64 overflow in the keeper's ref-count arithmetic.
 	maxInFlightCeiling uint64 = 1 << 40
@@ -541,6 +547,10 @@ const (
 const (
 	DefaultDkgMaxMembers uint32 = 16
 	maxDkgCommittee      uint32 = 128
+	// minDkgCommittee is the smallest committee a governance-set DkgMaxMembers may specify (AUDIT FIX
+	// GOV-2/LOW-5): below this, threshold encryption collapses toward single/dual-party decryption and
+	// provides no meaningful confidentiality. 0 still means "use DefaultDkgMaxMembers".
+	minDkgCommittee uint32 = 4
 	// DefaultDkgShareBudget is the fixed stake-apportionment budget S used when
 	// DkgShareBudget==0. 256 gives ~0.4%/point stake resolution and satisfies the enforced
 	// coupling S >= MinShareBudgetPerMember * committee cap for the default cap (8*16=128),
@@ -560,7 +570,7 @@ const (
 	//   (LIVENESS) f >  2/3 stake  =>  points >  2S/3 - n, i.e. >= t, holds for ALL S,n.
 	// k=8 therefore guarantees safety with a margin of ~2n/3 points (>= (2n+1)/3) over the
 	// bare S >= 6n-1 requirement while keeping the max committee (128) configurable within
-	// maxDkgShareBudget (8*128 = 1024 <= 2048), and gives every seat >= 8 points of stake
+	// maxDkgShareBudget (8*128 = 1024 == the ceiling), and gives every seat >= 8 points of stake
 	// resolution so apportionment can never degenerate to operator-address order.
 	MinShareBudgetPerMember = 8
 
@@ -570,26 +580,30 @@ const (
 	// may own up to all S points of one ciphertext, so the cap must scale UP with S or a
 	// high-stake member could never ship a complete share set — see VoteExtShareCap), which
 	// means S itself must be bounded DOWN so the worst-case extension still fits
-	// VoteExtMaxBytes (1 MiB). Worst case at S=2048: a dealing of S sealed shares
+	// VoteExtMaxBytes (1 MiB). Worst case at S=1024: a dealing of S sealed shares
 	// (~160 B JSON each ≈ 320 KiB) + t ≈ 2S/3 commitments (~47 B each ≈ 64 KiB) + S
 	// decryption shares (~240 B JSON each ≈ 480 KiB) ≈ 870 KiB < 1 MiB. The previous 4096
 	// bound would exceed the VE size limit once the share cap scales with S — a node would
 	// then reject its OWN extension (liveness break).
-	maxDkgShareBudget uint32 = 2048
+	maxDkgShareBudget uint32 = 1024
 )
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
 func (p Params) ValidateDkgWindows() error {
+	// Per-round PHASE windows: bound by the tighter OPERATIONAL cap (AUDIT FIX GOV-1) so a round always
+	// closes. retry_backoff is a cadence, not a phase deadline (and is separately ceilinged in
+	// EndBlockDKG), so it keeps the looser bound.
 	for _, f := range []struct {
 		name string
 		v    uint64
+		max  uint64
 	}{
-		{"dkg_deal_window", p.DkgDealWindow},
-		{"dkg_complaint_window", p.DkgComplaintWindow},
-		{"dkg_retry_backoff", p.DkgRetryBackoff},
+		{"dkg_deal_window", p.DkgDealWindow, maxDkgPhaseWindow},
+		{"dkg_complaint_window", p.DkgComplaintWindow, maxDkgPhaseWindow},
+		{"dkg_retry_backoff", p.DkgRetryBackoff, maxDkgWindowBlocks},
 	} {
-		if f.v < minDkgWindowBlocks || f.v > maxDkgWindowBlocks {
-			return fmt.Errorf("%s (%d) must be in [%d, %d]", f.name, f.v, minDkgWindowBlocks, maxDkgWindowBlocks)
+		if f.v < minDkgWindowBlocks || f.v > f.max {
+			return fmt.Errorf("%s (%d) must be in [%d, %d]", f.name, f.v, minDkgWindowBlocks, f.max)
 		}
 	}
 	// DkgMinRekeyGap may be 0 (disabled) but not absurdly large.
@@ -605,6 +619,11 @@ func (p Params) ValidateDkgWindows() error {
 	// the absolute committee ceiling (bounds VE / injected-block-data size).
 	if p.DkgMaxMembers > maxDkgCommittee {
 		return fmt.Errorf("dkg_max_members (%d) must be <= %d", p.DkgMaxMembers, maxDkgCommittee)
+	}
+	// AUDIT FIX (GOV-2/LOW-5): a positive but tiny committee collapses threshold encryption to
+	// single/dual-party decryption. 0 keeps meaning "use the default cap".
+	if p.DkgMaxMembers != 0 && p.DkgMaxMembers < minDkgCommittee {
+		return fmt.Errorf("dkg_max_members (%d) must be 0 (default) or >= %d", p.DkgMaxMembers, minDkgCommittee)
 	}
 	// DkgShareBudget=0 means "use DefaultDkgShareBudget"; a positive value must not exceed the
 	// absolute budget ceiling (bounds per-dealing / vote-extension size; and, since the per-VE
@@ -676,7 +695,7 @@ const voteExtShareFloor = 256
 // to S shares; a fixed cap below S would mean a high-stake member can NEVER ship a complete
 // share set for a ciphertext, silently collapsing decryption liveness exactly for the
 // members that carry the most reconstruction weight. Bloat in the other direction is
-// bounded by validation: S <= maxDkgShareBudget (2048) keeps the worst-case extension
+// bounded by validation: S <= maxDkgShareBudget (1024) keeps the worst-case extension
 // (dealing + S shares) under VoteExtMaxBytes — see the maxDkgShareBudget comment for the
 // wire-size arithmetic.
 func (p Params) VoteExtShareCap() int {
