@@ -198,6 +198,12 @@ func TestOnChainDKG_RetryPurgesStaleDeals(t *testing.T) {
 	if _, ok := k.GetDealing(ctx, 1, dealer.index); !ok {
 		t.Fatal("expected the single dealing to be stored")
 	}
+	// DKG-SM-5-GC: seed a rejected-complaint negative-cache entry for epoch 1; it must be reclaimed by
+	// the same purge that GCs the dealings (else 0x1C accumulates permanently across every rekey).
+	_ = k.SetComplaintRejected(ctx, 1, 2, dealer.index, 7)
+	if !k.HasComplaintRejected(ctx, 1, 2, dealer.index, 7) {
+		t.Fatal("precondition: rejected-complaint entry should be set")
+	}
 
 	// h5: finalize fails (1 < 3). h6 (backoff 1 elapsed): auto-reopen epoch 2.
 	k.EndBlockDKG(ctx.WithBlockHeight(5).WithEventManager(sdk.NewEventManager()))
@@ -215,6 +221,10 @@ func TestOnChainDKG_RetryPurgesStaleDeals(t *testing.T) {
 	// HIGH-2: the failed round's DkgRound RECORD must also be GC'd on retry.
 	if _, ok := k.GetDkgRound(ctx, 1); ok {
 		t.Fatal("failed round's DkgRound record was not GC'd on retry (HIGH-2)")
+	}
+	// DKG-SM-5-GC: the rejected-complaint negative cache for the failed epoch must be reclaimed too.
+	if k.HasComplaintRejected(ctx, 1, 2, dealer.index, 7) {
+		t.Fatal("failed round's rejected-complaint negative cache was not GC'd on retry (DKG-SM-5-GC)")
 	}
 }
 

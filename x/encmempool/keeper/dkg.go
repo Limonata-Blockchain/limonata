@@ -127,6 +127,10 @@ func (k Keeper) purgeDealings(ctx context.Context, epoch uint64) {
 	for _, pfx := range [][]byte{
 		concat(types.DkgDealPrefix, u64(epoch)),
 		concat(types.DkgComplaintPrefix, u64(epoch)),
+		// AUDIT FIX (DKG-SM-5-GC): the rejected-complaint negative cache had NO deleter and accumulated
+		// permanently across every rekey; reclaim it with the epoch's dealings/complaints so per-epoch
+		// state stays bounded (the eval-point key made the per-epoch cardinality O(n*S), worth GC'ing).
+		concat(types.DkgComplaintRejectedPrefix, u64(epoch)),
 	} {
 		it, err := st.Iterator(pfx, prefixEnd(pfx))
 		if err != nil {
