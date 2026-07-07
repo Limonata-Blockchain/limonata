@@ -9,11 +9,21 @@ import (
 	"testing"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 
 	"github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
+
+// validCtA returns a valid compressed secp256k1 point for the ciphertext ephemeral A. The admission
+// tests submit dummy ciphertexts and only exercise the rate/ceiling gates, but SubmitEncrypted now
+// validates A (audit #1: reject invalid-A ciphertexts at ingress so they cannot strand + farm rekeys).
+func validCtA() []byte {
+	s := make([]byte, 32)
+	s[31] = 7 // scalar 7 -> a valid public key 7*G
+	return secp256k1.PrivKeyFromBytes(s).PubKey().SerializeCompressed()
+}
 
 // TestSubmitEncrypted_AdmissionCeilings locks in the INGRESS admission control that closes the
 // unbounded-state HIGH: SubmitEncrypted REJECTS a ciphertext once the per-submitter OR the
@@ -30,7 +40,7 @@ func TestSubmitEncrypted_AdmissionCeilings(t *testing.T) {
 	if err := k.SetParams(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	a := make([]byte, 33)
+	a := validCtA()
 	nonce := make([]byte, threshold.NonceSize)
 	body := []byte("x")
 	// Spread submits across successive block heights so the STANDING-inventory ceilings under test
@@ -92,7 +102,7 @@ func TestSubmitEncrypted_PerBlockRate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	a := make([]byte, 33)
+	a := validCtA()
 	nonce := make([]byte, threshold.NonceSize)
 	body := []byte("x")
 	submitAt := func(sub string, h int64) error {
@@ -140,7 +150,7 @@ func TestCeilingDropReleasesEpochRefcount_HIGH2Safe(t *testing.T) {
 	k.SetActiveEpoch(ctx, 2)
 	k.SetCurrentEpoch(ctx, 2)
 
-	a := make([]byte, 33)
+	a := validCtA()
 	nonce := make([]byte, threshold.NonceSize)
 	body := []byte("x")
 	for i := 0; i < n; i++ {
@@ -202,7 +212,7 @@ func TestCollectMaturedUpTo_BoundedWindow(t *testing.T) {
 	if err := k.SetParams(ctx, types.Params{RevealDelay: 1, MaxRevealWindow: 1_000_000, EncEnabled: true, Threshold: 1, DecryptDelay: 2}); err != nil {
 		t.Fatal(err)
 	}
-	a := make([]byte, 33)
+	a := validCtA()
 	nonce := make([]byte, threshold.NonceSize)
 	for i := 0; i < 100; i++ {
 		k.SubmitEncTx(ctx, "user", 10, 2, a, nonce, []byte("x"), 0) // all mature at height 12

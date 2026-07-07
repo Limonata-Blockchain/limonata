@@ -162,6 +162,15 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if len(msg.A) == 0 || len(msg.Body) == 0 {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing ciphertext (a/body)")
 	}
+	// A is the ciphertext's ephemeral EC point; it MUST be a valid compressed secp256k1 point, or no keyper
+	// can ever produce a decryption share for it (ProveShareFor / threshold.ProveShareFor parses A), so the
+	// ciphertext would gather zero shares and STRAND at grace. AUDIT FIX: without this, a permissionless
+	// flooder could submit invalid-A ciphertexts that deterministically strand and — via the decrypt-health
+	// streak (MED-2) — FARM forced rekeys (round churn). Reject a malformed A at ingress so it never enters
+	// state. (The decrypt-share path already validates its own A at msg_server.go via ValidCompressedPoint.)
+	if !dkg.ValidCompressedPoint(msg.A) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext ephemeral point A is not a valid compressed secp256k1 point")
+	}
 	// Reject malformed ciphertexts at ingress. The nonce is attacker-controlled and,
 	// if it reached the BeginBlock decrypt path with a wrong length, AES-GCM would
 	// PANIC (halting consensus). Enforce the exact GCM nonce length here so bad

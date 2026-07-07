@@ -830,6 +830,10 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 	if kmax := p.EffectiveMaxVerifyOps(); globalCeiling > kmax {
 		globalCeiling = kmax // CRIT-2 K_max: bound per-block DLEQ work by the (governance-tunable) budget, not × S
 	}
+	// LIVENESS FLOOR (audit #5): never below one honest VE's worth of shares (shareCap == max(256, S)), so a
+	// single honest extension always clears in a block. This means the EFFECTIVE ceiling is
+	// max(MaxVerifyOpsPerBlock, shareCap) — a governance K_max set BELOW shareCap is intentionally overridden
+	// to preserve liveness (documented on the param), NOT silently ignored; it is a floor, not a cap bypass.
 	if globalCeiling < shareCap {
 		globalCeiling = shareCap
 	}
@@ -900,10 +904,23 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 			if spent[oc] >= b {
 				continue // (3) per-(operator,ciphertext) cap: excess dropped BEFORE the O(t) DLEQ verify
 			}
+			// AUDIT #3: the global ceiling is an EC-OP budget, not a share COUNT. A WARM share key is an
+			// O(1) verify, but a COLD one (an index not yet precomputed — the first ~S/chunk blocks after a
+			// finalize/rekey) falls back to the O(t) SharePubKey Horner. Charge a cold verify ~t (bounded by
+			// EffectiveShareBudget) so a rekey-warmup window can never blow up per-block CPU while the count
+			// reads "1 op/share"; a cold verify that would exceed the budget defers to a later (warmer) block.
+			cost := 1
+			if len(k.getShareKeyCache(ctx, epoch, s.Index)) == 0 {
+				cost = p.EffectiveShareBudget()
+			}
+			if globalSpent+cost > globalCeiling {
+				deferred = true
+				break // (4) EC-op budget reached (counting the cold O(t) cost) — defer the rest
+			}
 			// ---- bounded: charge the budgets, then perform the one DLEQ verification + store ----
 			seen[slot] = true
 			spent[oc]++
-			globalSpent++
+			globalSpent += cost
 			if k.verifyAndStoreDecryptShare(ctx, epoch, ctA, e.Operator, s) {
 				shared++
 			}

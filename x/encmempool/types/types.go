@@ -599,13 +599,17 @@ const (
 	// then reject its OWN extension (liveness break).
 	maxDkgShareBudget uint32 = 1024
 
-	// defaultMaxVerifyOps is the built-in per-block first-time DLEQ-verify budget (CRIT-2 K_max) used when
+	// defaultMaxVerifyOps is the built-in per-block DLEQ-verify EC-OP budget (CRIT-2 K_max) used when
 	// Params.MaxVerifyOpsPerBlock is 0. PROVISIONAL: sized to keep worst-case verify work under a block
-	// budget on target hardware — re-measure on the live fleet. min/max bound a governance value: the floor
-	// keeps at least one honest VE's worth of shares clearable per block; the ceiling is a sanity guard.
+	// budget on target hardware — re-measure on the live fleet. NOTE (audit #5): the keeper FLOORS the
+	// effective ceiling at one honest VE's worth of shares (max(256, S)) so a single honest extension always
+	// clears in a block (liveness), so a governance value BELOW that floor has no effect — the effective
+	// budget is max(MaxVerifyOpsPerBlock, shareCap). maxMaxVerifyOps caps the ceiling so a governance value
+	// cannot arm a per-block CPU DoS (the old 1<<20 was ~minutes/block of DLEQ); 16384 is a slow-but-bounded
+	// block on target hardware, tunable UP only if the fleet measures headroom.
 	defaultMaxVerifyOps uint64 = 4096
 	minMaxVerifyOps     uint64 = 256
-	maxMaxVerifyOps     uint64 = 1 << 20
+	maxMaxVerifyOps     uint64 = 16384
 )
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
