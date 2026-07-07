@@ -502,38 +502,52 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 
 	// Consider extending votes HIGHEST-STAKE FIRST (deterministic tie-break by address) so each kept byte
 	// buys the most voting power toward the 2/3 bar.
-	order := make([]int, len(votes))
-	for i := range order {
-		order[i] = i
+	// Only a COMMIT vote carrying a valid (non-empty) extension + signature is usable; everything else
+	// becomes Absent (it could not pass ValidateVoteExtensions as a committed-but-unextended vote).
+	type cand struct {
+		idx      int
+		vp, cost int64
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		va, vb := votes[order[a]], votes[order[b]]
-		if va.Validator.Power != vb.Validator.Power {
-			return va.Validator.Power > vb.Validator.Power
+	cands := make([]cand, 0, len(votes))
+	for i := range votes {
+		v := votes[i]
+		if v.BlockIdFlag != cmtproto.BlockIDFlagCommit || len(v.VoteExtension) == 0 || len(v.ExtensionSignature) == 0 {
+			continue
 		}
-		return bytes.Compare(va.Validator.Address, vb.Validator.Address) < 0
+		cands = append(cands, cand{
+			idx:  i,
+			vp:   v.Validator.Power,
+			cost: int64(len(v.VoteExtension)+len(v.ExtensionSignature)) + perVoteMarshalOverhead,
+		})
+	}
+	// Keep by VOTING-POWER-PER-BYTE (density) DESC — the fractional-knapsack heuristic for reaching the
+	// 2/3 bar with the FEWEST bytes. AUDIT FIX (knapsack stall): a greedy by STAKE kept a high-stake
+	// bloated extension FIRST, exhausting the budget so honest cheaper extensions could not reach 2/3 ->
+	// permanent no-injection stall under a < 1/3 high-stake cartel (the exact minority-bloat vector HIGH-2
+	// exists to close). Density order instead drops any low-density bloat (high OR low stake) in favor of
+	// the many cheap honest extensions, which reach 2/3 within the budget. Deterministic: integer
+	// cross-multiply (vp_l/cost_l > vp_r/cost_r) with an address tie-break, no floating point. cost >= 1.
+	sort.SliceStable(cands, func(a, b int) bool {
+		l, r := cands[a], cands[b]
+		if lv, rv := l.vp*r.cost, r.vp*l.cost; lv != rv {
+			return lv > rv
+		}
+		return bytes.Compare(votes[l.idx].Validator.Address, votes[r.idx].Validator.Address) < 0
 	})
 
 	keep := make([]bool, len(votes))
 	used := int64(len(veInjectMarker))
 	var keptVP int64
-	for _, idx := range order {
-		v := votes[idx]
-		// Only a COMMIT vote carrying a valid (non-empty) extension + signature is usable; everything else
-		// becomes Absent (it could not pass ValidateVoteExtensions as a committed-but-unextended vote).
-		if v.BlockIdFlag != cmtproto.BlockIDFlagCommit || len(v.VoteExtension) == 0 || len(v.ExtensionSignature) == 0 {
-			continue
-		}
-		cost := int64(len(v.VoteExtension)+len(v.ExtensionSignature)) + perVoteMarshalOverhead
-		if used+cost > budget {
+	for _, c := range cands {
+		if used+c.cost > budget {
 			continue // over budget: drop this extension (marked Absent below)
 		}
-		used += cost
-		keep[idx] = true
-		keptVP += v.Validator.Power
+		used += c.cost
+		keep[c.idx] = true
+		keptVP += c.vp
 	}
 	if keptVP < requiredVP {
-		return nil, false // cannot fit > 2/3 of the extensions: fall back to no injection
+		return nil, false // cannot fit > 2/3 of the extensions in the budget: fall back to no injection
 	}
 
 	trimmed := ec

@@ -70,6 +70,37 @@ func TestBoundedInjectedCommit_TrimsMinorityBloat(t *testing.T) {
 	}
 }
 
+// TestBoundedInjectedCommit_TrimsHighStakeCartelBloat: a < 1/3 HIGH-STAKE cartel posts huge extensions;
+// density order (VP/byte) drops them and keeps the honest > 2/3 majority's cheap extensions — the exact
+// knapsack case a greedy-by-STAKE trim would have stalled on (it would keep the high-stake bloat first).
+func TestBoundedInjectedCommit_TrimsHighStakeCartelBloat(t *testing.T) {
+	var votes []abci.ExtendedVoteInfo
+	for i := 0; i < 3; i++ { // cartel: 3 x 8 power = 24 (30% of 80), HUGE extensions
+		votes = append(votes, extVote(byte(1+i), 8, 900_000))
+	}
+	for i := 0; i < 7; i++ { // honest: 7 x 8 power = 56 (70%), small extensions
+		votes = append(votes, extVote(byte(10+i), 8, 2_000))
+	}
+	ec := abci.ExtendedCommitInfo{Votes: votes}
+	blob, ok := boundedInjectedCommit(ec, 1_000_000) // budget ~875 KB: fits the 7 honest, not a 900 KB cartel one
+	if !ok {
+		t.Fatal("density trim must keep the honest > 2/3 and drop the high-stake cartel bloat")
+	}
+	var ext abci.ExtendedCommitInfo
+	if err := ext.Unmarshal(blob[len(veInjectMarker):]); err != nil {
+		t.Fatal(err)
+	}
+	var keptVP int64
+	for _, v := range ext.Votes {
+		if v.BlockIdFlag == cmtproto.BlockIDFlagCommit && len(v.VoteExtension) > 0 {
+			keptVP += v.Validator.Power
+		}
+	}
+	if keptVP < (80*2)/3+1 {
+		t.Fatalf("kept VP %d must exceed 2/3 of 80 (the cartel must be dropped, honest kept)", keptVP)
+	}
+}
+
 // TestBoundedInjectedCommit_MajorityBloatFallsBack: a dominant (>2/3) validator's extension does not fit,
 // so no injection carrying > 2/3 power is possible -> fall back (false), never a sub-2/3 partial commit.
 func TestBoundedInjectedCommit_MajorityBloatFallsBack(t *testing.T) {
