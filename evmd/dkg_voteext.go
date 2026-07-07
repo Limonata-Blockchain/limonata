@@ -7,6 +7,7 @@ package evmd
 
 import (
 	"bytes"
+	"sort"
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
@@ -438,9 +439,9 @@ func (app *EVMD) wrapDkgPrepareProposal(inner sdk.PrepareProposalHandler) sdk.Pr
 		if !app.veActive(ctx) || len(req.LocalLastCommit.Votes) == 0 {
 			return inner(ctx, req)
 		}
-		blob, err := marshalInjectedCommit(req.LocalLastCommit)
-		if err != nil || int64(len(blob)) >= req.MaxTxBytes {
-			return inner(ctx, req) // cannot build/fit the blob: fall back cleanly
+		blob, ok := boundedInjectedCommit(req.LocalLastCommit, req.MaxTxBytes)
+		if !ok {
+			return inner(ctx, req) // no valid (> 2/3-power) injection fits: fall back cleanly
 		}
 		// Reserve the blob's bytes so the composed proposal stays within MaxTxBytes.
 		sub := *req
@@ -463,6 +464,94 @@ func marshalInjectedCommit(ec abci.ExtendedCommitInfo) ([]byte, error) {
 	out := make([]byte, 0, len(veInjectMarker)+len(bz))
 	out = append(out, veInjectMarker...)
 	return append(out, bz...), nil
+}
+
+// perVoteMarshalOverhead approximates the protobuf framing bytes per ExtendedVoteInfo (field tags +
+// length prefixes for the validator, flag, extension, and signature) — used only to GUIDE which
+// extensions to drop; the final trimmed blob is measured exactly before use.
+const perVoteMarshalOverhead = 24
+
+// boundedInjectedCommit returns the marker-prefixed blob for the injected extended commit, and whether a
+// usable one was built. HIGH-2: if the FULL commit already fits under maxTxBytes it is used as-is. Else it
+// TRIMS — keeping the highest-STAKE vote extensions up to ~7/8 of maxTxBytes and marking the rest Absent
+// (dropping only their extension) — so the blob fits AND the kept extensions still carry > 2/3 of the FULL
+// committed power (ValidateVoteExtensions counts every present vote toward totalVP, so a dropped-to-Absent
+// vote still counts; we can therefore shed only a < 1/3-stake minority's bloat, which is exactly the
+// minority-bloat stall this defends). If > 2/3 of the extensions cannot be made to fit, it returns
+// (nil,false) and the caller falls back to no injection — never a partial/forged commit. The dropped
+// dealings/shares are simply re-carried and consumed on a later block within their window. Proposer-local:
+// a wrong choice only yields a rejected proposal (ProcessProposal re-runs ValidateVoteExtensions), never a
+// fork.
+func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte, bool) {
+	if blob, err := marshalInjectedCommit(ec); err == nil && int64(len(blob)) < maxTxBytes {
+		return blob, true
+	}
+	budget := maxTxBytes - maxTxBytes/8 // reserve ~1/8 of the block for normal txs
+	if budget <= int64(len(veInjectMarker)) {
+		return nil, false
+	}
+	votes := ec.Votes
+	var totalVP int64
+	for i := range votes {
+		totalVP += votes[i].Validator.Power
+	}
+	if totalVP <= 0 {
+		return nil, false
+	}
+	requiredVP := (totalVP*2)/3 + 1
+
+	// Consider extending votes HIGHEST-STAKE FIRST (deterministic tie-break by address) so each kept byte
+	// buys the most voting power toward the 2/3 bar.
+	order := make([]int, len(votes))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		va, vb := votes[order[a]], votes[order[b]]
+		if va.Validator.Power != vb.Validator.Power {
+			return va.Validator.Power > vb.Validator.Power
+		}
+		return bytes.Compare(va.Validator.Address, vb.Validator.Address) < 0
+	})
+
+	keep := make([]bool, len(votes))
+	used := int64(len(veInjectMarker))
+	var keptVP int64
+	for _, idx := range order {
+		v := votes[idx]
+		// Only a COMMIT vote carrying a valid (non-empty) extension + signature is usable; everything else
+		// becomes Absent (it could not pass ValidateVoteExtensions as a committed-but-unextended vote).
+		if v.BlockIdFlag != cmtproto.BlockIDFlagCommit || len(v.VoteExtension) == 0 || len(v.ExtensionSignature) == 0 {
+			continue
+		}
+		cost := int64(len(v.VoteExtension)+len(v.ExtensionSignature)) + perVoteMarshalOverhead
+		if used+cost > budget {
+			continue // over budget: drop this extension (marked Absent below)
+		}
+		used += cost
+		keep[idx] = true
+		keptVP += v.Validator.Power
+	}
+	if keptVP < requiredVP {
+		return nil, false // cannot fit > 2/3 of the extensions: fall back to no injection
+	}
+
+	trimmed := ec
+	trimmed.Votes = make([]abci.ExtendedVoteInfo, len(votes))
+	for i := range votes {
+		v := votes[i]
+		if !keep[i] {
+			v.BlockIdFlag = cmtproto.BlockIDFlagAbsent
+			v.VoteExtension = nil
+			v.ExtensionSignature = nil
+		}
+		trimmed.Votes[i] = v
+	}
+	blob, err := marshalInjectedCommit(trimmed)
+	if err != nil || int64(len(blob)) >= maxTxBytes {
+		return nil, false // approximation under-counted: fall back rather than overflow
+	}
+	return blob, true
 }
 
 // ---- ProcessProposal: self-certify the injected extended commit, then delegate ----
