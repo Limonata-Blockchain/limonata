@@ -7,6 +7,7 @@ package evmd
 
 import (
 	"bytes"
+	"math/bits"
 	"sort"
 
 	abci "github.com/cometbft/cometbft/abci/types"
@@ -600,8 +601,16 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 	byDensity := append([]trimCand(nil), cands...)
 	sort.SliceStable(byDensity, func(a, b int) bool {
 		l, r := byDensity[a], byDensity[b]
-		if lv, rv := l.vp*r.cost, r.vp*l.cost; lv != rv { // l.vp/l.cost > r.vp/r.cost, integer, no floats
-			return lv > rv
+		// l.vp/l.cost > r.vp/r.cost via a 128-bit cross-multiply (overflow-safe even at CometBFT-max power,
+		// unlike a plain int64 vp*cost), integer + deterministic. vp >= 0 and cost >= 1, so the uint64 casts
+		// are exact.
+		lhi, llo := bits.Mul64(uint64(l.vp), uint64(r.cost))
+		rhi, rlo := bits.Mul64(uint64(r.vp), uint64(l.cost))
+		if lhi != rhi {
+			return lhi > rhi
+		}
+		if llo != rlo {
+			return llo > rlo
 		}
 		return bytes.Compare(addr(l), addr(r)) < 0
 	})
