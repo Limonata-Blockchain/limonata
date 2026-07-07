@@ -838,10 +838,13 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 	if kmax := p.EffectiveMaxVerifyOps(); globalCeiling > kmax {
 		globalCeiling = kmax // CRIT-2 K_max: bound per-block DLEQ work by the (governance-tunable) budget, not × S
 	}
-	// LIVENESS FLOOR (audit #5): never below one honest VE's worth of shares (shareCap == max(256, S)), so a
-	// single honest extension always clears in a block. This means the EFFECTIVE ceiling is
-	// max(MaxVerifyOpsPerBlock, shareCap) — a governance K_max set BELOW shareCap is intentionally overridden
-	// to preserve liveness (documented on the param), NOT silently ignored; it is a floor, not a cap bypass.
+	// LIVENESS FLOOR (audit #5): never below one honest VE's worth of shares (shareCap == max(256, S)). So the
+	// EFFECTIVE ceiling is max(MaxVerifyOpsPerBlock, shareCap) — a governance K_max set BELOW shareCap is
+	// intentionally overridden to preserve liveness (documented on the param), NOT silently ignored; it is a
+	// floor, not a cap bypass. NOTE (audit #3 interaction): the floor is a share-COUNT, but a COLD verify
+	// charges ~S EC-ops, so during the <=ceil(S/128)-block post-rekey WARMUP a fully-cold honest extension
+	// clears only ~ceiling/S of its shares per block; the rest DEFER (nothing stored, no reject) and heal as
+	// the Y-cache warms — always within the 32-block decrypt grace, so no ciphertext strands.
 	if globalCeiling < shareCap {
 		globalCeiling = shareCap
 	}
