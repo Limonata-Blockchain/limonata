@@ -481,9 +481,10 @@ type trimCand struct {
 // knapsackKeepMaxPower selects the MAX-total-power subset of cands whose byte cost fits `budget`, via an
 // exact 0/1-knapsack DP with the byte dimension scaled to knapsackBuckets so the table stays bounded.
 // Scaling rounds each cost UP, so a DP-selected subset never exceeds the real budget (the exact marshaled
-// size is still re-checked by the caller). This is the COMPLETE backstop two fixed greedy orderings cannot
-// match: no adversarial size-padding can produce a fitting > 2/3 subset it misses (beyond the sub-
-// 1/knapsackBuckets scaling slack). Deterministic; runs only when both greedy passes fell short (rare).
+// size is still re-checked by the caller). This is the backstop two fixed greedy orderings cannot match.
+// The round-up leaves a completeness slack of O(N*gran) = O(budget*N/knapsackBuckets) (~1.2% of budget at
+// N~=100 kept items) — the caller's TOP-UP pass then reclaims that slack against the REAL budget, so the
+// trim is effectively exact. Deterministic; runs only when both greedy passes fell short (rare).
 func knapsackKeepMaxPower(cands []trimCand, votesLen int, budget int64) ([]bool, int64) {
 	keep := make([]bool, votesLen)
 	if len(cands) == 0 || budget <= 0 {
@@ -617,11 +618,37 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 		keep, keptVP = greedy(byPower)
 	}
 	if keptVP < requiredVP {
-		// COMPLETE BACKSTOP: exact 0/1-knapsack DP (bytes scaled to a coarse budget dimension) that finds
-		// the max-power subset within the budget, so a fitting > 2/3 subset is never missed for a false
-		// stall. Runs only when both greedies fell short (adversarial/rare). Deterministic; the exact
-		// marshaled size is still re-checked below.
+		// KNAPSACK BACKSTOP: 0/1-knapsack DP (bytes scaled to a coarse budget dimension) finding the
+		// max-power subset within the budget, so a fitting > 2/3 subset the greedies miss is still found.
+		// Runs only when both greedies fell short (adversarial/rare). Its round-up scaling slack is
+		// reclaimed by the TOP-UP below; the exact marshaled size is re-checked before use. Deterministic.
 		keep, keptVP = knapsackKeepMaxPower(cands, len(votes), budget-int64(len(veInjectMarker)))
+	}
+	// TOP-UP (reclaim the DP's round-up scaling slack, and fill any leftover budget in a greedy path so more
+	// dealings are consumed per block): greedily add still-dropped extensions HIGHEST-POWER first that fit
+	// the REAL remaining budget. This makes the trim effectively EXACT — the DP scales costs UP by up to
+	// N*gran, and this adds back exactly the items that rounding excluded but genuinely fit. Real byte costs.
+	usedReal := int64(len(veInjectMarker))
+	dropped := make([]trimCand, 0, len(cands))
+	for _, c := range cands {
+		if keep[c.idx] {
+			usedReal += c.cost
+		} else {
+			dropped = append(dropped, c)
+		}
+	}
+	sort.SliceStable(dropped, func(a, b int) bool {
+		if dropped[a].vp != dropped[b].vp {
+			return dropped[a].vp > dropped[b].vp
+		}
+		return bytes.Compare(addr(dropped[a]), addr(dropped[b])) < 0
+	})
+	for _, c := range dropped {
+		if usedReal+c.cost <= budget {
+			keep[c.idx] = true
+			keptVP += c.vp
+			usedReal += c.cost
+		}
 	}
 	if keptVP < requiredVP {
 		return nil, false // no > 2/3 subset fits the budget: fall back to no injection (never a partial commit)
