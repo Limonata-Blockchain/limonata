@@ -150,6 +150,7 @@ func (k Keeper) SubmitEncTx(ctx context.Context, submitter string, submitHeight,
 func (k Keeper) releaseEncTx(ctx sdk.Context, e types.EncTx) {
 	k.DeleteEncTx(ctx, e.DecryptHeight, e.Seq)
 	k.DeleteSharesFor(ctx, e.DecryptHeight, e.Seq)
+	k.deleteRejectedSharesFor(ctx, e.DecryptHeight, e.Seq) // LIVENESS-4: drop the slot chaff cache with the ct
 	k.decGlobalEncCount(ctx)
 	k.decSubmitterEncCount(ctx, e.Submitter)
 	if e.Epoch > 0 {
@@ -458,6 +459,38 @@ func encTxKey(decryptHeight, seq uint64) []byte {
 // dedup key on both paths.
 func encShareKey(decryptHeight, seq, index uint64) []byte {
 	return concat(types.EncSharePrefix, u64(decryptHeight), u64(seq), u64(index))
+}
+
+// --- rejected-decrypt-share negative cache (LIVENESS-4): a slot (decryptHeight, seq, index) whose share
+// failed the DLEQ verify, so a re-sent chaff is dropped O(1) instead of re-charging the O(t) DLEQ. Deleted
+// with the ciphertext's shares in releaseEncTx.
+func rejectedShareKey(decryptHeight, seq, index uint64) []byte {
+	return concat(types.RejectedDecryptSharePrefix, u64(decryptHeight), u64(seq), u64(index))
+}
+
+func (k Keeper) setRejectedShare(ctx context.Context, decryptHeight, seq, index uint64) {
+	_ = k.store(ctx).Set(rejectedShareKey(decryptHeight, seq, index), []byte{1})
+}
+
+func (k Keeper) hasRejectedShare(ctx context.Context, decryptHeight, seq, index uint64) bool {
+	bz, err := k.store(ctx).Get(rejectedShareKey(decryptHeight, seq, index))
+	return err == nil && bz != nil
+}
+
+func (k Keeper) deleteRejectedSharesFor(ctx context.Context, decryptHeight, seq uint64) {
+	pfx := concat(types.RejectedDecryptSharePrefix, u64(decryptHeight), u64(seq))
+	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
+	if err != nil {
+		return
+	}
+	var keys [][]byte
+	for ; it.Valid(); it.Next() {
+		keys = append(keys, append([]byte(nil), it.Key()...))
+	}
+	it.Close()
+	for _, key := range keys {
+		_ = k.store(ctx).Delete(key)
+	}
 }
 
 func mustJSON(v any) []byte {

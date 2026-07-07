@@ -93,20 +93,23 @@ func (k Keeper) GetComplaint(ctx context.Context, epoch, against, accuser uint64
 	return err == nil && bz != nil
 }
 
-func dkgComplaintRejectedKey(epoch, against, accuser uint64) []byte {
-	return concat(types.DkgComplaintRejectedPrefix, u64(epoch), u64(against), u64(accuser))
+func dkgComplaintRejectedKey(epoch, against, accuser, evalPoint uint64) []byte {
+	return concat(types.DkgComplaintRejectedPrefix, u64(epoch), u64(against), u64(accuser), u64(evalPoint))
 }
 
-// SetComplaintRejected records that a complaint from accuser against dealer was verified and
-// REJECTED (framing/frivolous), so a re-send is dropped before re-charging the DLEQ verify.
-func (k Keeper) SetComplaintRejected(ctx context.Context, epoch, against, accuser uint64) error {
-	return k.store(ctx).Set(dkgComplaintRejectedKey(epoch, against, accuser), []byte{1})
+// SetComplaintRejected records that a complaint from accuser against dealer AT a specific eval-point was
+// verified and REJECTED (framing/frivolous / no-dealing), so a re-send of THAT point is dropped before
+// re-charging the DLEQ verify. AUDIT FIX (DKG-SM-5): the key includes evalPoint so a rejected complaint
+// about one owned point cannot suppress a VALID complaint by the same accuser about the same dealer at a
+// DIFFERENT point (the dealer may have poisoned only some of the accuser's points).
+func (k Keeper) SetComplaintRejected(ctx context.Context, epoch, against, accuser, evalPoint uint64) error {
+	return k.store(ctx).Set(dkgComplaintRejectedKey(epoch, against, accuser, evalPoint), []byte{1})
 }
 
-// HasComplaintRejected reports whether (accuser vs dealer) already produced a rejected
+// HasComplaintRejected reports whether (accuser vs dealer AT evalPoint) already produced a rejected
 // complaint this epoch (the negative-cache lookup, O(1), before any EC work).
-func (k Keeper) HasComplaintRejected(ctx context.Context, epoch, against, accuser uint64) bool {
-	bz, err := k.store(ctx).Get(dkgComplaintRejectedKey(epoch, against, accuser))
+func (k Keeper) HasComplaintRejected(ctx context.Context, epoch, against, accuser, evalPoint uint64) bool {
+	bz, err := k.store(ctx).Get(dkgComplaintRejectedKey(epoch, against, accuser, evalPoint))
 	return err == nil && bz != nil
 }
 

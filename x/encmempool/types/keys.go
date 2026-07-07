@@ -72,7 +72,7 @@ var (
 	// complaint is dropped by an O(1) lookup BEFORE re-charging the O(t) DLEQ verify — a
 	// byzantine accuser gets at most ONE verify per targeted dealer per epoch, never a
 	// per-block re-charge that would starve honest complaints out of the per-block budget.
-	DkgComplaintRejectedPrefix = []byte{0x1C} // 0x1C | be(epoch) | be(against) | be(accuser) -> {1}
+	DkgComplaintRejectedPrefix = []byte{0x1C} // 0x1C | be(epoch) | be(against) | be(accuser) | be(evalPoint) -> {1}
 	// EncSubmitRatePrefix is the PER-SUBMITTER per-block admission RATE counter (Fix 1 C3'): the
 	// missing rate dimension on top of the standing MaxInFlightPerSubmitter inventory cap. One record
 	// per submitter (reused across blocks, lazily height-reset), storing be(height)||be(count), so the
@@ -101,4 +101,12 @@ var (
 	// would rekey the healthy active epoch, and a healthy superseded epoch's successes would mask a poisoned
 	// active one. Reset on a successful decrypt of that epoch; deleted when the epoch is pruned.
 	DecryptStrandStreakPrefix = []byte{0x20} // 0x20 | be(epoch) -> uint64 (be): consecutive strands since last success
+
+	// RejectedDecryptSharePrefix negative-caches a decryption-share SLOT (decryptHeight, seq, eval-point)
+	// whose share FAILED the DLEQ verify, so a re-sent chaff costs an O(1) lookup instead of a fresh O(t)
+	// DLEQ every block through the grace window (LIVENESS-4). Only the eval-point's owner can produce a
+	// classify-valid share at a slot, so a DLEQ failure there is that owner's own bad share — suppressing
+	// the slot only ever affects a Byzantine owner, never an honest one (which never fails DLEQ). Deleted
+	// with the ciphertext's shares when it leaves state (releaseEncTx).
+	RejectedDecryptSharePrefix = []byte{0x21} // 0x21 | be(decryptHeight) | be(seq) | be(index) -> {1}
 )

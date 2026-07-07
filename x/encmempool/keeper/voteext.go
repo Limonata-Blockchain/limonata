@@ -462,7 +462,7 @@ func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, ope
 	}
 	// negative-cache: a prior verified-and-rejected complaint from this pair is dropped O(1),
 	// before any EC work, so garbage cannot re-charge the DLEQ or starve honest complaints.
-	if k.HasComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx) {
+	if k.HasComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx, c.EvalPoint) {
 		return false
 	}
 	dealing, ok := k.GetDealing(ctx, round.Epoch, c.Against)
@@ -470,7 +470,7 @@ func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, ope
 		// No dealing from c.Against: a non-dealing dealer is structurally excluded from QUAL anyway, so
 		// this complaint is pointless. Negative-cache it (audit fix) so a byzantine accuser cannot re-send
 		// it every block to re-force the membership / ownership / store-read work on the PreBlock path.
-		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx)
+		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx, c.EvalPoint)
 		return false // no dealing to complain about
 	}
 	// Select the enc-share the dealer sealed AT the disputed eval-point (weighted: keyed by point).
@@ -493,8 +493,9 @@ func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, ope
 		enc.A, enc.Nonce, enc.Body, c.SharedPoint, c.DleqProof,
 	)
 	if !proofValid || !cheated {
-		// framing (bad DLEQ) or frivolous (share is actually valid): reject, negative-cache, do NOT store.
-		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx)
+		// framing (bad DLEQ) or frivolous (share is actually valid): reject, negative-cache THIS point, do
+		// NOT store. Keyed by eval-point so it cannot suppress a valid complaint about another owned point.
+		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx, c.EvalPoint)
 		return false
 	}
 	_ = k.SetComplaint(ctx, types.DkgComplaintRec{Epoch: round.Epoch, Against: c.Against, AccuserIndex: accuserIdx})
@@ -769,6 +770,10 @@ func (k Keeper) verifyAndStoreDecryptShare(ctx sdk.Context, epoch uint64, ctA []
 			sdk.NewAttribute("seq", u64str(s.Seq)),
 			sdk.NewAttribute("reason", "dleq_verification_failed"),
 		))
+		// LIVENESS-4: negative-cache this slot so a re-sent chaff is dropped O(1) next block instead of
+		// re-charging the DLEQ. Only the eval-point's owner can reach here, so this only suppresses a
+		// Byzantine owner's own bad share (an honest owner never fails DLEQ). Cleared with the ciphertext.
+		k.setRejectedShare(ctx, s.DecryptHeight, s.Seq, s.Index)
 		return false
 	}
 	if k.SetEncShare(ctx, types.EncShare{
@@ -883,6 +888,9 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 			slot := shareSlot{decryptHeight: s.DecryptHeight, seq: s.Seq, index: s.Index}
 			if seen[slot] {
 				continue // (2) this eval-point slot was already verified this block
+			}
+			if k.hasRejectedShare(ctx, s.DecryptHeight, s.Seq, s.Index) {
+				continue // (LIVENESS-4) this slot already failed DLEQ this epoch: O(1) drop, no re-verify, no budget
 			}
 			member, ctA, epoch, ok := k.classifyDecryptShare(ctx, e.Operator, s, c)
 			if !ok {
