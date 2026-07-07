@@ -135,6 +135,40 @@ func TestBoundedInjectedCommit_NearWhaleUsesPowerGreedy(t *testing.T) {
 	}
 }
 
+// TestBoundedInjectedCommit_KnapsackBackstop reproduces the exact 0/1-knapsack config the dual-greedy
+// missed (audit): powers {32,31,13,25} (total 101, need 68; max single stake 31.7% < 1/3, no whale) where
+// the ONLY fitting > 2/3 subset {v2,v3,v4}=69 requires DROPPING the highest-power v1 — which no forward
+// greedy does. The DP backstop must find it.
+func TestBoundedInjectedCommit_KnapsackBackstop(t *testing.T) {
+	ec := abci.ExtendedCommitInfo{Votes: []abci.ExtendedVoteInfo{
+		extVote(1, 32, 330000-88), // cost = extLen + 64 sig + 24 overhead = extLen + 88
+		extVote(2, 31, 236000-88),
+		extVote(3, 13, 148000-88),
+		extVote(4, 25, 285000-88),
+	}}
+	blob, ok := boundedInjectedCommit(ec, 802285) // budget = 7/8 = 702000; {v2,v3,v4}=669000 fits, v1 must drop
+	if !ok {
+		t.Fatal("knapsack DP backstop must find the fitting > 2/3 subset {v2,v3,v4} the greedies miss")
+	}
+	var ext abci.ExtendedCommitInfo
+	if err := ext.Unmarshal(blob[len(veInjectMarker):]); err != nil {
+		t.Fatal(err)
+	}
+	var keptVP int64
+	v1Kept := false
+	for _, v := range ext.Votes {
+		if v.BlockIdFlag == cmtproto.BlockIDFlagCommit && len(v.VoteExtension) > 0 {
+			keptVP += v.Validator.Power
+			if v.Validator.Power == 32 {
+				v1Kept = true
+			}
+		}
+	}
+	if keptVP < (101*2)/3+1 || v1Kept {
+		t.Fatalf("DP must drop the highest-power v1 and keep > 2/3 (kept VP=%d, v1Kept=%v)", keptVP, v1Kept)
+	}
+}
+
 // TestBoundedInjectedCommit_MajorityBloatFallsBack: a dominant (>2/3) validator's extension does not fit,
 // so no injection carrying > 2/3 power is possible -> fall back (false), never a sub-2/3 partial commit.
 func TestBoundedInjectedCommit_MajorityBloatFallsBack(t *testing.T) {

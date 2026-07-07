@@ -471,6 +471,64 @@ func marshalInjectedCommit(ec abci.ExtendedCommitInfo) ([]byte, error) {
 // extensions to drop; the final trimmed blob is measured exactly before use.
 const perVoteMarshalOverhead = 24
 
+// trimCand is one extending vote considered for the injected-commit trim: its index in the commit, its
+// consensus voting power, and its approximate marshaled byte cost.
+type trimCand struct {
+	idx      int
+	vp, cost int64
+}
+
+// knapsackKeepMaxPower selects the MAX-total-power subset of cands whose byte cost fits `budget`, via an
+// exact 0/1-knapsack DP with the byte dimension scaled to knapsackBuckets so the table stays bounded.
+// Scaling rounds each cost UP, so a DP-selected subset never exceeds the real budget (the exact marshaled
+// size is still re-checked by the caller). This is the COMPLETE backstop two fixed greedy orderings cannot
+// match: no adversarial size-padding can produce a fitting > 2/3 subset it misses (beyond the sub-
+// 1/knapsackBuckets scaling slack). Deterministic; runs only when both greedy passes fell short (rare).
+func knapsackKeepMaxPower(cands []trimCand, votesLen int, budget int64) ([]bool, int64) {
+	keep := make([]bool, votesLen)
+	if len(cands) == 0 || budget <= 0 {
+		return keep, 0
+	}
+	const knapsackBuckets = 8192
+	gran := budget/knapsackBuckets + 1 // >= 1: bytes-per-DP-bucket
+	B := int(budget / gran)
+	sc := make([]int, len(cands))
+	for i, c := range cands {
+		s := int((c.cost + gran - 1) / gran) // round cost UP -> conservative (never overflow the real budget)
+		if s <= 0 {
+			s = 1
+		}
+		sc[i] = s
+	}
+	// dp[b] = max power with scaled cost <= b; taken[i][b] records item i's inclusion for backtracking
+	// (standard 1D-knapsack reconstruction: taken[i][b] reflects the optimum over items 0..i at budget b).
+	dp := make([]int64, B+1)
+	taken := make([][]bool, len(cands))
+	for i := range cands {
+		taken[i] = make([]bool, B+1)
+		w, v := sc[i], cands[i].vp
+		if w > B {
+			continue // does not fit even alone
+		}
+		for b := B; b >= w; b-- {
+			if dp[b-w]+v > dp[b] {
+				dp[b] = dp[b-w] + v
+				taken[i][b] = true
+			}
+		}
+	}
+	var keptVP int64
+	b := B
+	for i := len(cands) - 1; i >= 0; i-- {
+		if taken[i][b] {
+			keep[cands[i].idx] = true
+			keptVP += cands[i].vp
+			b -= sc[i]
+		}
+	}
+	return keep, keptVP
+}
+
 // boundedInjectedCommit returns the marker-prefixed blob for the injected extended commit, and whether a
 // usable one was built. HIGH-2: if the FULL commit already fits under maxTxBytes it is used as-is. Else it
 // TRIMS — keeping the highest-STAKE vote extensions up to ~7/8 of maxTxBytes and marking the rest Absent
@@ -502,24 +560,20 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 
 	// Only a COMMIT vote carrying a valid (non-empty) extension + signature is usable; everything else
 	// becomes Absent (it could not pass ValidateVoteExtensions as a committed-but-unextended vote).
-	type cand struct {
-		idx      int
-		vp, cost int64
-	}
-	cands := make([]cand, 0, len(votes))
+	cands := make([]trimCand, 0, len(votes))
 	for i := range votes {
 		v := votes[i]
 		if v.BlockIdFlag != cmtproto.BlockIDFlagCommit || len(v.VoteExtension) == 0 || len(v.ExtensionSignature) == 0 {
 			continue
 		}
-		cands = append(cands, cand{
+		cands = append(cands, trimCand{
 			idx:  i,
 			vp:   v.Validator.Power,
 			cost: int64(len(v.VoteExtension)+len(v.ExtensionSignature)) + perVoteMarshalOverhead,
 		})
 	}
 	// Greedily fill the budget in a given order, returning which votes to keep and their total power.
-	greedy := func(order []cand) ([]bool, int64) {
+	greedy := func(order []trimCand) ([]bool, int64) {
 		keep := make([]bool, len(votes))
 		used := int64(len(veInjectMarker))
 		var keptVP int64
@@ -533,15 +587,16 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 		}
 		return keep, keptVP
 	}
-	addr := func(c cand) []byte { return votes[c.idx].Validator.Address }
-	// AUDIT FIX (knapsack stall): a greedy by STAKE kept a high-stake BLOATED extension first, exhausting
-	// the budget so honest cheaper extensions could not reach 2/3 -> a permanent no-injection stall under a
-	// < 1/3 high-stake cartel (the exact minority-bloat vector HIGH-2 exists to close). This is a byte-
-	// budgeted maximize-power knapsack; no single greedy is optimal, so try TWO deterministic orderings and
-	// take the first that clears 2/3: (1) VP-per-byte DENSITY desc — drops low-density bloat (any stake) in
-	// favor of many cheap honest extensions (closes the cartel); (2) raw POWER desc — keeps a single large
-	// high-power extension a density fill could skip behind tiny high-density ones (closes the near-whale).
-	byDensity := append([]cand(nil), cands...)
+	addr := func(c trimCand) []byte { return votes[c.idx].Validator.Address }
+	// This is a byte-budgeted maximize-power 0/1 knapsack: keep a subset of extensions that FITS the budget
+	// and carries > 2/3 power. FAST PATH — try two cheap deterministic greedy orderings that resolve the
+	// common shapes: (1) VP-per-byte DENSITY desc drops low-density bloat (any stake) in favor of many cheap
+	// honest extensions (closes the high-stake-cartel bloat); (2) raw POWER desc keeps a single large
+	// high-power extension a density fill could skip (closes the near-whale). AUDIT: two fixed greedy
+	// orderings cannot be COMPLETE for 0/1 knapsack (a config exists where the optimal 2/3 subset requires
+	// DROPPING the highest-power item, which no forward greedy does), so a knapsack DP backstop below finds
+	// any fitting > 2/3 subset the greedies miss — no adversarial size-padding can force a false stall.
+	byDensity := append([]trimCand(nil), cands...)
 	sort.SliceStable(byDensity, func(a, b int) bool {
 		l, r := byDensity[a], byDensity[b]
 		if lv, rv := l.vp*r.cost, r.vp*l.cost; lv != rv { // l.vp/l.cost > r.vp/r.cost, integer, no floats
@@ -551,7 +606,7 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 	})
 	keep, keptVP := greedy(byDensity)
 	if keptVP < requiredVP {
-		byPower := append([]cand(nil), cands...)
+		byPower := append([]trimCand(nil), cands...)
 		sort.SliceStable(byPower, func(a, b int) bool {
 			l, r := byPower[a], byPower[b]
 			if l.vp != r.vp {
@@ -562,7 +617,14 @@ func boundedInjectedCommit(ec abci.ExtendedCommitInfo, maxTxBytes int64) ([]byte
 		keep, keptVP = greedy(byPower)
 	}
 	if keptVP < requiredVP {
-		return nil, false // cannot fit > 2/3 of the extensions in the budget: fall back to no injection
+		// COMPLETE BACKSTOP: exact 0/1-knapsack DP (bytes scaled to a coarse budget dimension) that finds
+		// the max-power subset within the budget, so a fitting > 2/3 subset is never missed for a false
+		// stall. Runs only when both greedies fell short (adversarial/rare). Deterministic; the exact
+		// marshaled size is still re-checked below.
+		keep, keptVP = knapsackKeepMaxPower(cands, len(votes), budget-int64(len(veInjectMarker)))
+	}
+	if keptVP < requiredVP {
+		return nil, false // no > 2/3 subset fits the budget: fall back to no injection (never a partial commit)
 	}
 
 	trimmed := ec
