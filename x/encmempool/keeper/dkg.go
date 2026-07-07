@@ -397,7 +397,8 @@ func (k Keeper) deleteShareKeyCache(ctx context.Context, epoch uint64) {
 	for _, key := range keys {
 		_ = k.store(ctx).Delete(key)
 	}
-	k.deleteShareKeyCursor(ctx, epoch) // drop any pending precompute cursor with the cache
+	k.deleteShareKeyCursor(ctx, epoch)     // drop any pending precompute cursor with the cache
+	k.resetDecryptStrandStreak(ctx, epoch) // drop the epoch's decrypt-health streak (MED-2) at prune
 }
 
 // ---- epoch in-flight ciphertext ref-count (pins an epoch's records until drained) ----

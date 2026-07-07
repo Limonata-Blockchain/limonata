@@ -206,10 +206,10 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		// (no storm) and deterministic (a pure function of committed state), so every node rekeys
 		// at the identical height.
 		driftBps := committeeMaxCoalitionDriftBps(lastRound.Members, active)
-		strandStreak := k.GetDecryptStrandStreak(ctx)
+		strandStreak := k.GetDecryptStrandStreak(ctx, cur)
 		k.purgeDealings(ctx, cur)
 		k.SetLastRekeyHeight(ctx, h)
-		k.resetDecryptStrandStreak(ctx) // MED-2: fresh epoch starts with a clean decrypt-health streak
+		k.resetDecryptStrandStreak(ctx, cur) // MED-2: clear the superseded epoch's streak (the fresh epoch is 0)
 		ctx.EventManager().EmitEvent(sdk.NewEvent(
 			"encmempool_dkg_stake_drift_rekey",
 			sdk.NewAttribute("epoch", u64str(cur)),
@@ -359,11 +359,16 @@ func (k Keeper) stakeDriftRekeyDue(ctx sdk.Context, round types.DkgRound, live [
 	// poison-and-hide dealer that slipped a bad share past the complaint round into QUAL (HIGH-1). Force
 	// a fresh round against the CURRENT set so the epoch re-genesises and heals instead of stranding
 	// every ciphertext forever. This is a safety backstop, so it is always considered when the DKG is
-	// live, independent of the opt-in cadence/drift params. The streak is reset when the rekey fires.
-	if k.GetDecryptStrandStreak(ctx) >= decryptHealthStrandThreshold {
+	// live, independent of the opt-in cadence/drift params. Keyed to the ACTIVE round's epoch (audit fix,
+	// not global) so a draining superseded epoch cannot trip a rekey of the healthy active one, nor a
+	// healthy drain mask a poisoned active one. The superseded epoch's streak is cleared when the rekey
+	// fires (and at prune).
+	if k.GetDecryptStrandStreak(ctx, round.Epoch) >= decryptHealthStrandThreshold {
 		return true
 	}
-	// (a)/(b) cadence + stake-drift triggers are opt-in (0 = disabled => dormant behavior byte-identical).
+	// (a)/(b) cadence + stake-drift triggers are opt-in (0 = disabled). When the feature is dormant
+	// (EncEnabled off) no ciphertext ever strands, so every epoch's streak stays 0 and this function
+	// returns false here — dormant behavior is unchanged.
 	if p.DkgMaxEpochBlocks == 0 && p.DkgRekeyOnStakeDriftBps == 0 {
 		return false
 	}

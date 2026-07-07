@@ -93,10 +93,12 @@ var (
 	// the epoch (cleared with the ActiveThresholdKey).
 	ShareKeyCursorPrefix = []byte{0x1F} // 0x1F | be(epoch) -> uint64 (be): next index to precompute
 
-	// DecryptStrandStreakKey counts CONSECUTIVE stranded decrypt maturities with no successful decrypt in
-	// between. A sustained streak means the active key cannot decrypt (e.g. a poison-and-hide dealer that
-	// survived the complaint round into QUAL), so EndBlockDKG force-rekeys the committee to heal instead
-	// of stranding forever (MED-2, the recovery backstop for HIGH-1). Reset to 0 on any successful decrypt
-	// or when a rekey fires.
-	DecryptStrandStreakKey = []byte{0x20} // -> uint64 (be): consecutive strands since last success
+	// DecryptStrandStreakPrefix counts CONSECUTIVE stranded decrypt maturities with no successful decrypt
+	// in between, keyed PER EPOCH (the ciphertext's stamped epoch). A sustained streak for an epoch means
+	// that epoch's key cannot decrypt (e.g. a poison-and-hide dealer that survived the complaint round into
+	// QUAL), so EndBlockDKG force-rekeys when the ACTIVE epoch's streak trips (MED-2, the recovery backstop
+	// for HIGH-1). PER-EPOCH (audit fix): a global counter mis-fired — a draining superseded epoch's strands
+	// would rekey the healthy active epoch, and a healthy superseded epoch's successes would mask a poisoned
+	// active one. Reset on a successful decrypt of that epoch; deleted when the epoch is pruned.
+	DecryptStrandStreakPrefix = []byte{0x20} // 0x20 | be(epoch) -> uint64 (be): consecutive strands since last success
 )

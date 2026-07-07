@@ -333,8 +333,8 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 						sdk.NewAttribute("have", strconv.Itoa(len(shares))),
 						sdk.NewAttribute("need", strconv.Itoa(need)),
 						sdk.NewAttribute("reason", err.Error())))
-					k.bumpDecryptStrandStreak(ctx) // MED-2: a sustained streak triggers a recovery rekey
-					return                         // release stays true
+					k.bumpDecryptStrandStreak(ctx, e.Epoch) // MED-2: sustained per-epoch streak triggers a recovery rekey
+					return                                  // release stays true
 				}
 				// Within grace: candidate for a bounded, fairly-shared defer slot (PASS 2).
 				release = false
@@ -354,7 +354,7 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 						sdk.NewAttribute("execution_order", strconv.FormatUint(order, 10)),
 						sdk.NewAttribute("plaintext_hex", hex.EncodeToString(plaintext)),
 					))
-					k.resetDecryptStrandStreak(ctx) // MED-2: decryption works -> clear the strand streak
+					k.resetDecryptStrandStreak(ctx, e.Epoch) // MED-2: this epoch decrypts -> clear its strand streak
 					order++
 				} else {
 					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",

@@ -288,18 +288,23 @@ func (k Keeper) incGlobalEncCount(ctx context.Context) {
 	_ = k.store(ctx).Set(types.GlobalEncCountKey, u64(k.GetGlobalEncCount(ctx)+1))
 }
 
-// --- decrypt-health streak (MED-2): consecutive stranded maturities since the last successful decrypt.
-// A sustained streak signals the active key cannot decrypt, triggering a recovery rekey in EndBlockDKG.
-func (k Keeper) GetDecryptStrandStreak(ctx context.Context) uint64 {
-	return k.readU64(ctx, types.DecryptStrandStreakKey)
+// --- decrypt-health streak (MED-2), keyed PER EPOCH: consecutive stranded maturities of THAT epoch's
+// ciphertexts since the last successful decrypt of that epoch. A sustained streak signals that epoch's
+// key cannot decrypt; when the ACTIVE epoch's streak trips, EndBlockDKG force-rekeys (recovery backstop).
+func decryptStrandStreakKey(epoch uint64) []byte {
+	return concat(types.DecryptStrandStreakPrefix, u64(epoch))
 }
 
-func (k Keeper) bumpDecryptStrandStreak(ctx context.Context) {
-	_ = k.store(ctx).Set(types.DecryptStrandStreakKey, u64(k.GetDecryptStrandStreak(ctx)+1))
+func (k Keeper) GetDecryptStrandStreak(ctx context.Context, epoch uint64) uint64 {
+	return k.readU64(ctx, decryptStrandStreakKey(epoch))
 }
 
-func (k Keeper) resetDecryptStrandStreak(ctx context.Context) {
-	_ = k.store(ctx).Delete(types.DecryptStrandStreakKey)
+func (k Keeper) bumpDecryptStrandStreak(ctx context.Context, epoch uint64) {
+	_ = k.store(ctx).Set(decryptStrandStreakKey(epoch), u64(k.GetDecryptStrandStreak(ctx, epoch)+1))
+}
+
+func (k Keeper) resetDecryptStrandStreak(ctx context.Context, epoch uint64) {
+	_ = k.store(ctx).Delete(decryptStrandStreakKey(epoch))
 }
 
 func (k Keeper) decGlobalEncCount(ctx context.Context) {
