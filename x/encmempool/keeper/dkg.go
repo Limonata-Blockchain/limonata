@@ -315,30 +315,60 @@ func (k Keeper) warmShareKeyRange(ctx context.Context, epoch uint64, publicCommi
 // every node warms the exact same indices at the exact same heights. Called once per block from
 // EndBlockDKG; a no-op when there is no pending precompute.
 func (k Keeper) advancePrecomputeShareKeys(ctx context.Context) {
-	epoch := k.GetActiveEpoch(ctx)
-	if epoch == 0 {
+	// Warm EVERY epoch that still has a pending cursor — the ACTIVE epoch AND any superseded-but-pinned
+	// epoch whose in-flight ciphertexts still need its Y-cache. XFIX (re-audit): keying only on
+	// GetActiveEpoch stranded a superseded epoch's warm-up mid-way (a fast rekey moves the active pointer
+	// on before the old epoch is fully warm), leaving indices cold forever and re-exposing the O(t^2)
+	// cold decrypt/verify for that epoch's pinned ciphertexts. A GLOBAL per-block budget of
+	// precomputeChunkSize indices is shared across the pending epochs in deterministic store order
+	// (oldest epoch first — its ciphertexts mature soonest), so total per-block precompute EC work stays
+	// bounded to one chunk even when several epochs warm concurrently.
+	store := k.store(ctx)
+	it, err := store.Iterator(types.ShareKeyCursorPrefix, prefixEnd(types.ShareKeyCursorPrefix))
+	if err != nil {
 		return
 	}
+	pfxLen := len(types.ShareKeyCursorPrefix)
+	var epochs []uint64
+	for ; it.Valid(); it.Next() {
+		if key := it.Key(); len(key) >= pfxLen+8 {
+			epochs = append(epochs, binary.BigEndian.Uint64(key[pfxLen:pfxLen+8]))
+		}
+	}
+	it.Close()
+	budget := precomputeChunkSize
+	for _, epoch := range epochs {
+		if budget == 0 {
+			break
+		}
+		budget -= k.advanceEpochPrecompute(ctx, epoch, budget)
+	}
+}
+
+// advanceEpochPrecompute warms up to `budget` of epoch's still-cold Y-cache indices (from its cursor),
+// returning how many it warmed. Clears the cursor when [1,S] is fully warm or the epoch's key/round is
+// gone. Deterministic: reads only committed state + computes SharePubKey.
+func (k Keeper) advanceEpochPrecompute(ctx context.Context, epoch, budget uint64) uint64 {
 	cursor := k.getShareKeyCursor(ctx, epoch)
 	if cursor == 0 {
-		return // nothing pending: never started (S <= chunk) or already fully warm
+		return 0
 	}
 	ak, ok := k.GetActiveKey(ctx, epoch)
 	if !ok {
 		k.deleteShareKeyCursor(ctx, epoch)
-		return
+		return 0
 	}
 	round, ok := k.GetDkgRound(ctx, epoch)
 	if !ok {
 		k.deleteShareKeyCursor(ctx, epoch)
-		return
+		return 0
 	}
 	S := uint64(types.TotalEvalPoints(round.Members))
 	if cursor > S {
 		k.deleteShareKeyCursor(ctx, epoch)
-		return
+		return 0
 	}
-	end := cursor + precomputeChunkSize - 1
+	end := cursor + budget - 1
 	if end > S {
 		end = S
 	}
@@ -348,6 +378,7 @@ func (k Keeper) advancePrecomputeShareKeys(ctx context.Context) {
 	} else {
 		k.setShareKeyCursor(ctx, epoch, end+1)
 	}
+	return end - cursor + 1
 }
 
 // deleteShareKeyCache removes the whole Y-cache for an epoch (keys collected first, then deleted, so

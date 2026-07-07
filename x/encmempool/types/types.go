@@ -590,9 +590,10 @@ const (
 
 // ValidateDkgWindows bounds the DKG timing params. Only meaningful when DkgEnabled.
 func (p Params) ValidateDkgWindows() error {
-	// Per-round PHASE windows: bound by the tighter OPERATIONAL cap (AUDIT FIX GOV-1) so a round always
-	// closes. retry_backoff is a cadence, not a phase deadline (and is separately ceilinged in
-	// EndBlockDKG), so it keeps the looser bound.
+	// Per-round PHASE windows AND the retry cadence: bound by the tighter OPERATIONAL cap (AUDIT FIX
+	// GOV-1/GOV-RETRY) so a round always closes AND self-heal always re-fires within a couple of days.
+	// (retryBackoff's ceiling is max(base, dkgBackoffCeilingBlocks), so a huge DkgRetryBackoff is NOT
+	// clamped down to 1000 — it strands auto-retry for the whole param; hence it needs this cap too.)
 	for _, f := range []struct {
 		name string
 		v    uint64
@@ -600,7 +601,7 @@ func (p Params) ValidateDkgWindows() error {
 	}{
 		{"dkg_deal_window", p.DkgDealWindow, maxDkgPhaseWindow},
 		{"dkg_complaint_window", p.DkgComplaintWindow, maxDkgPhaseWindow},
-		{"dkg_retry_backoff", p.DkgRetryBackoff, maxDkgWindowBlocks},
+		{"dkg_retry_backoff", p.DkgRetryBackoff, maxDkgPhaseWindow},
 	} {
 		if f.v < minDkgWindowBlocks || f.v > f.max {
 			return fmt.Errorf("%s (%d) must be in [%d, %d]", f.name, f.v, minDkgWindowBlocks, f.max)
