@@ -258,14 +258,22 @@ func DecryptingSetMeetsStake(members []types.RoundMember, present map[uint64]boo
 // the chain, so a last-resort recover contains it into a deterministic event (identical
 // committed state => identical outcome on every node).
 func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
+	// AUDIT #6/DKG-3: run inside a BRANCHED cache context, committing only on CLEAN completion, so a
+	// recovered panic discards all partial store writes (deterministic clean rollback on every node)
+	// instead of leaving partial committed state.
+	realCtx := ctx
+	cc, write := realCtx.CacheContext()
+	ctx = cc
 	defer func() {
 		if r := recover(); r != nil {
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
+			realCtx.EventManager().EmitEvent(sdk.NewEvent(
 				"encmempool_dkg_ve_consume_panic",
-				sdk.NewAttribute("height", u64str(uint64(ctx.BlockHeight()))),
+				sdk.NewAttribute("height", u64str(uint64(realCtx.BlockHeight()))),
 				sdk.NewAttribute("reason", fmt.Sprintf("%v", r)),
 			))
+			return // discard the cache -> roll back every partial write
 		}
+		write() // write() flushes the cache store AND forwards the body's buffered events to realCtx
 	}()
 
 	p := k.GetParams(ctx)

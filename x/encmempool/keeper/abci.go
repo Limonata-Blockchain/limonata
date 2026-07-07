@@ -33,15 +33,22 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	// UNFORESEEN panic (e.g. in the reveal/GC scans) into a contained, DETERMINISTIC event
 	// (identical committed state => identical outcome on every node) instead of a halt, and
 	// does not propagate the error (a returned BeginBlock error is itself fatal to the chain).
+	// AUDIT #6/DKG-3: run inside a BRANCHED cache context, committing only on CLEAN completion, so a
+	// recovered panic discards all partial store writes (deterministic clean rollback on every node).
+	realCtx := ctx
+	cc, write := realCtx.CacheContext()
+	ctx = cc
 	defer func() {
 		if r := recover(); r != nil {
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
+			realCtx.EventManager().EmitEvent(sdk.NewEvent(
 				"encmempool_beginblock_panic",
-				sdk.NewAttribute("height", strconv.FormatUint(uint64(ctx.BlockHeight()), 10)),
+				sdk.NewAttribute("height", strconv.FormatUint(uint64(realCtx.BlockHeight()), 10)),
 				sdk.NewAttribute("reason", fmt.Sprintf("%v", r)),
 			))
 			err = nil
+			return // discard the cache -> roll back every partial write
 		}
+		write() // write() flushes the cache store AND forwards the body's buffered events to realCtx
 	}()
 
 	p := k.GetParams(ctx)

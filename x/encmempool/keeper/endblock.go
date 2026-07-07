@@ -78,20 +78,25 @@ func complaintWindowFloor(n int) uint64 {
 // commitments. All nodes therefore compute an identical transition (or identical
 // failed outcome), which is the #1 multi-node halt-safety requirement.
 func (k Keeper) EndBlockDKG(ctx sdk.Context) {
-	// PANIC-GUARD (defense-in-depth): EndBlock runs inside consensus; an unrecovered
-	// panic here halts the whole chain. Every branch below is written not to panic (the
-	// crypto aggregate handles malformed/empty inputs, and DkgDeal ingress validation
-	// rejects malformed dealings before they reach finalize), but a last-resort recover
-	// converts any unforeseen data-dependent panic into a contained, DETERMINISTIC event
-	// (identical committed state => identical outcome on every node) instead of a halt.
+	// PANIC-GUARD (defense-in-depth): EndBlock runs inside consensus; an unrecovered panic here halts the
+	// whole chain. Every branch below is written not to panic, but a last-resort recover converts any
+	// unforeseen panic into a contained DETERMINISTIC event instead of a halt. AUDIT #6/DKG-3: run the body
+	// inside a BRANCHED cache context and commit only on CLEAN completion, so a recovered panic discards ALL
+	// partial store writes (a deterministic clean rollback on every node) rather than leaving partial state
+	// — closing the recover-with-un-branched-writes fork surface.
+	realCtx := ctx
+	cc, write := realCtx.CacheContext()
+	ctx = cc
 	defer func() {
 		if r := recover(); r != nil {
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
+			realCtx.EventManager().EmitEvent(sdk.NewEvent(
 				"encmempool_dkg_endblock_panic",
-				sdk.NewAttribute("height", u64str(uint64(ctx.BlockHeight()))),
+				sdk.NewAttribute("height", u64str(uint64(realCtx.BlockHeight()))),
 				sdk.NewAttribute("reason", fmt.Sprintf("%v", r)),
 			))
+			return // discard the cache -> roll back every partial write
 		}
+		write() // write() flushes the cache store AND forwards the body's buffered events to realCtx
 	}()
 
 	p := k.GetParams(ctx)
