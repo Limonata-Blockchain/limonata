@@ -491,7 +491,41 @@ func DefaultGenesisState() *GenesisState {
 }
 
 func (gs GenesisState) Validate() error {
-	return gs.Params.Validate()
+	if err := gs.Params.Validate(); err != nil {
+		return err
+	}
+	// round-11 #5: the DKG state carried across a genesis migration is a trusted input, but validate
+	// its safety-critical invariants at ingress rather than importing garbage that only strands later.
+	for i, s := range gs.EncShares {
+		// A genesis MUST NOT assert a share is already DLEQ-verified: recovery would then skip the
+		// crypto check on it. InitGenesis force-clears this too (belt), but reject it here so the
+		// intent is explicit and a malicious/buggy genesis fails fast instead of silently.
+		if s.Verified {
+			return fmt.Errorf("enc_shares[%d]: verified must be false in genesis (a share is only trusted after an on-chain DLEQ check, never by import)", i)
+		}
+		if len(s.D) == 0 {
+			return fmt.Errorf("enc_shares[%d]: empty decryption-share point D", i)
+		}
+	}
+	for i, e := range gs.EncTxs {
+		// A ciphertext whose A is not a valid point can never gather shares and would strand; reject.
+		if !ValidCompressedPointBytes(e.A) {
+			return fmt.Errorf("enc_txs[%d]: A is not a valid compressed secp256k1 point", i)
+		}
+		if len(e.Body) == 0 {
+			return fmt.Errorf("enc_txs[%d]: empty ciphertext body", i)
+		}
+		if e.Bond > 0 && e.BondBurn > e.Bond {
+			return fmt.Errorf("enc_txs[%d]: bond_burn (%d) exceeds bond (%d)", i, e.BondBurn, e.Bond)
+		}
+	}
+	return nil
+}
+
+// ValidCompressedPointBytes reports whether b is a valid 33-byte compressed secp256k1 point.
+func ValidCompressedPointBytes(b []byte) bool {
+	_, err := secp256k1.ParsePubKey(b)
+	return err == nil
 }
 
 // Validate checks the commit-reveal timing params and, when the OPT-IN threshold

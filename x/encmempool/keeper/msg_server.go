@@ -206,21 +206,6 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if len(msg.Body) > maxCiphertextBodyBytes {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "ciphertext body exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.Body))
 	}
-	// CRITICAL A-BINDING (same-A replay): require a Schnorr proof of knowledge of r (A = r*G)
-	// bound to THIS submitter + ciphertext. A decryption share is x_i*A and the AES key is
-	// KDF(x*A), so any two ciphertexts sharing A share the decryption secret; the maturity gate
-	// alone does not prevent an attacker from getting a dummy ciphertext carrying a victim's A to
-	// mature earlier (a mempool race / a proposer that delays the victim) and leaking x*A before
-	// the victim's reveal. The PoK makes A non-replayable: the attacker cannot forge it for
-	// A_victim (Schnorr soundness) nor replay the victim's PoK (the challenge binds the submitter),
-	// so no second ciphertext can ever carry another party's A.
-	pok, err := dkg.ParseEncKeyPoK(msg.Pok)
-	if err != nil {
-		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid ciphertext key proof: %s", err.Error())
-	}
-	if !dkg.VerifyEncKeyPoK(sdk.UnwrapSDKContext(goCtx).ChainID(), msg.A, msg.Submitter, msg.Nonce, msg.Body, pok) {
-		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext key proof does not bind A to the submitter (same-A replay is rejected)")
-	}
 	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a
 	// flooder cannot grow EncTx state (nor the per-block decrypt scan) without bound, nor starve
 	// honest ciphertexts. The checks read O(1) maintained counters (never an O(backlog) scan).
@@ -261,6 +246,25 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if epoch > 0 && m.Keeper.CommitteeConcentrationBreached(goCtx, epoch) {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
 			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (an operator holds enough decryption power to decrypt alone) - send a normal transaction, or wait for the committee to decentralize")
+	}
+	// CRITICAL A-BINDING (same-A replay): require a Schnorr proof of knowledge of r (A = r*G)
+	// bound to THIS submitter + ciphertext. A decryption share is x_i*A and the AES key is
+	// KDF(x*A), so any two ciphertexts sharing A share the decryption secret; the maturity gate
+	// alone does not prevent an attacker from getting a dummy ciphertext carrying a victim's A to
+	// mature earlier (a mempool race / a proposer that delays the victim) and leaking x*A before
+	// the victim's reveal. The PoK makes A non-replayable: the attacker cannot forge it for
+	// A_victim (Schnorr soundness) nor replay the victim's PoK (the challenge binds the submitter),
+	// so no second ciphertext can ever carry another party's A.
+	//
+	// round-11 #3 (DoS): this EC-heavy verification runs LAST among the rejection checks - after the
+	// O(1) admission / per-block-rate / active-key / concentration gates above - so a doomed
+	// valid-shaped spam tx is rejected cheaply and never forces the Schnorr verify in CheckTx.
+	pok, err := dkg.ParseEncKeyPoK(msg.Pok)
+	if err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid ciphertext key proof: %s", err.Error())
+	}
+	if !dkg.VerifyEncKeyPoK(ctx.ChainID(), msg.A, msg.Submitter, msg.Nonce, msg.Body, pok) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext key proof does not bind A to the submitter (same-A replay is rejected)")
 	}
 	// round-9 #1: ESCROW the refundable anti-sybil bond. Done LAST, after every rejection check
 	// (PoK, admission, concentration) has passed, so a rejected submit never escrows; and BEFORE

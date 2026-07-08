@@ -111,6 +111,11 @@ func parseEncKey(raw []byte) (*EncKey, error) {
 	if s.SetBytes(&sb) != 0 {
 		return nil, fmt.Errorf("enc key is not a canonical scalar")
 	}
+	if s.IsZero() {
+		// round-11 #6: the zero scalar is a degenerate key (public key = point at infinity); it can
+		// seal/open nothing and is never a valid DKG enc key. Reject it (bad key hygiene otherwise).
+		return nil, fmt.Errorf("enc key must be a non-zero scalar")
+	}
 	var P secp256k1.JacobianPoint
 	secp256k1.ScalarBaseMultNonConst(s, &P)
 	P.ToAffine()

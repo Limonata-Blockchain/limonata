@@ -92,3 +92,19 @@ func TestGenesisRoundTrip_DKGState(t *testing.T) {
 	e4 := dst.SubmitEncTx(ctx2, "carol", 20, 2, []byte("a4"), []byte("n4"), []byte("b4"), 0)
 	require.Greater(t, e4.Seq, e3.Seq, "seq counter must resume past the imported max seq")
 }
+
+// round-11 #5 (SECURITY): a genesis must NEVER be able to assert a decryption share is already
+// DLEQ-verified - recovery would then skip the crypto check and a bad imported share would corrupt
+// decryption. Validate rejects Verified=true, and InitGenesis force-clears it as belt-and-suspenders.
+func TestGenesis_NeverTrustsImportedVerifiedShare(t *testing.T) {
+	gs := types.DefaultGenesisState()
+	gs.EncShares = []types.EncShare{{Keyper: "k", DecryptHeight: 12, Seq: 0, Index: 1, D: []byte("d"), Verified: true}}
+	require.Error(t, gs.Validate(), "a genesis asserting a pre-verified share must be rejected")
+
+	// Even if Validate is bypassed, InitGenesis must force Verified=false so recovery re-verifies.
+	dst, ctx := newKeeper(t, 20)
+	require.NoError(t, dst.InitGenesis(ctx, *gs))
+	got := dst.CollectShares(ctx, 12, 0)
+	require.Len(t, got, 1)
+	require.False(t, got[0].Verified, "an imported share must never be trusted as pre-verified")
+}

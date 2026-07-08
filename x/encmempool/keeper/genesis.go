@@ -59,6 +59,12 @@ func (k Keeper) InitGenesis(ctx context.Context, gs types.GenesisState) error {
 		_ = st.Set(encKeyOwnerKey(kr.Key), []byte(kr.Operator))
 	}
 	for _, s := range gs.EncShares {
+		// round-11 #5 (SECURITY): NEVER trust a genesis-imported share's Verified flag. Recovery
+		// skips the DLEQ re-check for Verified shares (round-9 #5), so an imported Verified=true over
+		// a BAD share would enter the Lagrange combine unchecked and corrupt decryption. Force
+		// Verified=false on import so the decrypt-path re-verifies every imported share from scratch;
+		// a genuinely-good share re-verifies fine (a bounded per-block cost), a bad one is dropped.
+		s.Verified = false
 		if err := k.SetEncShare(ctx, s); err != nil {
 			return err
 		}
