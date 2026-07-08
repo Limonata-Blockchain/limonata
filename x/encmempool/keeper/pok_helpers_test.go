@@ -13,7 +13,10 @@ import (
 // binding), so every success-path test constructs its ciphertext through this helper.
 func encWithPoK(t *testing.T, pub []byte, plain, submitter string) *types.MsgSubmitEncrypted {
 	t.Helper()
-	ct, pok, err := dkg.EncryptWithPoK(pub, []byte(plain), submitter)
+	// round-9 #7: the PoK is chain-bound. Every test keeper (newKeeper via DefaultContextWithDB) has
+	// an EMPTY ChainID, and SubmitEncrypted verifies with ctx.ChainID(), so the helper binds "" to
+	// match. A test that sets a non-empty chain id on its ctx must build the PoK with that id instead.
+	ct, pok, err := dkg.EncryptWithPoK(pub, []byte(plain), "", submitter)
 	if err != nil {
 		t.Fatalf("EncryptWithPoK: %v", err)
 	}

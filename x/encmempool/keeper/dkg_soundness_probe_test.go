@@ -292,7 +292,7 @@ func TestRegression_MalformedEncShareA_LivenessPreserved(t *testing.T) {
 	submitCtx := ctx.WithBlockHeight(6)
 	if _, err := ms.SubmitEncrypted(submitCtx, &types.MsgSubmitEncrypted{
 		Submitter: "acc1", A: ct.A, Nonce: ct.Nonce, Body: ct.Body,
-		Pok: dkg.ProveEncKeyPoK(ctR, "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
+		Pok: dkg.ProveEncKeyPoK(ctR, ctx.ChainID(), "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
 	}); err != nil {
 		t.Fatalf("SubmitEncrypted: %v", err)
 	}

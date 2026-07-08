@@ -53,9 +53,10 @@ func writeField(h interface{ Write([]byte) (int, error) }, b []byte) {
 
 // encPoKChallenge is the Fiat-Shamir hash of the transcript, reduced mod q. It binds A, the
 // submitter, the ciphertext (nonce+body), and the commitment T.
-func encPoKChallenge(a []byte, submitter string, nonce, body []byte, T *secp256k1.JacobianPoint) *secp256k1.ModNScalar {
+func encPoKChallenge(chainID string, a []byte, submitter string, nonce, body []byte, T *secp256k1.JacobianPoint) *secp256k1.ModNScalar {
 	h := sha256.New()
 	h.Write([]byte(encPoKContext))
+	writeField(h, []byte(chainID)) // round-9 #7: DOMAIN-SEPARATE by chain so a PoK cannot replay across chains/forks
 	writeField(h, a)
 	writeField(h, []byte(submitter))
 	writeField(h, nonce)
@@ -71,13 +72,14 @@ func encPoKChallenge(a []byte, submitter string, nonce, body []byte, T *secp256k
 // deriveEncPoKNonce derives the Schnorr commitment nonce k DETERMINISTICALLY (RFC6979 style) from
 // r and the full transcript, consulting NO external RNG - so k is unique per (r, transcript) and a
 // mis-wired RNG can never cause the catastrophic k-reuse that would leak r.
-func deriveEncPoKNonce(r *secp256k1.ModNScalar, submitter string, a, nonce, body []byte) *secp256k1.ModNScalar {
+func deriveEncPoKNonce(r *secp256k1.ModNScalar, chainID, submitter string, a, nonce, body []byte) *secp256k1.ModNScalar {
 	rb := r.Bytes()
 	var ctr [4]byte
 	for {
 		h := sha256.New()
 		h.Write([]byte(encPoKNonceContext))
 		h.Write(rb[:])
+		writeField(h, []byte(chainID))
 		writeField(h, a)
 		writeField(h, []byte(submitter))
 		writeField(h, nonce)
@@ -106,11 +108,11 @@ func deriveEncPoKNonce(r *secp256k1.ModNScalar, submitter string, a, nonce, body
 // ProveEncKeyPoK proves knowledge of r such that A = r*G, bound to (submitter, nonce, body).
 // r is the ephemeral scalar threshold.EncryptWithR returns; the caller must pass the SAME
 // submitter it will use on the MsgSubmitEncrypted.
-func ProveEncKeyPoK(r *secp256k1.ModNScalar, submitter string, a, nonce, body []byte) *EncKeyPoK {
-	k := deriveEncPoKNonce(r, submitter, a, nonce, body)
+func ProveEncKeyPoK(r *secp256k1.ModNScalar, chainID, submitter string, a, nonce, body []byte) *EncKeyPoK {
+	k := deriveEncPoKNonce(r, chainID, submitter, a, nonce, body)
 	var T secp256k1.JacobianPoint
 	secp256k1.ScalarBaseMultNonConst(k, &T) // T = k*G
-	c := encPoKChallenge(a, submitter, nonce, body, &T)
+	c := encPoKChallenge(chainID, a, submitter, nonce, body, &T)
 	cr := new(secp256k1.ModNScalar)
 	cr.Set(c).Mul(r) // c*r
 	z := new(secp256k1.ModNScalar)
@@ -120,7 +122,7 @@ func ProveEncKeyPoK(r *secp256k1.ModNScalar, submitter string, a, nonce, body []
 
 // VerifyEncKeyPoK checks that proof binds a (=A compressed) to submitter+ciphertext. Returns true
 // iff the prover knew r with A = r*G for THIS submitter and ciphertext.
-func VerifyEncKeyPoK(a []byte, submitter string, nonce, body []byte, proof *EncKeyPoK) bool {
+func VerifyEncKeyPoK(chainID string, a []byte, submitter string, nonce, body []byte, proof *EncKeyPoK) bool {
 	if proof == nil || proof.C == nil || proof.Z == nil {
 		return false
 	}
@@ -135,7 +137,7 @@ func VerifyEncKeyPoK(a []byte, submitter string, nonce, body []byte, proof *EncK
 	secp256k1.ScalarBaseMultNonConst(proof.Z, &zG)
 	secp256k1.ScalarMultNonConst(negC, A, &cA)
 	secp256k1.AddNonConst(&zG, &cA, &T)
-	want := encPoKChallenge(a, submitter, nonce, body, &T)
+	want := encPoKChallenge(chainID, a, submitter, nonce, body, &T)
 	return want.Bytes() == proof.C.Bytes()
 }
 
@@ -175,11 +177,11 @@ func ParseEncKeyPoK(b []byte) (*EncKeyPoK, error) {
 // EncryptWithPoK encrypts msg to the threshold public key pub and returns the ciphertext together
 // with a submitter-bound proof of knowledge of its ephemeral key. This is the reference client
 // path for the encrypted mempool: the returned pok goes in MsgSubmitEncrypted.Pok.
-func EncryptWithPoK(pub, msg []byte, submitter string) (*threshold.Ciphertext, *EncKeyPoK, error) {
+func EncryptWithPoK(pub, msg []byte, chainID, submitter string) (*threshold.Ciphertext, *EncKeyPoK, error) {
 	ct, r, err := threshold.EncryptWithR(pub, msg)
 	if err != nil {
 		return nil, nil, err
 	}
-	pok := ProveEncKeyPoK(r, submitter, ct.A, ct.Nonce, ct.Body)
+	pok := ProveEncKeyPoK(r, chainID, submitter, ct.A, ct.Nonce, ct.Body)
 	return ct, pok, nil
 }

@@ -821,11 +821,23 @@ func (app *EVMD) consumeDkgVoteExtensions(ctx sdk.Context, txs [][]byte) {
 	if err := ext.Unmarshal(txs[0][len(veInjectMarker):]); err != nil {
 		return
 	}
+	// round-9 #3: enforce the SAME shape bound as VerifyVoteExtension on the AUTHORITATIVE path.
+	// VerifyVoteExtension is only a gossip-time LOCAL pre-filter; a malicious proposer plus >=1/3
+	// byzantine validators can inject signed-but-app-invalid (oversized / object-stuffed) extensions
+	// that never passed it, and THIS decode runs in PreBlock (consensus). Bounding the decode cost
+	// here makes it deterministic: every field is uint64 or Go-base64 (alphabet excludes '{') so the
+	// '{' count is an exact object-count upper bound, and both checks read only committed extension
+	// bytes + committed params, so every node skips the same extensions identically.
+	p := app.EncMempoolKeeper.GetParams(ctx)
+	objCap := 8 + 3*p.VoteExtShareCap()
 	entries := make([]encmempoolkeeper.VEEntry, 0, len(ext.Votes))
 	for _, v := range ext.Votes {
 		// Only votes actually committed carry a usable, signed extension.
 		if v.BlockIdFlag != cmtproto.BlockIDFlagCommit || len(v.VoteExtension) == 0 {
 			continue
+		}
+		if len(v.VoteExtension) > encmempooltypes.VoteExtMaxBytes || bytes.Count(v.VoteExtension, veObjectOpen) > objCap {
+			continue // oversized / object-stuffed: refuse the decode on the consensus path
 		}
 		ve, ok := encmempooltypes.UnmarshalVoteExtension(v.VoteExtension)
 		if !ok {

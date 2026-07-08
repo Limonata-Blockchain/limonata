@@ -207,7 +207,7 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if err != nil {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid ciphertext key proof: %s", err.Error())
 	}
-	if !dkg.VerifyEncKeyPoK(msg.A, msg.Submitter, msg.Nonce, msg.Body, pok) {
+	if !dkg.VerifyEncKeyPoK(sdk.UnwrapSDKContext(goCtx).ChainID(), msg.A, msg.Submitter, msg.Nonce, msg.Body, pok) {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext key proof does not bind A to the submitter (same-A replay is rejected)")
 	}
 	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a

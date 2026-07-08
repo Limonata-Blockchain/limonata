@@ -7,13 +7,15 @@ import (
 	"github.com/cosmos/evm/x/encmempool/threshold"
 )
 
+const testChainID = "limonata-test-1"
+
 func setupCT(t *testing.T, plain, submitter string) (a, nonce, body []byte, pok *dkg.EncKeyPoK) {
 	t.Helper()
 	pub, _, err := threshold.Setup(2, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ct, p, err := dkg.EncryptWithPoK(pub, []byte(plain), submitter)
+	ct, p, err := dkg.EncryptWithPoK(pub, []byte(plain), testChainID, submitter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +25,7 @@ func setupCT(t *testing.T, plain, submitter string) (a, nonce, body []byte, pok 
 // A well-formed proof verifies for the submitter and ciphertext it was made for.
 func TestEncKeyPoK_Valid(t *testing.T) {
 	a, nonce, body, pok := setupCT(t, "hello", "cosmos1submitter")
-	if !dkg.VerifyEncKeyPoK(a, "cosmos1submitter", nonce, body, pok) {
+	if !dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1submitter", nonce, body, pok) {
 		t.Fatal("a valid PoK must verify for its own submitter + ciphertext")
 	}
 	// Round-trips through the wire encoding.
@@ -31,8 +33,20 @@ func TestEncKeyPoK_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshalled PoK must parse: %v", err)
 	}
-	if !dkg.VerifyEncKeyPoK(a, "cosmos1submitter", nonce, body, parsed) {
+	if !dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1submitter", nonce, body, parsed) {
 		t.Fatal("parsed PoK must verify")
+	}
+}
+
+// round-9 #7: a PoK is chain-bound. A submission valid on one chain must NOT verify on another
+// (cross-chain / fork replay defense), even with the same submitter + ciphertext.
+func TestEncKeyPoK_ChainBinding_RejectsCrossChain(t *testing.T) {
+	a, nonce, body, pok := setupCT(t, "cross-chain", "cosmos1s")
+	if !dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1s", nonce, body, pok) {
+		t.Fatal("PoK must verify on its own chain")
+	}
+	if dkg.VerifyEncKeyPoK("limonata-other-2", a, "cosmos1s", nonce, body, pok) {
+		t.Fatal("CROSS-CHAIN REPLAY: a PoK bound to one chain must NOT verify on another chain id")
 	}
 }
 
@@ -42,11 +56,11 @@ func TestEncKeyPoK_SubmitterBinding_RejectsReplay(t *testing.T) {
 	a, nonce, body, victimPoK := setupCT(t, "victim tx", "cosmos1victim")
 
 	// The victim's own submission is fine.
-	if !dkg.VerifyEncKeyPoK(a, "cosmos1victim", nonce, body, victimPoK) {
+	if !dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1victim", nonce, body, victimPoK) {
 		t.Fatal("victim's own PoK must verify")
 	}
 	// The attacker copies A + the victim's PoK but submits as itself -> rejected.
-	if dkg.VerifyEncKeyPoK(a, "cosmos1attacker", nonce, body, victimPoK) {
+	if dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1attacker", nonce, body, victimPoK) {
 		t.Fatal("SAME-A REPLAY: a copied PoK must NOT verify under a different submitter")
 	}
 }
@@ -57,17 +71,17 @@ func TestEncKeyPoK_TamperRejected(t *testing.T) {
 
 	badA := append([]byte{}, a...)
 	badA[len(badA)-1] ^= 0x01
-	if dkg.VerifyEncKeyPoK(badA, "cosmos1s", nonce, body, pok) {
+	if dkg.VerifyEncKeyPoK(testChainID, badA, "cosmos1s", nonce, body, pok) {
 		t.Fatal("a tampered A must be rejected")
 	}
 	badNonce := append([]byte{}, nonce...)
 	badNonce[0] ^= 0x01
-	if dkg.VerifyEncKeyPoK(a, "cosmos1s", badNonce, body, pok) {
+	if dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1s", badNonce, body, pok) {
 		t.Fatal("a tampered nonce must be rejected")
 	}
 	badBody := append([]byte{}, body...)
 	badBody[0] ^= 0x01
-	if dkg.VerifyEncKeyPoK(a, "cosmos1s", nonce, badBody, pok) {
+	if dkg.VerifyEncKeyPoK(testChainID, a, "cosmos1s", nonce, badBody, pok) {
 		t.Fatal("a tampered body must be rejected")
 	}
 }
@@ -77,7 +91,7 @@ func TestEncKeyPoK_TamperRejected(t *testing.T) {
 func TestEncKeyPoK_ForgeRejected(t *testing.T) {
 	victimA, nonce, body, _ := setupCT(t, "victim", "cosmos1x")
 	_, _, _, attackerPoK := setupCT(t, "attacker", "cosmos1x") // a proof for a DIFFERENT A
-	if dkg.VerifyEncKeyPoK(victimA, "cosmos1x", nonce, body, attackerPoK) {
+	if dkg.VerifyEncKeyPoK(testChainID, victimA, "cosmos1x", nonce, body, attackerPoK) {
 		t.Fatal("a PoK made for a different A must not verify against the victim's A")
 	}
 }

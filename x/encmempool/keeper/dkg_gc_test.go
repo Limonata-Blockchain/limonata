@@ -148,7 +148,7 @@ func TestOnChainDKG_InFlightCiphertextSurvivesRekey(t *testing.T) {
 	}
 	resp, err := ms.SubmitEncrypted(ctx.WithBlockHeight(6), &types.MsgSubmitEncrypted{
 		Submitter: "acc1", A: ct.A, Nonce: ct.Nonce, Body: ct.Body,
-		Pok: dkg.ProveEncKeyPoK(ctR, "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
+		Pok: dkg.ProveEncKeyPoK(ctR, ctx.ChainID(), "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
 	})
 	if err != nil {
 		t.Fatalf("SubmitEncrypted: %v", err)

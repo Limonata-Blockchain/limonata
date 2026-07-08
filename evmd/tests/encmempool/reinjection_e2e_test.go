@@ -53,7 +53,7 @@ func encParams(pub []byte, keypers []string, exec bool) encmempooltypes.Params {
 // t=2 legacy decryption shares at the maturity height. Returns the matured EncTx.
 func submitAndShare(t *testing.T, app *evmd.EVMD, ctx sdk.Context, pub []byte, shares []threshold.Share, keypers []string, rlp []byte, submitter string) encmempooltypes.EncTx {
 	t.Helper()
-	ct, pok, err := dkg.EncryptWithPoK(pub, rlp, submitter)
+	ct, pok, err := dkg.EncryptWithPoK(pub, rlp, ctx.ChainID(), submitter)
 	require.NoError(t, err)
 	ms := encmempoolkeeper.NewMsgServerImpl(app.EncMempoolKeeper)
 	resp, err := ms.SubmitEncrypted(ctx, &encmempooltypes.MsgSubmitEncrypted{

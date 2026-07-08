@@ -3,6 +3,13 @@
 // (see LICENSE.dkg at the repository root). NOT licensed under Apache-2.0 - this file is a
 // separately-licensed part of the Limonata transparent-DKG / encrypted-mempool work.
 
+//go:build dkgattack
+
+// round-9 #6: the ExtendVote adversary is now behind the `dkgattack` build tag, so it is
+// COMPILED ONLY in throwaway/audit binaries (`go build -tags dkgattack`). A production binary
+// (default build) gets the no-op in dkg_attack_noop.go, so NO runtime env var (DKG_HOLD_FILE /
+// DKG_CHAFF9) can ever make a production validator withhold or spam shares.
+
 package evmd
 
 import (
