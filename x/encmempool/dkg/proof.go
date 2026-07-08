@@ -223,7 +223,7 @@ type VerifiedShare struct {
 // corrupting the shared secret and failing the AES-GCM open with no culprit — which
 // is exactly the anti-MEV DoS the raw path leaves open.
 func RecoverVerified(commitments []secp256k1.JacobianPoint, ctA []byte, t int, partials []VerifiedShare) (*secp256k1.JacobianPoint, error) {
-	return RecoverVerifiedWithKeys(commitments, ctA, t, partials, nil)
+	return RecoverVerifiedWithKeys(commitments, ctA, t, partials, nil, nil)
 }
 
 // RecoverVerifiedWithKeys is RecoverVerified with an optional precomputed public-share-key lookup.
@@ -233,7 +233,13 @@ func RecoverVerified(commitments []secp256k1.JacobianPoint, ctA []byte, t int, p
 // keyper (the epoch Y-cache populated at/after finalize), we parse it (O(1)) instead of recomputing —
 // turning the recover into O(t). A cache miss or parse error transparently falls back to SharePubKey, so
 // the RESULT is identical whether or not the cache is warm: correctness never depends on the cache.
-func RecoverVerifiedWithKeys(commitments []secp256k1.JacobianPoint, ctA []byte, t int, partials []VerifiedShare, cachedKey func(index uint64) []byte) (*secp256k1.JacobianPoint, error) {
+// preVerified (round-9 #5, optional): when it returns true for a partial's index, that partial's
+// DLEQ proof was ALREADY verified before it entered state (the vote-extension ingest path), so the
+// redundant per-partial EC verification + public-share-key resolution are skipped. The index-range
+// and duplicate-index Lagrange guards are STILL applied to every partial (pre-verified or not), so a
+// mis-set flag can never bypass the anti-poisoning guards - only the (already-performed) DLEQ check.
+// nil => verify every partial (the pure-crypto behaviour; correctness never depends on this hint).
+func RecoverVerifiedWithKeys(commitments []secp256k1.JacobianPoint, ctA []byte, t int, partials []VerifiedShare, cachedKey func(index uint64) []byte, preVerified func(index uint64) bool) (*secp256k1.JacobianPoint, error) {
 	if t < 1 {
 		return nil, fmt.Errorf("invalid threshold %d", t)
 	}
@@ -260,6 +266,18 @@ func RecoverVerifiedWithKeys(commitments []secp256k1.JacobianPoint, ctA []byte, 
 			continue
 		}
 		if seen[vs.Share.Index] { // reject duplicate indices (a Lagrange-poisoning vector)
+			continue
+		}
+		// round-9 #5: this exact (index, D) already passed DLEQ at ingest (committed Verified flag);
+		// trust it and skip the redundant EC verify + Y resolution. The index-range + dedup guards
+		// above ALREADY ran, so a mis-set flag cannot poison the Lagrange combine, only skip a
+		// re-check of a share the chain already accepted.
+		if preVerified != nil && preVerified(vs.Share.Index) {
+			seen[vs.Share.Index] = true
+			good = append(good, vs.Share)
+			if len(good) == t {
+				break
+			}
 			continue
 		}
 		var Y *secp256k1.JacobianPoint

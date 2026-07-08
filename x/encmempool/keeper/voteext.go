@@ -877,6 +877,7 @@ func (k Keeper) verifyAndStoreDecryptShare(ctx sdk.Context, epoch uint64, ctA []
 	}
 	if k.SetEncShare(ctx, types.EncShare{
 		Keyper: operator, DecryptHeight: s.DecryptHeight, Seq: s.Seq, Index: s.Index, D: s.D, Proof: s.Proof,
+		Verified: true, // round-9 #5: DLEQ just checked above; the decrypt-time recover may trust + skip re-verify
 	}) != nil {
 		return false
 	}

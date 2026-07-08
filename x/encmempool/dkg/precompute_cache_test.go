@@ -113,12 +113,66 @@ func TestRecoverVerifiedWithKeys_MatchesRecompute(t *testing.T) {
 		"partially-warm": partial,
 		"cold-nil":       nil,
 	} {
-		got, err := RecoverVerifiedWithKeys(comm, ct.A, 3, partials, getter)
+		got, err := RecoverVerifiedWithKeys(comm, ct.A, 3, partials, getter, nil)
 		if err != nil {
 			t.Fatalf("%s recover: %v", name, err)
 		}
 		if !bytes.Equal(wantB, compressCopy(got)) {
 			t.Fatalf("%s: cached recover != recompute recover", name)
 		}
+	}
+}
+
+// round-9 #5: preVerified must (a) give the IDENTICAL recovered secret as full verification for
+// valid shares, and (b) actually SKIP the DLEQ - a partial with a corrupted proof that full
+// verification would DROP is accepted when its index is marked preVerified. This pins both the
+// correctness of the optimization and the invariant it rests on (only truly-verified shares may be
+// flagged - a mis-flag skips a check, but the index-range/dedup Lagrange guards still run).
+func TestRecoverVerifiedWithKeys_PreVerifiedSkipsDLEQ(t *testing.T) {
+	res, err := RunDKGSecure(NewParties(5, 3))
+	if err != nil {
+		t.Fatalf("RunDKG: %v", err)
+	}
+	ct, err := threshold.Encrypt(res.Pub, []byte("preverified must match full verify"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	comm := res.PublicCommitments
+	build := func() []VerifiedShare {
+		ps := make([]VerifiedShare, 0, 3)
+		for i := 0; i < 3; i++ {
+			ds, pf, perr := ProveDecryptShare(res.Shares[i], ct)
+			if perr != nil {
+				t.Fatalf("prove %d: %v", i, perr)
+			}
+			ps = append(ps, VerifiedShare{Share: ds, Proof: pf})
+		}
+		return ps
+	}
+
+	// (a) all-preVerified == full verification, byte-for-byte.
+	want, err := RecoverVerified(comm, ct.A, 3, build())
+	if err != nil {
+		t.Fatalf("full-verify recover: %v", err)
+	}
+	all := func(uint64) bool { return true }
+	got, err := RecoverVerifiedWithKeys(comm, ct.A, 3, build(), nil, all)
+	if err != nil {
+		t.Fatalf("preverified recover: %v", err)
+	}
+	if !bytes.Equal(compressCopy(want), compressCopy(got)) {
+		t.Fatal("preVerified recover must equal full-verify recover for valid shares")
+	}
+
+	// (b) corrupt one partial's proof. Full verify drops it -> only 2/3 pass -> fails. Marking that
+	// index preVerified accepts it (skip) -> 3/3 -> succeeds: proof the DLEQ is genuinely skipped.
+	corrupt := build()
+	corrupt[0].Proof.Z.Add(new(secp256k1.ModNScalar).SetInt(1)) // perturb Z -> proof no longer verifies
+	if _, err := RecoverVerifiedWithKeys(comm, ct.A, 3, corrupt, nil, nil); err == nil {
+		t.Fatal("a corrupted proof must be DROPPED by full verification (only 2/3 valid)")
+	}
+	badIdx := corrupt[0].Share.Index
+	if _, err := RecoverVerifiedWithKeys(comm, ct.A, 3, corrupt, nil, func(i uint64) bool { return i == badIdx }); err != nil {
+		t.Fatalf("preVerified must SKIP the DLEQ on the flagged index (got %v)", err)
 	}
 }

@@ -383,6 +383,13 @@ type EncShare struct {
 	Index         uint64 `json:"index"` // keyper share index (1..n)
 	D             []byte `json:"d"`     // compressed x_i * A
 	Proof         []byte `json:"proof"` // DLEQ proof (C||Z, 64 bytes) binding D to Y_index; empty on legacy path
+	// Verified is set ONLY when the share's DLEQ proof was checked at vote-extension INGEST
+	// (verifyAndStoreDecryptShare), before it entered state (round-9 #5). The decrypt-time recover
+	// then trusts it and skips the redundant re-verification (it still applies the index-range +
+	// dedup Lagrange guards). It is committed state written identically on every node, so the skip
+	// is deterministic. The legacy tx share path does NO ingress check, so its shares keep
+	// Verified=false and ARE re-verified at recover.
+	Verified bool `json:"verified,omitempty"`
 }
 
 // EncKeyReg is a bonded validator's auto-announced DKG enc key, carried across a genesis-export

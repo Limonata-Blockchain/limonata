@@ -592,10 +592,17 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 			return nil, need, perr
 		}
 		partials := make([]dkg.VerifiedShare, 0, len(shares))
+		// round-9 #5: shares whose DLEQ was already checked at vote-extension ingest carry Verified.
+		// RecoverVerifiedWithKeys trusts those (skips the redundant EC verify) while still applying the
+		// index-range + dedup guards; legacy/genesis shares (Verified=false) are re-verified.
+		preVer := make(map[uint64]bool, len(shares))
 		for _, s := range shares {
 			proof, perr := dkg.ParseDLEQProof(s.Proof)
 			if perr != nil {
 				continue // unproven share: RecoverVerified would drop it anyway
+			}
+			if s.Verified {
+				preVer[s.Index] = true
 			}
 			partials = append(partials, dkg.VerifiedShare{
 				Share: &threshold.DecryptShare{Index: s.Index, D: s.D}, Proof: proof,
@@ -608,7 +615,7 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 		// falls back to SharePubKey inside RecoverVerifiedWithKeys, keeping the result identical.
 		shared, err = dkg.RecoverVerifiedWithKeys(commitments, e.A, need, partials, func(index uint64) []byte {
 			return k.getShareKeyCache(ctx, e.Epoch, index)
-		})
+		}, func(index uint64) bool { return preVer[index] })
 		if errors.Is(err, dkg.ErrInsufficientVerified) {
 			// CYCLE-7 (belt-and-suspenders, fix #3): fewer than `need` partials survived DLEQ
 			// verification — the SAME healable condition as a raw share shortfall, not a
