@@ -177,7 +177,7 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 	if err := c.k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := decryptedPlaintext(b12); ok {
+	if _, ok := decryptedLen(b12); ok {
 		t.Fatal("chaff must not enable decryption (verified < t)")
 	}
 	if hasEvent(b12, "encmempool_decrypt_failed") {
@@ -202,8 +202,8 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 	if err := c.k.BeginBlock(b13); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := decryptedPlaintext(b13)
-	if !ok || string(got) != string(plain) {
+	got, ok := decryptedLen(b13)
+	if !ok || got != len(plain) {
 		t.Fatalf("late honest share within grace must HEAL+decrypt; ok=%v", ok)
 	}
 	t.Log("CLOSED: a 25pct-stake minority's chaff is rejected at ingest; the short ciphertext deferred and healed from the late honest share")
@@ -351,8 +351,8 @@ func TestC7_UnverifiedShareBypassingIngest_DefersNotDrops(t *testing.T) {
 	if err := c.k.BeginBlock(b23); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := decryptedPlaintext(b23)
-	if !ok || string(got) != string(plain) {
+	got, ok := decryptedLen(b23)
+	if !ok || got != len(plain) {
 		t.Fatalf("late honest share within grace must HEAL+decrypt even with stale chaff in state; ok=%v", ok)
 	}
 	t.Log("CLOSED: even chaff that bypasses ingest only DEFERS the ciphertext (fix #3); it healed from the late honest share")

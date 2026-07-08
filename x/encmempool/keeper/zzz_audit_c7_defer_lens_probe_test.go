@@ -162,7 +162,7 @@ func TestAudit_C7_MalformedBody_HardDropsNotMasked(t *testing.T) {
 	if err := c.k.BeginBlock(b22); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := decryptedPlaintext(b22); ok {
+	if _, ok := decryptedLen(b22); ok {
 		t.Fatal("a corrupted body must not decrypt")
 	}
 	if !hasEvent(b22, "encmempool_decrypt_failed") {

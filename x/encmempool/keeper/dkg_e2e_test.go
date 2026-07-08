@@ -210,12 +210,12 @@ func TestOnChainDKG_FinalizeAndDecrypt(t *testing.T) {
 	if err := k.BeginBlock(bctx); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := decryptedPlaintext(bctx)
+	got, ok := decryptedLen(bctx)
 	if !ok {
 		t.Fatal("no encmempool_decrypted event — DKG decrypt path failed")
 	}
-	if !bytes.Equal(got, plain) {
-		t.Fatalf("decrypted plaintext mismatch:\n got %q\nwant %q", got, plain)
+	if got != len(plain) {
+		t.Fatalf("decrypted plaintext length mismatch: got %d want %d", got, len(plain))
 	}
 }
 

@@ -6,7 +6,6 @@
 package keeper_test
 
 import (
-	"bytes"
 	"testing"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -58,7 +57,7 @@ func TestDeferral_HealWithinGrace(t *testing.T) {
 	if err := k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := decryptedPlaintext(b12); ok {
+	if _, ok := decryptedLen(b12); ok {
 		t.Fatal("must NOT decrypt with < t shares")
 	}
 	if !hasEvent(b12, "encmempool_decrypt_missed") {
@@ -76,12 +75,12 @@ func TestDeferral_HealWithinGrace(t *testing.T) {
 	if err := k.BeginBlock(b20); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := decryptedPlaintext(b20)
+	got, ok := decryptedLen(b20)
 	if !ok {
 		t.Fatal("HEAL FAILED: late share within grace must decrypt the deferred ciphertext")
 	}
-	if !bytes.Equal(got, plain) {
-		t.Fatalf("healed plaintext mismatch: got %q want %q", got, plain)
+	if got != len(plain) {
+		t.Fatalf("healed plaintext length mismatch: got %d want %d", got, len(plain))
 	}
 	if countEncTx(k, b20) != 0 || k.GetGlobalEncCount(b20) != 0 {
 		t.Fatal("healed ciphertext must leave state with all ref-counts released")

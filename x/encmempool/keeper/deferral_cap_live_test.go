@@ -6,8 +6,6 @@
 package keeper_test
 
 import (
-	"bytes"
-	"encoding/hex"
 	"strconv"
 	"testing"
 
@@ -20,16 +18,6 @@ import (
 
 // u64s formats a uint64 as a decimal string (matching the module's seq event attributes).
 func u64s(v uint64) string { return strconv.FormatUint(v, 10) }
-
-// mustHex decodes a hex string or fails the test.
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("bad hex %q: %v", s, err)
-	}
-	return b
-}
 
 // ============================================================================
 // CYCLE-6 (exhaustive re-audit) — item (a): the 128-entry deferral cap driven
@@ -333,22 +321,19 @@ func TestCycle6_DeferralCap_HonestHealsUnderAttackerFlood(t *testing.T) {
 	if err := k.BeginBlock(b13); err != nil {
 		t.Fatal(err)
 	}
-	got := map[string][]byte{}
+	// P0 (review #1): the plaintext is never emitted, so assert each honest ciphertext DECRYPTED
+	// (its encmempool_decrypted event fired for that seq), not its content.
+	got := map[string]bool{}
 	for _, ev := range b13.EventManager().Events() {
 		if ev.Type != "encmempool_decrypted" {
 			continue
 		}
 		seq, _ := attr(ev, "seq")
-		ph, _ := attr(ev, "plaintext_hex")
-		got[seq] = mustHex(t, ph)
+		got[seq] = true
 	}
 	for _, h := range honest {
-		out, ok := got[u64s(h.seq)]
-		if !ok {
+		if !got[u64s(h.seq)] {
 			t.Fatalf("liveness-under-flood broken: honest ciphertext seq %d did not decrypt", h.seq)
-		}
-		if !bytes.Equal(out, h.plain) {
-			t.Fatalf("honest seq %d decrypted to the wrong plaintext", h.seq)
 		}
 	}
 	// The attacker's shortfalls never decrypt.

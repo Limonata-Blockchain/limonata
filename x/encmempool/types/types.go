@@ -15,11 +15,17 @@ type Params struct {
 
 	// --- threshold encryption (OPT-IN; OFF by default so the binary is inert
 	// until governance activates it — the same safety pattern as x/vpcap) ---
-	EncEnabled   bool     `json:"enc_enabled"`   // master switch for the encrypted path
-	ThresholdPub []byte   `json:"threshold_pub"` // compressed threshold public key Y = x*G (LEGACY trusted-setup path)
-	Threshold    uint32   `json:"threshold"`     // t: decryption shares required (LEGACY path)
-	Keypers      []string `json:"keypers"`       // authorized keyper addrs (bech32); share index = position+1 (LEGACY path)
-	DecryptDelay uint64   `json:"decrypt_delay"` // blocks between submit and decrypt-execute
+	EncEnabled bool `json:"enc_enabled"` // master switch for the encrypted path
+	// EncExecEnabled turns on decrypt->EXECUTE re-injection of the decrypted EVM tx (the anti-MEV
+	// payoff). OFF by default: while off, a matured ciphertext is decrypted and CONSUMED but NEVER
+	// executed and its plaintext is NEVER emitted (review #1: emitting plaintext is the front-run
+	// leak). Turning it on requires the re-injection pipeline (see DESIGN_EVM_REINJECTION.md) and is
+	// audit-gated. Independent of EncEnabled so the decrypt path can run inert during bring-up.
+	EncExecEnabled bool     `json:"enc_exec_enabled"`
+	ThresholdPub   []byte   `json:"threshold_pub"` // compressed threshold public key Y = x*G (LEGACY trusted-setup path)
+	Threshold      uint32   `json:"threshold"`     // t: decryption shares required (LEGACY path)
+	Keypers        []string `json:"keypers"`       // authorized keyper addrs (bech32); share index = position+1 (LEGACY path)
+	DecryptDelay   uint64   `json:"decrypt_delay"` // blocks between submit and decrypt-execute
 
 	// --- ADMISSION CONTROL: bound the in-flight EncTx state a flooder can create.
 	// A SubmitEncrypted whose acceptance would exceed either ceiling is REJECTED at

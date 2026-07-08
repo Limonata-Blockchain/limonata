@@ -1,8 +1,7 @@
 package keeper_test
 
 import (
-	"bytes"
-	"encoding/hex"
+	"strconv"
 	"testing"
 
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
@@ -82,13 +81,15 @@ func TestEncryptedMempool_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// the chain must have decrypted the body and emitted the exact plaintext
-	got, ok := decryptedPlaintext(bctx)
+	// the chain must have decrypted the body. P0 (review #1): the plaintext is NEVER emitted (that
+	// is the front-run leak), so we assert decryption happened and matches the plaintext SIZE;
+	// byte-exact decryption correctness is covered by the threshold-package tests.
+	n, ok := decryptedLen(bctx)
 	if !ok {
 		t.Fatal("no encmempool_decrypted event — BeginBlock did not decrypt")
 	}
-	if !bytes.Equal(got, plain) {
-		t.Fatalf("decrypted plaintext mismatch:\n got %q\nwant %q", got, plain)
+	if n != len(plain) {
+		t.Fatalf("decrypted length mismatch: got %d want %d", n, len(plain))
 	}
 }
 
@@ -110,7 +111,7 @@ func TestEncryptedMempool_InsufficientSharesNotDecrypted(t *testing.T) {
 	bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	_ = k.BeginBlock(bctx)
 
-	if _, ok := decryptedPlaintext(bctx); ok {
+	if _, ok := decryptedLen(bctx); ok {
 		t.Fatal("SECURITY FAILURE: decrypted with < t shares")
 	}
 	if !hasEvent(bctx, "encmempool_decrypt_missed") {
@@ -133,26 +134,29 @@ func TestEncryptedMempool_DisabledIsInert(t *testing.T) {
 	}
 	bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	_ = k.BeginBlock(bctx)
-	if _, ok := decryptedPlaintext(bctx); ok {
+	if _, ok := decryptedLen(bctx); ok {
 		t.Fatal("disabled module must not decrypt")
 	}
 }
 
-func decryptedPlaintext(ctx sdk.Context) ([]byte, bool) {
+// decryptedLen returns the plaintext_len of the encmempool_decrypted event, and whether the event
+// fired. P0 (review #1): the module decrypts but NEVER emits the plaintext, so tests assert that
+// decryption happened (and its size), not the content.
+func decryptedLen(ctx sdk.Context) (int, bool) {
 	for _, ev := range ctx.EventManager().Events() {
 		if ev.Type != "encmempool_decrypted" {
 			continue
 		}
 		for _, a := range ev.Attributes {
-			if a.Key == "plaintext_hex" {
-				b, err := hex.DecodeString(a.Value)
+			if a.Key == "plaintext_len" {
+				n, err := strconv.Atoi(a.Value)
 				if err == nil {
-					return b, true
+					return n, true
 				}
 			}
 		}
 	}
-	return nil, false
+	return 0, false
 }
 
 func hasEvent(ctx sdk.Context, typ string) bool {

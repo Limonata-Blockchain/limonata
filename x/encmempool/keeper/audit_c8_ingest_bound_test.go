@@ -311,7 +311,7 @@ func TestC8_BoundPreservesCycle7Fix_NoHonestStarve(t *testing.T) {
 	if err := c.k.BeginBlock(b13); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := decryptedPlaintext(b13); !ok || string(got) != string(plain) {
+	if got, ok := decryptedLen(b13); !ok || got != len(plain) {
 		t.Fatalf("late honest share within grace must HEAL+decrypt under the cycle-8 bound; ok=%v", ok)
 	}
 	t.Log("CLOSED: the cycle-8 verify bound stores all honest shares, rejects chaff, defers the short ciphertext, and heals — cycle-7 fix preserved")

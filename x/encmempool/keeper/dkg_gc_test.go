@@ -215,11 +215,11 @@ func TestOnChainDKG_InFlightCiphertextSurvivesRekey(t *testing.T) {
 	if err := k.BeginBlock(bctx); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := decryptedPlaintext(bctx)
+	got, ok := decryptedLen(bctx)
 	if !ok {
 		t.Fatal("IN-FLIGHT SAFETY: ciphertext stamped to a superseded epoch failed to decrypt")
 	}
-	if string(got) != string(plain) {
+	if got != len(plain) {
 		t.Fatalf("decrypted plaintext mismatch:\n got %q\nwant %q", got, plain)
 	}
 	// Drained: epoch 1 is now reclaimed (matured ciphertext dropped its last ref).

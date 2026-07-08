@@ -366,7 +366,7 @@ func TestReg_HB_MaturedShortfallDefersThenHeals_NeverSilent(t *testing.T) {
 	if err := k.BeginBlock(b14); err != nil {
 		t.Fatal(err)
 	}
-	if pt, ok := decryptedPlaintext(b14); !ok || string(pt) != "late shares must still decrypt" {
+	if pt, ok := decryptedLen(b14); !ok || pt != len("late shares must still decrypt") {
 		t.Fatalf("deferral must HEAL: late-share ciphertext not decrypted (got %q, ok=%v)", pt, ok)
 	}
 	if _, ok := k.GetEncTx(b14, eHeal.DecryptHeight, eHeal.Seq); ok {

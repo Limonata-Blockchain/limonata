@@ -201,7 +201,7 @@ func TestUpdateParams_DisableDrainsInFlight_NoStrand(t *testing.T) {
 	if err := k.BeginBlock(bctx); err != nil {
 		t.Fatalf("BeginBlock must not error on a disabled module: %v", err)
 	}
-	if _, ok := decryptedPlaintext(bctx); ok {
+	if _, ok := decryptedLen(bctx); ok {
 		t.Fatal("a disabled module must not decrypt")
 	}
 	if !hasEvent(bctx, "encmempool_enc_drained_disabled") {

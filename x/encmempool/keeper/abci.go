@@ -1,7 +1,6 @@
 package keeper
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -357,13 +356,24 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 			default:
 				plaintext, derr := threshold.Decrypt(shared, &threshold.Ciphertext{A: e.A, Nonce: e.Nonce, Body: e.Body})
 				if derr == nil {
+					// CRITICAL (review #1): NEVER emit the plaintext. A decryption-share reveal that
+					// publishes the plaintext lets a searcher read it and front-run - the exact anti-MEV
+					// break this module exists to prevent. The plaintext is either EXECUTED in the EVM
+					// (P2, when EncExecEnabled + the re-injection pipeline land) or, until then, consumed
+					// silently. We record only that decryption succeeded (length, never content) so the
+					// DKG machinery stays observable.
+					//
+					// TODO(P2, DESIGN_EVM_REINJECTION.md): when p.EncExecEnabled, decode `plaintext` as an
+					// RLP EVM tx and run it through the mini-ante + EVMKeeper.ApplyTransaction pipeline in
+					// this deterministic `order`, before this block's normal txs.
 					ctx.EventManager().EmitEvent(sdk.NewEvent(
 						"encmempool_decrypted",
 						sdk.NewAttribute("submitter", e.Submitter),
 						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
 						sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
 						sdk.NewAttribute("execution_order", strconv.FormatUint(order, 10)),
-						sdk.NewAttribute("plaintext_hex", hex.EncodeToString(plaintext)),
+						sdk.NewAttribute("plaintext_len", strconv.Itoa(len(plaintext))),
+						sdk.NewAttribute("executed", "false"),
 					))
 					k.resetDecryptStrandStreak(ctx, e.Epoch) // MED-2: this epoch decrypts -> clear its strand streak
 					order++

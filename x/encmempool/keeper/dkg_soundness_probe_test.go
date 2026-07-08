@@ -332,8 +332,8 @@ func TestRegression_MalformedEncShareA_LivenessPreserved(t *testing.T) {
 	if err := k.BeginBlock(bctx); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := decryptedPlaintext(bctx)
-	if !ok || string(got) != string(plain) {
+	got, ok := decryptedLen(bctx)
+	if !ok || got != len(plain) {
 		t.Fatalf("expected clean decryption of %q, got ok=%v plain=%q", plain, ok, got)
 	}
 	t.Log("FIXED: malformed-A dealer rejected, QUAL clean, decryption succeeds — keyless-liveness DoS gone")
