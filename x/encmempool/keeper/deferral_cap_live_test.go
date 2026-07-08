@@ -90,7 +90,7 @@ func TestCycle6_DeferralCap_DkgEpoch_H2SafeAndFairUnderFlood(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 1_000_000,
-		EncEnabled: true, DkgEnabled: true, DecryptDelay: 2, // submit@10 -> mature@12
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DecryptDelay: 2, // submit@10 -> mature@12
 		MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0, // admission off: inject the worst case
 	}
 	if err := k.SetParams(ctx, p); err != nil {

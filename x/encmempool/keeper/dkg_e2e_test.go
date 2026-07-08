@@ -67,7 +67,7 @@ func TestOnChainDKG_FinalizeAndDecrypt(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, DecryptDelay: 2,
+		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, EncExecEnabled: true, DecryptDelay: 2,
 		DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr,
 		DkgMembers: declared,
 	}

@@ -35,7 +35,7 @@ func TestOnChainDKG_RerunOnMemberChange(t *testing.T) {
 	A, B, C, D := newMember("op1", "a"), newMember("op2", "b"), newMember("op3", "c"), newMember("op4", "d")
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 2,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 2,
 		DkgThreshold: 2, DkgMembers: declaredFrom([]member{A, B, C}),
 	}
 	_ = k.SetParams(ctx, p)
@@ -97,7 +97,7 @@ func TestOnChainDKG_ComplaintDisqualifiesCheater(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 4,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 4,
 		DkgThreshold: thr, DkgMembers: declaredFrom(members),
 	}
 	_ = k.SetParams(ctx, p)

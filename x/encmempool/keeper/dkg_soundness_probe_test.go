@@ -38,7 +38,7 @@ func TestRegression_MalformedEncShareA_RejectedAtIngress(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 4,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 4,
 		DkgThreshold: thr, DkgMembers: declaredFrom(members),
 	}
 	_ = k.SetParams(ctx, p)
@@ -136,7 +136,7 @@ func TestRegression_MalformedEncShareA_JustifyDisqualifiable(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 4,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 4,
 		DkgThreshold: thr, DkgMembers: declaredFrom(members),
 	}
 	_ = k.SetParams(ctx, p)
@@ -223,7 +223,7 @@ func TestRegression_MalformedEncShareA_LivenessPreserved(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 2,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DkgDealWindow: 2, DkgComplaintWindow: 2,
 		DecryptDelay: 2, DkgThreshold: thr, DkgMembers: declaredFrom(members),
 	}
 	_ = k.SetParams(ctx, p)

@@ -185,9 +185,24 @@ func TestReinjection(t *testing.T) {
 		pub, shares, _ := threshold.Setup(3, 2)
 		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, false))) // exec OFF
 		sender, submitter, mkTx, _ := fundSender(ctx)
+		rlp := mkTx(0, big.NewInt(1000))
 
-		e := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(0, big.NewInt(1000)), submitter)
+		// round-10 #4: the permissionless message path REFUSES a submit while exec is off (no silent loss).
+		ct, pok, err := dkg.EncryptWithPoK(pub, rlp, ctx.ChainID(), submitter)
+		require.NoError(t, err)
+		ms := encmempoolkeeper.NewMsgServerImpl(app.EncMempoolKeeper)
+		_, err = ms.SubmitEncrypted(ctx, &encmempooltypes.MsgSubmitEncrypted{Submitter: submitter, A: ct.A, Nonce: ct.Nonce, Body: ct.Body, Pok: pok.Marshal()})
+		require.Error(t, err, "SubmitEncrypted must be refused while enc_exec_enabled is false")
 
+		// The keeper decrypt path (inert bring-up) still consumes WITHOUT executing. Submit directly.
+		e := app.EncMempoolKeeper.SubmitEncTx(ctx, submitter, 10, 2, ct.A, ct.Nonce, ct.Body, 0)
+		for _, i := range []int{0, 2} {
+			ds, derr := threshold.ComputeShare(shares[i], ct)
+			require.NoError(t, derr)
+			require.NoError(t, app.EncMempoolKeeper.SetEncShare(ctx, encmempooltypes.EncShare{
+				Keyper: keypers[i], DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: ds.Index, D: ds.D,
+			}))
+		}
 		bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 		require.NoError(t, app.EncMempoolKeeper.BeginBlock(bctx))
 
@@ -261,5 +276,39 @@ func TestReinjection(t *testing.T) {
 		require.Equal(t, "gas_too_large", tag)
 		_, stillThere := app.EncMempoolKeeper.GetEncTx(bctx, e.DecryptHeight, e.Seq)
 		require.False(t, stillThere, "the ciphertext must be consumed, not stranded")
+	})
+
+	// (7) round-10 #5: cumulative exec gas must NOT overshoot the ceiling. With ceiling 25000
+	// (MaxGas 100000), tx0 (21000) executes and tx1 (21000) fits the ceiling but not the remaining
+	// 4000 -> it is DEFERRED (kept in state, NOT consumed, NOT executed), then executes next block on
+	// a fresh budget. So cumulative <= ceiling AND no user tx is lost.
+	t.Run("gas_deferred_no_overshoot_no_loss", func(t *testing.T) {
+		ctx := app.NewContext(false).WithBlockHeight(10).WithChainID(c.ChainID).
+			WithConsensusParams(cmtproto.ConsensusParams{Block: &cmtproto.BlockParams{MaxGas: 100000}})
+		pub, shares, err := threshold.Setup(3, 2)
+		require.NoError(t, err)
+		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
+		sender, submitter, mkTx, _ := fundSender(ctx)
+
+		e0 := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(0, big.NewInt(1)), submitter)
+		e1 := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(1, big.NewInt(1)), submitter)
+
+		bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
+		require.NoError(t, app.EncMempoolKeeper.BeginBlock(bctx))
+
+		// only tx0 executed (nonce 0->1); tx1 deferred, still in state.
+		require.Equal(t, uint64(1), app.EVMKeeper.GetNonce(bctx, sender), "only the first tx fits the ceiling this block")
+		_, gone0 := app.EncMempoolKeeper.GetEncTx(bctx, e0.DecryptHeight, e0.Seq)
+		require.False(t, gone0, "tx0 executed -> consumed")
+		_, kept1 := app.EncMempoolKeeper.GetEncTx(bctx, e1.DecryptHeight, e1.Seq)
+		require.True(t, kept1, "tx1 must be DEFERRED (kept in state), not consumed or overshooting the ceiling")
+
+		// next block: fresh budget -> tx1 executes, no loss.
+		b13 := ctx.WithBlockHeight(13).WithEventManager(sdk.NewEventManager()).
+			WithConsensusParams(cmtproto.ConsensusParams{Block: &cmtproto.BlockParams{MaxGas: 100000}})
+		require.NoError(t, app.EncMempoolKeeper.BeginBlock(b13))
+		require.Equal(t, uint64(2), app.EVMKeeper.GetNonce(b13, sender), "deferred tx1 executes on the next block")
+		_, gone1 := app.EncMempoolKeeper.GetEncTx(b13, e1.DecryptHeight, e1.Seq)
+		require.False(t, gone1, "tx1 consumed after it executes")
 	})
 }

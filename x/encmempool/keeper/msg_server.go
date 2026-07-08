@@ -171,6 +171,15 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if !p.EncEnabled {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
 	}
+	// round-10 #4 (fail-closed against silent user-tx loss): while EncExecEnabled is off, a matured
+	// ciphertext is decrypted and CONSUMED but NEVER executed - so a user's encrypted tx would be
+	// silently dropped (and its shares are public enough for off-chain reconstruction). Refuse USER
+	// submissions in that mode. The keeper decrypt path can still run inert during bring-up via direct
+	// SubmitEncTx (tests); only this permissionless message path is gated.
+	if !p.EncExecEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
+			"encrypted submissions are disabled while enc_exec_enabled is false: a matured ciphertext would be decrypted and consumed WITHOUT executing your transaction")
+	}
 	if len(msg.A) == 0 || len(msg.Body) == 0 {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing ciphertext (a/body)")
 	}

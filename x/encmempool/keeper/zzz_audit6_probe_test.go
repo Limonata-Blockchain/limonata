@@ -26,7 +26,7 @@ import (
 func floodParams() types.Params {
 	return types.Params{
 		RevealDelay: 1, MaxRevealWindow: 1_000_000,
-		EncEnabled: true, Threshold: 2, // legacy path; 0 shares posted => errNotEnoughShares
+		EncEnabled: true, EncExecEnabled: true, Threshold: 2, // legacy path; 0 shares posted => errNotEnoughShares
 		DecryptDelay: 2, MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0,
 	}
 }

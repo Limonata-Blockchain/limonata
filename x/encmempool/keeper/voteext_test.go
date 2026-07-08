@@ -68,7 +68,7 @@ func newKeeperSK(t *testing.T, height int64, sk types.StakingKeeper) (keeper.Kee
 
 func transparentParams(thr uint32, maxMembers uint32) types.Params {
 	return types.Params{
-		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, DecryptDelay: 2,
+		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, EncExecEnabled: true, DecryptDelay: 2,
 		MaxInFlightEncTx: 32768, // finding 4: a live enc path requires a finite global admission cap
 		DkgEnabled:       true, DkgTransparent: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMaxMembers: maxMembers,

@@ -34,7 +34,7 @@ func TestSubmitEncrypted_AdmissionCeilings(t *testing.T) {
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 1_000_000,
-		EncEnabled: true, Threshold: 1, DecryptDelay: 100, // long delay: nothing matures during the test
+		EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 100, // long delay: nothing matures during the test
 		MaxInFlightEncTx: 20, MaxInFlightPerSubmitter: 5,
 	}
 	if err := k.SetParams(ctx, p); err != nil {
@@ -96,7 +96,7 @@ func TestSubmitEncrypted_PerBlockRate(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
 	ms := keeper.NewMsgServerImpl(k)
 	if err := k.SetParams(ctx, types.Params{
-		EncEnabled: true, Threshold: 1, DecryptDelay: 100,
+		EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 100,
 		MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0, // isolate the RATE dimension
 	}); err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestCeilingDropReleasesEpochRefcount_HIGH2Safe(t *testing.T) {
 	const n = 200 // >> ceiling, so the drop path MUST fire
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DecryptDelay: 2,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DecryptDelay: 2,
 		DkgThreshold: 1, MaxInFlightEncTx: ceiling, MaxInFlightPerSubmitter: 0,
 	}
 	if err := k.SetParams(ctx, p); err != nil {
@@ -206,7 +206,7 @@ func TestCeilingDropReleasesEpochRefcount_HIGH2Safe(t *testing.T) {
 // the whole backlog into a slice every block.
 func TestCollectMaturedUpTo_BoundedWindow(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
-	if err := k.SetParams(ctx, types.Params{RevealDelay: 1, MaxRevealWindow: 1_000_000, EncEnabled: true, Threshold: 1, DecryptDelay: 2}); err != nil {
+	if err := k.SetParams(ctx, types.Params{RevealDelay: 1, MaxRevealWindow: 1_000_000, EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 2}); err != nil {
 		t.Fatal(err)
 	}
 	a := validCtA()

@@ -55,7 +55,7 @@ func dummyEncShares(members []member) []*types.DkgEncShare {
 func openEpoch1(t *testing.T, k keeper.Keeper, ctx sdk.Context, members []member, thr uint32) {
 	t.Helper()
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMembers: declaredFrom(members),
 		DkgRetryBackoff: 2, DkgMaxAttempts: 8,
 	}

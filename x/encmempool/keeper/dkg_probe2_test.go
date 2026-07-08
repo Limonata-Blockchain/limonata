@@ -112,7 +112,7 @@ func TestProbe_FullStateDeterminism(t *testing.T) {
 		k, ctx := newKeeper(t, 1)
 		ms := keeper.NewMsgServerImpl(k)
 		p := types.Params{
-			EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+			EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 			DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMembers: declaredFrom(members),
 			DkgRetryBackoff: 2, DkgMaxAttempts: 8,
 		}

@@ -320,6 +320,7 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		// PASS 2). A recovered panic leaves it true, so a malformed entry is still shed and can
 		// never wedge the chain into a crash loop.
 		release := true
+		deferExec := false // round-10 #5: set when a decrypted tx doesn't fit the remaining exec slice
 		// CONSENSUS SAFETY: BeginBlock must never panic on data-dependent input, or a single
 		// malformed EncTx (e.g. a permissionlessly-submitted ciphertext with an out-of-spec
 		// nonce) would halt the whole chain. Process each ciphertext inside a recover guard;
@@ -405,7 +406,15 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 				childCtx = childCtx.
 					WithGasMeter(storetypes.NewInfiniteGasMeter()).
 					WithTxIndex(reinjectTxIndexBase + int(order))
-				res := k.executeDecryptedTx(childCtx, plaintext, execCeiling)
+				res := k.executeDecryptedTx(childCtx, plaintext, execCeiling, execCeiling-execGasUsed)
+				if res.tag == "gas_deferred" {
+					// round-10 #5: doesn't fit this block's remaining slice. KEEP it in state (no
+					// release) and stop processing further matured cts this block; it retries next
+					// block on a full budget. No overshoot, no user-tx loss.
+					release = false
+					deferExec = true
+					return
+				}
 				if res.executed {
 					commit()
 					execGasUsed += res.gasUsed
@@ -432,6 +441,9 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		// always goes through releaseEncTx — never a silent strand or leak.
 		if release {
 			k.releaseEncTx(ctx, e)
+		}
+		if deferExec {
+			break // round-10 #5: exec slice full for this block; the rest stay in state (ref-counts intact)
 		}
 	}
 

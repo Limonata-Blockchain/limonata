@@ -97,7 +97,7 @@ func TestDeferral_DropAtGraceEnd_H2Safe(t *testing.T) {
 	// EncEnabled + DkgEnabled so decryptMatured runs; DecryptDelay=2 so submit@10 matures@12.
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 1_000_000,
-		EncEnabled: true, DkgEnabled: true, DecryptDelay: 2,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DecryptDelay: 2,
 	}
 	if err := k.SetParams(ctx, p); err != nil {
 		t.Fatal(err)
@@ -178,7 +178,7 @@ func TestDeferral_CapBoundsBacklogBeyondScanWindow(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 1_000_000,
-		EncEnabled: true, Threshold: 1, DecryptDelay: 2, // legacy path; 0 shares => all short
+		EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 2, // legacy path; 0 shares => all short
 		MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0, // admission disabled: inject worst case
 	}
 	if err := k.SetParams(ctx, p); err != nil {

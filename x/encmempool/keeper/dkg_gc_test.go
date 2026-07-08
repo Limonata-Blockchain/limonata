@@ -47,7 +47,7 @@ func TestOnChainDKG_ActiveEpochBoundedUnderRekeys(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: thr, DkgMinRekeyGap: 0, // dampener OFF: isolate the GC path
 		DkgMembers: declaredFrom(setA),
@@ -127,7 +127,7 @@ func TestOnChainDKG_InFlightCiphertextSurvivesRekey(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DecryptDelay: 100,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DecryptDelay: 100,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: thr, DkgMinRekeyGap: 0,
 		DkgMembers: declaredFrom([]member{A, B, C}),
@@ -240,7 +240,7 @@ func TestOnChainDKG_MemberChangeFlapDampened(t *testing.T) {
 
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 1, DkgComplaintWindow: 1, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: 2, DkgMinRekeyGap: gap,
 		DkgMembers: declaredFrom([]member{A, B, C}),
@@ -322,7 +322,7 @@ func TestDecryptFloodBoundedAndFair(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 1_000_000,
-		EncEnabled: true, Threshold: 1, DecryptDelay: 2, // legacy path; 0 shares => decrypt_missed
+		EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 2, // legacy path; 0 shares => decrypt_missed
 		// Admission DISABLED so we can inject the flood directly (models the worst case the
 		// drain path must survive); fairness lives entirely in decryptMatured, independent of it.
 		MaxInFlightEncTx: 0, MaxInFlightPerSubmitter: 0,

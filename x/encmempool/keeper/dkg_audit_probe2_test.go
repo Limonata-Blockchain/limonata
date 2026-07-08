@@ -26,7 +26,7 @@ func TestProbe_DecryptPanicSafety(t *testing.T) {
 	// legacy path: EncEnabled + Threshold>0, no DKG. epoch 0 stamps (no ref-count).
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 100,
-		EncEnabled: true, Threshold: 2, DecryptDelay: 1,
+		EncEnabled: true, EncExecEnabled: true, Threshold: 2, DecryptDelay: 1,
 		Keypers: []string{"kp1", "kp2", "kp3"},
 	}
 	if err := k.SetParams(ctx, p); err != nil {
@@ -85,7 +85,7 @@ func TestProbe_DeferBacklogRescans(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
 	p := types.Params{
 		RevealDelay: 1, MaxRevealWindow: 100,
-		EncEnabled: true, Threshold: 1, DecryptDelay: 2,
+		EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 2,
 	}
 	if err := k.SetParams(ctx, p); err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestProbe_NeverFinalizingFlapBoundedRounds(t *testing.T) {
 	A, B, C, D := newMember("op1", "acc1"), newMember("op2", "acc2"), newMember("op3", "acc3"), newMember("op4", "acc4")
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 1, DkgComplaintWindow: 1, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: 2, DkgMinRekeyGap: 0, // dampener OFF
 		DkgMembers: declaredFrom([]member{A, B, C}),
@@ -164,7 +164,7 @@ func TestProbe_ExtremeHeightNoOverflow(t *testing.T) {
 	A, B, C := newMember("op1", "acc1"), newMember("op2", "acc2"), newMember("op3", "acc3")
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 9_000_000, DkgComplaintWindow: 9_000_000, DkgRetryBackoff: 9_000_000,
 		DkgMaxAttempts: 8, DkgThreshold: 2, DkgMinRekeyGap: 9_000_000,
 		DkgMembers: declaredFrom([]member{A, B, C}),

@@ -65,7 +65,11 @@ type decryptExecOutcome struct {
 //
 // v1 fork-safety: a tx whose top-level `To` is a registered precompile is REJECTED (precompiles call
 // other keepers and are the most likely source of context-sensitive behavior outside a normal tx).
-func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget uint64) decryptExecOutcome {
+// remainingBudget (round-9/10 #5) is this block's UNSPENT decrypt-exec gas. A tx that fits the
+// whole-block ceiling (gasBudget) but not the remaining slice is NOT rejected - it returns
+// tag "gas_deferred" so the caller keeps it in state and retries it next block on a full budget,
+// which bounds cumulative execution to <= the ceiling with no user-tx loss. 0 disables the check.
+func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget, remainingBudget uint64) decryptExecOutcome {
 	// 1. Decode the RLP Ethereum transaction.
 	tx := new(ethtypes.Transaction)
 	if err := tx.UnmarshalBinary(plaintext); err != nil {
@@ -84,6 +88,12 @@ func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget 
 	// can never execute, so reject it here (it is consumed, not deferred).
 	if gasBudget > 0 && tx.Gas() > gasBudget {
 		return decryptExecOutcome{tag: "gas_too_large", txHash: txHash}
+	}
+	// round-10 #5 (no cumulative overshoot): a tx that fits the whole-block ceiling but not this
+	// block's REMAINING slice is DEFERRED (kept in state, retried next block), not executed now -
+	// so cumulative decrypted-exec gas can never exceed the ceiling by ~one max-sized tx.
+	if remainingBudget > 0 && tx.Gas() > remainingBudget {
+		return decryptExecOutcome{tag: "gas_deferred", txHash: txHash}
 	}
 
 	// 2. Load the EVM config and recover the sender with the chain-rules signer (bad sig / wrong

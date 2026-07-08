@@ -33,7 +33,7 @@ func TestProbe_SettledChangeWithinGapIsDelayedNotBlocked(t *testing.T) {
 
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 1, DkgComplaintWindow: 1, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: 2, DkgMinRekeyGap: gap,
 		DkgMembers: declaredFrom([]member{A, B, C}),
@@ -101,7 +101,7 @@ func TestProbe_DampenerDoesNotFreezeFailedRetry(t *testing.T) {
 
 	k, ctx := newKeeper(t, 1)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 		DkgDealWindow: 1, DkgComplaintWindow: 1, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: 2, DkgMinRekeyGap: gap,
 		DkgMembers: declaredFrom([]member{A, B, C}),
@@ -179,7 +179,7 @@ func TestProbe_GCAndFlapDeterministicAcrossNodes(t *testing.T) {
 		k, ctx := newKeeper(t, 1)
 		ms := keeper.NewMsgServerImpl(k)
 		p := types.Params{
-			EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
+			EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1,
 			DkgDealWindow: 2, DkgComplaintWindow: 2, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 			DkgThreshold: 2, DkgMinRekeyGap: 3,
 			DkgMembers: declaredFrom(setA),

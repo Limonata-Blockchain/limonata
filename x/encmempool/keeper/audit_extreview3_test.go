@@ -76,7 +76,7 @@ func TestDkgTxHandlers_RejectedUnderTransparent(t *testing.T) {
 func TestSubmitEncrypted_BodyCap(t *testing.T) {
 	k, ctx := newKeeper(t, 10)
 	ms := keeper.NewMsgServerImpl(k)
-	if err := k.SetParams(ctx, types.Params{EncEnabled: true, Threshold: 1, DecryptDelay: 2}); err != nil {
+	if err := k.SetParams(ctx, types.Params{EncEnabled: true, EncExecEnabled: true, Threshold: 1, DecryptDelay: 2}); err != nil {
 		t.Fatal(err)
 	}
 	a := validCtA()

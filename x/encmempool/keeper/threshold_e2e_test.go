@@ -38,7 +38,10 @@ func newKeeperBank(t *testing.T, height int64, bk types.BankKeeper) (keeper.Keep
 func enableParams(pub []byte, t, delay uint64, keypers []string) types.Params {
 	return types.Params{
 		RevealDelay: 1, MaxRevealWindow: 100,
-		EncEnabled: true, ThresholdPub: pub, Threshold: uint32(t),
+		// EncExecEnabled=true so the msg-server SubmitEncrypted path is open (round-10 #4 gates it).
+		// In these keeper tests the evmKeeper is nil, so encExecEnabled() is still false and BeginBlock
+		// runs the inert decrypt-no-exec path - i.e. this flag opens submits without executing anything.
+		EncEnabled: true, EncExecEnabled: true, ThresholdPub: pub, Threshold: uint32(t),
 		Keypers: keypers, DecryptDelay: delay,
 	}
 }

@@ -35,7 +35,7 @@ func TestProbe_RealChainDrainsKeepPinnedEpochsBounded(t *testing.T) {
 	k, ctx := newKeeper(t, 1)
 	ms := keeper.NewMsgServerImpl(k)
 	p := types.Params{
-		EncEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DecryptDelay: decryptDelay,
+		EncEnabled: true, EncExecEnabled: true, DkgEnabled: true, DkgStartHeight: 1, DecryptDelay: decryptDelay,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgRetryBackoff: 1, DkgMaxAttempts: 8,
 		DkgThreshold: thr, DkgMinRekeyGap: 0, // dampener OFF: worst case for state growth
 		DkgMembers: declaredFrom(setA),
