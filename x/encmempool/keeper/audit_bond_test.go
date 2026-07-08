@@ -34,6 +34,14 @@ func (b *mockBank) SendCoinsFromModuleToAccount(_ context.Context, module string
 	return nil
 }
 
+func (b *mockBank) BurnCoins(_ context.Context, module string, amt sdk.Coins) error {
+	if !b.bal[module].IsAllGTE(amt) {
+		return fmt.Errorf("insufficient funds to burn")
+	}
+	b.bal[module] = b.bal[module].Sub(amt...) // destroyed (not credited anywhere)
+	return nil
+}
+
 // round-9 #1: SubmitEncrypted ESCROWS the bond from the submitter into the module account, and the
 // decrypt-time release REFUNDS it in full. An under-funded submitter is rejected with no state change.
 func TestSubmitBond_EscrowedThenRefundedOnDecrypt(t *testing.T) {
@@ -105,4 +113,47 @@ func TestSubmitBond_RejectedWhenUnderfunded(t *testing.T) {
 	require.Error(t, err, "an under-funded submitter must be rejected")
 	require.Equal(t, uint64(0), k.GetGlobalEncCount(ctx), "no EncTx may be stored when the bond escrow fails")
 	require.Equal(t, int64(50), bank.bal[sub].AmountOf("stake").Int64(), "no funds moved on a rejected submit")
+}
+
+// round-10 #1: a burn fraction makes the bond a REAL per-submit cost. With burn_bps=1000 (10%), a
+// 100 bond escrows 100, then on release BURNS 10 and refunds 90 - the submitter is out 10 no matter
+// how well funded, so a sybil swarm pays a real, non-refundable cost per ciphertext.
+func TestSubmitBond_PartialBurnOnRelease(t *testing.T) {
+	pub, shares, err := threshold.Setup(3, 2)
+	require.NoError(t, err)
+	bank := &mockBank{bal: map[string]sdk.Coins{}}
+	k, ctx := newKeeperBank(t, 10, bank)
+
+	p := enableParams(pub, 2, 2, []string{"kp1", "kp2", "kp3"})
+	p.EncSubmitBond = 100
+	p.EncSubmitBondDenom = "stake"
+	p.EncSubmitBondBurnBps = 1000 // 10% burned, 90% refundable
+	require.NoError(t, k.SetParams(ctx, p))
+
+	sub := sdk.AccAddress([]byte("burnsubmitteraddr123")).String()
+	bank.bal[sub] = sdk.NewCoins(sdk.NewInt64Coin("stake", 1000))
+	srv := keeper.NewMsgServerImpl(k)
+
+	ct, pok, err := dkg.EncryptWithPoK(pub, []byte("trade"), ctx.ChainID(), sub)
+	require.NoError(t, err)
+	resp, err := srv.SubmitEncrypted(ctx, &types.MsgSubmitEncrypted{Submitter: sub, A: ct.A, Nonce: ct.Nonce, Body: ct.Body, Pok: pok.Marshal()})
+	require.NoError(t, err)
+	require.Equal(t, int64(900), bank.bal[sub].AmountOf("stake").Int64(), "full 100 escrowed")
+	e, ok := k.GetEncTx(ctx, resp.DecryptHeight, resp.Seq)
+	require.True(t, ok)
+	require.Equal(t, uint64(10), e.BondBurn, "10%% of 100 stamped as the burn")
+
+	for _, i := range []int{0, 2} {
+		ds, derr := threshold.ComputeShare(shares[i], ct)
+		require.NoError(t, derr)
+		require.NoError(t, k.SetEncShare(ctx, types.EncShare{
+			Keyper: []string{"kp1", "kp2", "kp3"}[i], DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: ds.Index, D: ds.D,
+		}))
+	}
+	bctx := ctx.WithBlockHeight(int64(e.DecryptHeight)).WithEventManager(sdk.NewEventManager())
+	require.NoError(t, k.BeginBlock(bctx))
+
+	// 90 refunded, 10 burned (gone), module drained -> submitter is a real 10 out of pocket.
+	require.Equal(t, int64(990), bank.bal[sub].AmountOf("stake").Int64(), "90 refunded, 10 burned")
+	require.Equal(t, int64(0), bank.bal[types.ModuleName].AmountOf("stake").Int64(), "module drained (refund + burn)")
 }

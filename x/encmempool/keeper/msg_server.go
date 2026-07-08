@@ -280,7 +280,11 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	}
 	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body, epoch)
 	if bond > 0 && m.bankKeeper != nil {
-		m.stampBond(goCtx, e, bond, bondDenom) // record what was escrowed so the refund is exact
+		// round-10 #1: stamp the burn portion (a real, non-refundable per-submit cost) so release
+		// burns exactly this and refunds the rest, immune to a later param change. Computed via big.Int
+		// so a large (18-decimal) bond * bps cannot overflow uint64.
+		burn := sdkmath.NewIntFromUint64(bond).MulRaw(int64(p.EncSubmitBondBurnBps)).QuoRaw(10000).Uint64() //#nosec G115 -- burnBps <= 10000 (validated)
+		m.stampBond(goCtx, e, bond, bondDenom, burn)
 	}
 	ctx.EventManager().EmitEvent(sdk.NewEvent(
 		"encmempool_encrypted_submitted",

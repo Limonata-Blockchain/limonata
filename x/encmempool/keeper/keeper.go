@@ -195,20 +195,34 @@ func (k Keeper) refundBond(ctx sdk.Context, e types.EncTx) {
 	if e.Bond == 0 || k.bankKeeper == nil {
 		return
 	}
+	// round-10 #1: BURN the non-refundable fraction (a real anti-sybil cost), refund the rest. Both
+	// amounts were stamped at submit, and the module holds the full bond, so neither op can fail on
+	// funds. burn is clamped to bond as a belt (a stamped burn can never exceed the stamped bond).
+	burn := e.BondBurn
+	if burn > e.Bond {
+		burn = e.Bond
+	}
+	if burn > 0 {
+		_ = k.bankKeeper.BurnCoins(ctx, types.ModuleName, sdk.NewCoins(sdk.NewCoin(e.BondDenom, sdkmath.NewIntFromUint64(burn))))
+	}
+	refund := e.Bond - burn
+	if refund == 0 {
+		return
+	}
 	addr, err := sdk.AccAddressFromBech32(e.Submitter)
 	if err != nil {
 		return // submitter was bech32-validated at escrow, so this is unreachable; skip rather than panic
 	}
-	coins := sdk.NewCoins(sdk.NewCoin(e.BondDenom, sdkmath.NewIntFromUint64(e.Bond)))
-	_ = k.bankKeeper.SendCoinsFromModuleToAccount(ctx, types.ModuleName, addr, coins)
+	_ = k.bankKeeper.SendCoinsFromModuleToAccount(ctx, types.ModuleName, addr, sdk.NewCoins(sdk.NewCoin(e.BondDenom, sdkmath.NewIntFromUint64(refund))))
 }
 
-// stampBond records the escrowed bond onto an already-stored EncTx (round-9 #1). Called from
-// SubmitEncrypted right after SubmitEncTx, once the bond has been escrowed to the module account, so
-// releaseEncTx later refunds exactly this amount.
-func (k Keeper) stampBond(ctx context.Context, e types.EncTx, bond uint64, denom string) {
+// stampBond records the escrowed bond + its burn portion onto an already-stored EncTx (round-9/10
+// #1). Called from SubmitEncrypted right after SubmitEncTx, once the full bond has been escrowed to
+// the module account, so releaseEncTx later burns exactly `burn` and refunds the rest.
+func (k Keeper) stampBond(ctx context.Context, e types.EncTx, bond uint64, denom string, burn uint64) {
 	e.Bond = bond
 	e.BondDenom = denom
+	e.BondBurn = burn
 	_ = k.store(ctx).Set(encTxKey(e.DecryptHeight, e.Seq), mustJSON(e))
 }
 

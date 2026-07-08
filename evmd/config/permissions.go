@@ -88,10 +88,10 @@ var maccPerms = map[string][]string{
 	// to prove reclaimed bootstrap capital never returns to anyone. It never mints.
 	valgranttypes.ModuleName: {authtypes.Burner},
 
-	// Limonata encrypted mempool: holds the REFUNDABLE anti-sybil submit bonds in escrow while a
-	// ciphertext is in flight (round-9 #1). No perms - it only ever holds and returns escrowed
-	// user funds (never mints/burns); the bond is refunded in full when the ciphertext is released.
-	encmempooltypes.ModuleName: nil,
+	// Limonata encrypted mempool: escrows the anti-sybil submit bond while a ciphertext is in flight
+	// (round-9 #1). Burner so it can DESTROY the non-refundable burn fraction on release (round-10 #1);
+	// it never mints. The remainder of each bond is refunded to the submitter.
+	encmempooltypes.ModuleName: {authtypes.Burner},
 }
 
 // GetMaccPerms returns a copy of the module account permissions

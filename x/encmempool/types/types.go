@@ -48,6 +48,12 @@ type Params struct {
 	// escrowed is stamped onto each EncTx so a later param change never mis-refunds an in-flight one). ---
 	EncSubmitBond      uint64 `json:"enc_submit_bond,omitempty"`       // bond amount per submit (0 = no bond)
 	EncSubmitBondDenom string `json:"enc_submit_bond_denom,omitempty"` // denom of the bond (required when bond > 0)
+	// EncSubmitBondBurnBps is the fraction (basis points, 0..10000) of the bond that is BURNED on
+	// release rather than refunded (round-10 #1). A fully-refundable bond is only a capital-lockup
+	// bar; a burned fraction is a REAL per-submit cost that a funded sybil swarm cannot avoid. 0 =
+	// fully refundable (default). The burned amount is stamped on each EncTx so a param change never
+	// mis-burns an in-flight one.
+	EncSubmitBondBurnBps uint32 `json:"enc_submit_bond_burn_bps,omitempty"`
 
 	// MaxVerifyOpsPerBlock is the HARD per-block budget on first-time decryption-share DLEQ verifications
 	// (CRIT-2 K_max). It caps the O(t) EC verify work a single block performs REGARDLESS of the share
@@ -390,6 +396,9 @@ type EncTx struct {
 	// changed meanwhile. 0 = no bond was taken.
 	Bond      uint64 `json:"bond,omitempty"`
 	BondDenom string `json:"bond_denom,omitempty"`
+	// BondBurn is the portion of Bond that is BURNED on release (round-10 #1); the rest (Bond-BondBurn)
+	// is refunded. Stamped at submit so a param change never alters an in-flight ciphertext's split.
+	BondBurn uint64 `json:"bond_burn,omitempty"`
 }
 
 // EncShare is a keyper's threshold decryption share (x_i * A) for one EncTx.
@@ -590,6 +599,13 @@ func (p Params) Validate() error {
 		if err := sdk.ValidateDenom(p.EncSubmitBondDenom); err != nil {
 			return fmt.Errorf("enc_submit_bond_denom is required and must be a valid denom when enc_submit_bond > 0: %w", err)
 		}
+	}
+	// round-10 #1: the burn fraction is basis points (<= 100%). A burn with no bond is meaningless.
+	if p.EncSubmitBondBurnBps > 10000 {
+		return fmt.Errorf("enc_submit_bond_burn_bps (%d) must be <= 10000 (100%%)", p.EncSubmitBondBurnBps)
+	}
+	if p.EncSubmitBondBurnBps > 0 && p.EncSubmitBond == 0 {
+		return fmt.Errorf("enc_submit_bond_burn_bps requires a positive enc_submit_bond")
 	}
 	// When the DKG supplies the active key, the trusted-setup params.ThresholdPub/Threshold/
 	// Keypers are the epoch-0 fallback and need not be populated; the DKG member set was
