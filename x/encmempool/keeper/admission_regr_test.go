@@ -40,18 +40,17 @@ func TestSubmitEncrypted_AdmissionCeilings(t *testing.T) {
 	if err := k.SetParams(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	a := validCtA()
-	nonce := make([]byte, threshold.NonceSize)
-	body := []byte("x")
+	pub := throwawayThresholdPub(t)
 	// Spread submits across successive block heights so the STANDING-inventory ceilings under test
 	// (per-submitter, global) are exercised independently of the Fix-1 C3' per-BLOCK admission rate
 	// limit (which resets each block; tested separately in TestSubmitEncrypted_PerBlockRate). Nothing
 	// matures during the test (DecryptDelay 100), so inventory still accumulates across heights.
+	// Each submit is a fresh real ciphertext + submitter-bound PoK (SubmitEncrypted requires it).
 	height := int64(10)
 	submit := func(sub string) error {
 		height++
 		_, err := ms.SubmitEncrypted(ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager()),
-			&types.MsgSubmitEncrypted{Submitter: sub, A: a, Nonce: nonce, Body: body})
+			encWithPoK(t, pub, "x", sub))
 		return err
 	}
 
@@ -102,12 +101,10 @@ func TestSubmitEncrypted_PerBlockRate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	a := validCtA()
-	nonce := make([]byte, threshold.NonceSize)
-	body := []byte("x")
+	pub := throwawayThresholdPub(t)
 	submitAt := func(sub string, h int64) error {
 		_, err := ms.SubmitEncrypted(ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager()),
-			&types.MsgSubmitEncrypted{Submitter: sub, A: a, Nonce: nonce, Body: body})
+			encWithPoK(t, pub, "x", sub))
 		return err
 	}
 	for i := 0; i < 4; i++ { // 4 accepted in block 100

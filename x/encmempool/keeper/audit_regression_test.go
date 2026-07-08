@@ -121,10 +121,8 @@ func TestRegression_SubmitEncryptedRejectsBadNonce(t *testing.T) {
 			t.Fatalf("nonce len=%d: rejected but not for a nonce reason: %v", nlen, err)
 		}
 	}
-	// control: a genuine 12-byte nonce is accepted.
-	if _, err := srv.SubmitEncrypted(goCtx, &types.MsgSubmitEncrypted{
-		Submitter: "a", A: ct.A, Nonce: ct.Nonce, Body: ct.Body,
-	}); err != nil {
+	// control: a genuine 12-byte nonce is accepted (with a valid submitter-bound PoK).
+	if _, err := srv.SubmitEncrypted(goCtx, encWithPoK(t, pub, "control", "a")); err != nil {
 		t.Fatalf("valid 12-byte nonce must be accepted, got %v", err)
 	}
 }

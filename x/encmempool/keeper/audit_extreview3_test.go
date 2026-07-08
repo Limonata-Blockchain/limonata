@@ -87,9 +87,13 @@ func TestSubmitEncrypted_BodyCap(t *testing.T) {
 		&types.MsgSubmitEncrypted{Submitter: "u", A: a, Nonce: nonce, Body: over}); err == nil {
 		t.Fatal("a body over the cap must be rejected")
 	}
-	atCap := make([]byte, 16384) // == maxCiphertextBodyBytes
-	if _, err := ms.SubmitEncrypted(ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager()),
-		&types.MsgSubmitEncrypted{Submitter: "u", A: a, Nonce: nonce, Body: atCap}); err != nil {
+	// A body EXACTLY at the cap must be accepted. Build a real ciphertext whose GCM body is exactly
+	// maxCiphertextBodyBytes (plaintext + 16-byte tag) so it also carries a valid submitter PoK.
+	atCapMsg := encWithPoK(t, throwawayThresholdPub(t), string(make([]byte, 16384-16)), "u")
+	if len(atCapMsg.Body) != 16384 {
+		t.Fatalf("precondition: at-cap body should be 16384, got %d", len(atCapMsg.Body))
+	}
+	if _, err := ms.SubmitEncrypted(ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager()), atCapMsg); err != nil {
 		t.Fatalf("a body exactly at the cap must be accepted: %v", err)
 	}
 }

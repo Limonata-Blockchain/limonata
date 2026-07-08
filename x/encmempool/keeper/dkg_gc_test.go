@@ -142,12 +142,13 @@ func TestOnChainDKG_InFlightCiphertextSurvivesRekey(t *testing.T) {
 
 	// Submit a ciphertext encrypted to epoch 1's key with a FAR decrypt height (106).
 	plain := []byte("in-flight ciphertext must survive later rekeys and its key must not be GC'd early")
-	ct, err := threshold.Encrypt(ak1.Pub, plain)
+	ct, ctR, err := threshold.EncryptWithR(ak1.Pub, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp, err := ms.SubmitEncrypted(ctx.WithBlockHeight(6), &types.MsgSubmitEncrypted{
 		Submitter: "acc1", A: ct.A, Nonce: ct.Nonce, Body: ct.Body,
+		Pok: dkg.ProveEncKeyPoK(ctR, "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
 	})
 	if err != nil {
 		t.Fatalf("SubmitEncrypted: %v", err)

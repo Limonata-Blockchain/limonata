@@ -98,6 +98,10 @@ message MsgSubmitEncrypted {
   bytes a = 2;     // ciphertext component r*G (compressed)
   bytes nonce = 3; // AES-GCM nonce
   bytes body = 4;  // AES-256-GCM ciphertext
+  // pok is a Schnorr proof of knowledge of r (A = r*G) bound to the submitter + ciphertext.
+  // It makes A non-replayable: no second ciphertext can carry another party's A, closing the
+  // same-A decryption-secret-sharing break. 64 bytes (C||Z); see x/encmempool/dkg.EncKeyPoK.
+  bytes pok = 5;
 }
 
 message MsgSubmitEncryptedResponse {

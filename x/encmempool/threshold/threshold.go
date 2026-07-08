@@ -111,15 +111,23 @@ func Setup(n, t int) (pub []byte, shares []Share, err error) {
 
 // Encrypt encrypts msg to the threshold public key pub.
 func Encrypt(pub, msg []byte) (*Ciphertext, error) {
+	ct, _, err := EncryptWithR(pub, msg)
+	return ct, err
+}
+
+// EncryptWithR is Encrypt but also returns the ephemeral scalar r (A = r*G). The caller uses r to
+// build a submitter-bound proof of knowledge of A (dkg.ProveEncKeyPoK) - the binding that prevents
+// a same-A replay from ever entering the encrypted mempool. r is secret; discard it after proving.
+func EncryptWithR(pub, msg []byte) (*Ciphertext, *secp256k1.ModNScalar, error) {
 	Ypub, err := secp256k1.ParsePubKey(pub)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var Y secp256k1.JacobianPoint
 	Ypub.AsJacobian(&Y)
 	r, err := randScalar()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var A, shared secp256k1.JacobianPoint
 	secp256k1.ScalarBaseMultNonConst(r, &A)      // A = r*G
@@ -128,13 +136,13 @@ func Encrypt(pub, msg []byte) (*Ciphertext, error) {
 
 	gcm, err := newGCM(key[:])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &Ciphertext{A: compress(&A), Nonce: nonce, Body: gcm.Seal(nil, nonce, msg, nil)}, nil
+	return &Ciphertext{A: compress(&A), Nonce: nonce, Body: gcm.Seal(nil, nonce, msg, nil)}, r, nil
 }
 
 // ComputeShare is keyper i computing its partial decryption d_i = x_i * A.

@@ -110,12 +110,13 @@ func TestProbe_RealChainDrainsKeepPinnedEpochsBounded(t *testing.T) {
 	}
 	submit := func(h int64, epoch uint64, akPub []byte, der map[uint64]*secp256k1.ModNScalar, tag string) {
 		plain := fmt.Sprintf("payload-%s-e%d-h%d", tag, epoch, h)
-		ct, err := threshold.Encrypt(akPub, []byte(plain))
+		ct, ctR, err := threshold.EncryptWithR(akPub, []byte(plain))
 		if err != nil {
 			t.Fatalf("encrypt: %v", err)
 		}
 		resp, err := ms.SubmitEncrypted(ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager()), &types.MsgSubmitEncrypted{
 			Submitter: "acc1", A: ct.A, Nonce: ct.Nonce, Body: ct.Body,
+			Pok: dkg.ProveEncKeyPoK(ctR, "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
 		})
 		if err != nil {
 			t.Fatalf("submit: %v", err)

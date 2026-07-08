@@ -195,6 +195,21 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if len(msg.Body) > maxCiphertextBodyBytes {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "ciphertext body exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.Body))
 	}
+	// CRITICAL A-BINDING (same-A replay): require a Schnorr proof of knowledge of r (A = r*G)
+	// bound to THIS submitter + ciphertext. A decryption share is x_i*A and the AES key is
+	// KDF(x*A), so any two ciphertexts sharing A share the decryption secret; the maturity gate
+	// alone does not prevent an attacker from getting a dummy ciphertext carrying a victim's A to
+	// mature earlier (a mempool race / a proposer that delays the victim) and leaking x*A before
+	// the victim's reveal. The PoK makes A non-replayable: the attacker cannot forge it for
+	// A_victim (Schnorr soundness) nor replay the victim's PoK (the challenge binds the submitter),
+	// so no second ciphertext can ever carry another party's A.
+	pok, err := dkg.ParseEncKeyPoK(msg.Pok)
+	if err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid ciphertext key proof: %s", err.Error())
+	}
+	if !dkg.VerifyEncKeyPoK(msg.A, msg.Submitter, msg.Nonce, msg.Body, pok) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext key proof does not bind A to the submitter (same-A replay is rejected)")
+	}
 	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a
 	// flooder cannot grow EncTx state (nor the per-block decrypt scan) without bound, nor starve
 	// honest ciphertexts. The checks read O(1) maintained counters (never an O(backlog) scan).

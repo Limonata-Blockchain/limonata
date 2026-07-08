@@ -87,6 +87,36 @@ func TestDecryptionShareRejectedBeforeMaturity(t *testing.T) {
 	}
 }
 
+// CRITICAL same-A binding at ingress: SubmitEncrypted rejects a ciphertext without a valid
+// submitter-bound PoK, and rejects a copied A + PoK submitted under a different address (the
+// same-A replay). A genuine submission is accepted.
+func TestSubmitEncryptedRequiresSubmitterBoundPoK(t *testing.T) {
+	k, ctx := newKeeper(t, 10)
+	if err := k.SetParams(ctx, enableParams(throwawayThresholdPub(t), 1, 1, []string{"kp1"})); err != nil {
+		t.Fatal(err)
+	}
+	ms := keeper.NewMsgServerImpl(k)
+	pub := throwawayThresholdPub(t)
+
+	// (a) missing PoK -> rejected.
+	good := encWithPoK(t, pub, "hi", "cosmos1victim")
+	noPoK := &types.MsgSubmitEncrypted{Submitter: good.Submitter, A: good.A, Nonce: good.Nonce, Body: good.Body}
+	if _, err := ms.SubmitEncrypted(ctx, noPoK); err == nil {
+		t.Fatal("a submission without a PoK must be rejected")
+	}
+
+	// (b) the victim's genuine submission is accepted.
+	if _, err := ms.SubmitEncrypted(ctx, good); err != nil {
+		t.Fatalf("a genuine submission must be accepted: %v", err)
+	}
+
+	// (c) SAME-A REPLAY: attacker copies the victim's A + PoK under its own address -> rejected.
+	replay := &types.MsgSubmitEncrypted{Submitter: "cosmos1attacker", A: good.A, Nonce: good.Nonce, Body: good.Body, Pok: good.Pok}
+	if _, err := ms.SubmitEncrypted(ctx, replay); err == nil {
+		t.Fatal("same-A replay (copied A+PoK under a different submitter) must be rejected")
+	}
+}
+
 // Sanity: the same guard does not block DISTINCT slots (a keyper legitimately owning
 // several eval-points, or different ciphertexts, still stores each once).
 func TestLegacyDecryptionShareDistinctSlotsOK(t *testing.T) {

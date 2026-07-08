@@ -169,13 +169,14 @@ func TestOnChainDKG_FinalizeAndDecrypt(t *testing.T) {
 	// --- encrypt a secret to the DKG pubkey, submit it, have t members post their
 	// DLEQ-proved decryption shares, and let BeginBlock decrypt it. ---
 	plain := []byte("validator-DKG anti-MEV: no dealer, no trusted setup, no single key holder")
-	ct, err := threshold.Encrypt(ak.Pub, plain)
+	ct, ctR, err := threshold.EncryptWithR(ak.Pub, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
 	submitCtx := ctx.WithBlockHeight(6)
 	if _, err := ms.SubmitEncrypted(submitCtx, &types.MsgSubmitEncrypted{
 		Submitter: "acc1", A: ct.A, Nonce: ct.Nonce, Body: ct.Body,
+		Pok: dkg.ProveEncKeyPoK(ctR, "acc1", ct.A, ct.Nonce, ct.Body).Marshal(),
 	}); err != nil {
 		t.Fatalf("SubmitEncrypted: %v", err)
 	}
