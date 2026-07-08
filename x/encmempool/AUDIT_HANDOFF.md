@@ -136,7 +136,17 @@ same-A replay via PoK-of-r, early decrypt-share exposure (maturity gate), VE-dec
 share/deal write-once (first-wins), admission-cap-disable, stale-stake rekey defaults, committee×
 share-budget→MaxTxBytes coupling, cache-context panic rollback, the re-injection fee/nonce/gas
 correctness (fee-collector conservation, reverted-create nonce bump, per-tx + block gas caps,
-TxIndex isolation, blob-tx reject), and genesis DKG-state round-tripping with recomputed ref-counts.
+TxIndex isolation, blob-tx reject), genesis DKG-state round-tripping with recomputed ref-counts,
+vote-extension shape caps enforced on the AUTHORITATIVE consume path (not only gossip-time
+VerifyVoteExtension), the ExtendVote adversary moved behind the `dkgattack` build tag (production
+binary gets a no-op), and PoK chain-id domain separation (cross-chain/fork replay).
+
+**Known MEDIUM perf item (not a safety bug):** decryption shares are DLEQ-verified at vote-extension
+ingest AND again in `recoverSharedSecret`/`RecoverVerifiedWithKeys` at decrypt time. The Y-cache
+bounds the per-verify cost and the per-block verify budget bounds the total, so it is not a DoS
+lever, but the hot path does duplicate DLEQ work. A "verified-at-ingest" marker could let the
+decrypt path skip re-verifying VE-sourced shares (legacy-tx shares still need it). Deferred as an
+optimization. Refs: `keeper/voteext.go` recoverSharedSecret, `dkg/proof.go` RecoverVerifiedWithKeys.
 
 ---
 
@@ -165,6 +175,12 @@ go test -buildvcs=false ./x/encmempool/...     # unit + keeper suites (~2 min fo
 ```
 
 Two Go modules: root `github.com/cosmos/evm` and `evmd` (`github.com/cosmos/evm/evmd`).
+
+Notes:
+- The `evmd/tests/integration` + `evmd/tests/ibc` suites require `-tags=test` (they panic in
+  `EVMConfigurator.ResetTestConfig` otherwise). The encmempool suites do not.
+- The ExtendVote adversary is compiled ONLY with `-tags dkgattack` (throwaway/audit builds). A
+  production binary must be built WITHOUT that tag, so the adversary is a no-op.
 
 ---
 
