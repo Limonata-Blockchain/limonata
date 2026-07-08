@@ -633,6 +633,19 @@ const (
 	// resolution so apportionment can never degenerate to operator-address order.
 	MinShareBudgetPerMember = 8
 
+	// perPointWireBytes is a GENEROUS per-eval-point wire-size estimate for a vote extension
+	// (round-8 #3): each of the S points contributes a sealed dealing share (~160 B) + a
+	// decryption share (~240 B) + a fraction of the Feldman commitments + JSON overhead; 900 B/point
+	// upper-bounds the ~870 KiB measured at S=1024. Used only to reject configs whose 2/3 aggregate
+	// cannot fit the assumed MaxTxBytes.
+	perPointWireBytes = 900
+
+	// conservativeInjectMaxTxBytes is the MaxTxBytes floor the committee/share-budget coupling
+	// assumes (round-8 #3). ~20 MB is below the common CometBFT default proposal budget yet leaves
+	// generous headroom for a default committee. A chain running a SMALLER MaxTxBytes must size its
+	// committee/share-budget down accordingly.
+	conservativeInjectMaxTxBytes = 20_000_000
+
 	// maxDkgShareBudget bounds a governance-set budget so per-dealing / vote-extension size
 	// (O(S) sealed shares + O(t) commitments + O(S) decryption shares) cannot be blown up
 	// without bound. CYCLE-3 M-2: the per-VE decryption-share cap is COUPLED to S (a member
@@ -733,6 +746,20 @@ func (p Params) ValidateDkgWindows() error {
 			return fmt.Errorf(
 				"dkg_share_budget (%d) must be >= %d * the effective committee cap (%d*%d=%d): a smaller budget degenerates stake apportionment (decryption power would track operator-address order, not stake)",
 				s, MinShareBudgetPerMember, MinShareBudgetPerMember, m, MinShareBudgetPerMember*m)
+		}
+		// round-8 #3: bound the worst-case >2/3-power INJECTED-COMMIT aggregate to a conservative
+		// MaxTxBytes. Per-extension size is O(S); a valid-but-large (committee, S) could make even a
+		// 2/3 subset exceed the proposal's MaxTxBytes, so PrepareProposal's boundedInjectedCommit would
+		// fall back to NO injection every block -> the DKG never consumes and STALLS. This couples the
+		// two so a config that cannot possibly fit is rejected up front. ASSUMPTION: the chain's
+		// consensus MaxTxBytes >= conservativeInjectMaxTxBytes; an operator on a smaller MaxTxBytes must
+		// lower dkg_max_members / dkg_share_budget (the runtime fallback stays SAFE - it just makes no
+		// DKG progress until the config fits, which this check turns into an up-front rejection).
+		twoThirds := (2*m + 2) / 3 // ceil(2m/3)
+		if aggr := twoThirds * (s * perPointWireBytes); aggr > conservativeInjectMaxTxBytes {
+			return fmt.Errorf(
+				"dkg_max_members (%d) x dkg_share_budget (%d): a >2/3-power injected commit is ~%d bytes, exceeding the assumed MaxTxBytes floor %d - lower dkg_max_members or dkg_share_budget (or raise the chain MaxTxBytes)",
+				m, s, aggr, conservativeInjectMaxTxBytes)
 		}
 	}
 	return nil

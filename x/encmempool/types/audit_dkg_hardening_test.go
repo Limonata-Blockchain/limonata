@@ -71,6 +71,34 @@ func TestTransparentRequiresRekeyTrigger(t *testing.T) {
 	}
 }
 
+// round-8 #3: a valid-but-huge (committee, share-budget) whose >2/3 injected-commit aggregate would
+// exceed the assumed MaxTxBytes floor must be REJECTED (else DKG injection can never fit -> stall).
+// The default committee/budget is well within budget.
+func TestCommitteeShareBudgetCoupledToMaxTxBytes(t *testing.T) {
+	base := func() Params {
+		return Params{
+			RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, DecryptDelay: 2, MaxInFlightEncTx: 32768,
+			DkgEnabled: true, DkgTransparent: true, DkgStartHeight: 1,
+			DkgDealWindow: 2, DkgComplaintWindow: 2, DkgRetryBackoff: 5, DkgMaxAttempts: 8,
+			DkgRekeyOnStakeDriftBps: 500,
+		}
+	}
+	// default committee (16) + a moderate S: fits.
+	p := base()
+	p.DkgMaxMembers = 16
+	p.DkgShareBudget = 256
+	if err := p.Validate(); err != nil {
+		t.Fatalf("default-ish committee/budget must fit MaxTxBytes: %v", err)
+	}
+	// max committee (128) + max S (1024): a >2/3 aggregate ~79 MB >> 20 MB floor -> rejected.
+	p = base()
+	p.DkgMaxMembers = 128
+	p.DkgShareBudget = 1024
+	if err := p.Validate(); err == nil {
+		t.Fatal("a committee*share-budget whose 2/3 aggregate exceeds MaxTxBytes must be rejected")
+	}
+}
+
 // Finding 6: the pre-decode object-count bound in VerifyVoteExtension rests on the
 // invariant that a '{' byte in a marshalled VoteExtension can ONLY open a real JSON
 // object — because every field value is a uint64 or a Go-base64 []byte (whose alphabet

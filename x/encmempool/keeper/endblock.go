@@ -27,7 +27,14 @@ const dkgBackoffCeilingBlocks uint64 = 1000
 // successful decrypt in between) that trips the MED-2 recovery rekey: a sustained streak this high means
 // the active key genuinely cannot decrypt (not a transient late-share blip), so the committee re-genesises
 // against the current set. Any single success resets the streak, so a healthy epoch never trips it.
-const decryptHealthStrandThreshold uint64 = 32
+//
+// round-8 #1: LOWERED 32 -> 16 to HALVE how many user ciphertexts strand before recovery kicks in when
+// an offline-victim dealer poisoning survives the complaint round (the reactive backstop's whole job).
+// 16 consecutive strands with ZERO successes (~32s at 2s blocks) is still unambiguously a sustained
+// failure, not a transient late-share blip, and the rekey stays gap-dampened by DkgMinRekeyGap so this
+// can never storm. (The STRUCTURAL close of offline-poison - proactive derive-time Feldman verification -
+// remains a design item: the belt was attempted and reverted for breaking the HIGH-2 repro.)
+const decryptHealthStrandThreshold uint64 = 16
 
 // minComplaintWindowBlocks floors the complaint window so the ABCI++ 1-block build->consume lag always
 // leaves at least one height where a complaint about a last-block dealing is both buildable AND

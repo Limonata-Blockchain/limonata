@@ -49,7 +49,9 @@ func TestC6_Coupling_GovValidationBoundary(t *testing.T) {
 			t.Fatalf("sub-min committee ACCEPTED: maxMembers=%d must be rejected (< minDkgCommittee)", mm)
 		}
 	}
-	for _, mm := range []uint32{4, 8, 16, 32, 64, 128} {
+	// Sweep committees whose 8*mm budget also fits the round-8 #3 MaxTxBytes aggregate coupling
+	// (mm <= 64; a >2/3 aggregate at 64x512 ~19.8MB is just under the 20MB floor).
+	for _, mm := range []uint32{4, 8, 16, 32, 64} {
 		need := uint32(types.MinShareBudgetPerMember) * mm // = 8*mm
 		// exactly at the coupling: MUST validate.
 		if err := base(mm, need).Validate(); err != nil {
@@ -67,11 +69,11 @@ func TestC6_Coupling_GovValidationBoundary(t *testing.T) {
 	if err := base(128, 256).Validate(); err == nil {
 		t.Fatal("config maxMembers=128 S=256 must be rejected (256 < 8*128=1024)")
 	}
-	// The max cap paired with the max budget (128, 1024) is accepted, and is the largest
-	// gov-passable committee: S=1024 == 8*128 == maxDkgShareBudget (lowered from 2048 in the
-	// governance sweep so finalize/verify stay bounded).
-	if err := base(128, 1024).Validate(); err != nil {
-		t.Fatalf("maxMembers=128 S=1024 must pass: %v", err)
+	// round-8 #3: the absolute committee cap (128) at its min budget (1024) is now REJECTED by the
+	// MaxTxBytes aggregate coupling - a >2/3 injected commit (~79MB) cannot fit the 20MB floor, so it
+	// would stall DKG injection. ~64 is the largest committee that actually fits.
+	if err := base(128, 1024).Validate(); err == nil {
+		t.Fatal("maxMembers=128 S=1024 must now be rejected (2/3 injected-commit aggregate exceeds MaxTxBytes)")
 	}
 	// One above the ceiling is rejected.
 	if err := base(128, 1025).Validate(); err == nil {

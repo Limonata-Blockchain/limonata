@@ -185,7 +185,7 @@ func TestReg_HA_ValidateRejectsBudgetBelowCommitteeCap(t *testing.T) {
 	}{
 		{"defaults", 0, 0},              // 256 >= 8*16
 		{"S128_cap16_boundary", 128, 0}, // exactly 8*16
-		{"S1024_cap128", 1024, 128},     // exactly 8*128 == maxDkgShareBudget — the full committee range stays usable
+		{"S512_cap64", 512, 64},         // 8*64 AND its 2/3 aggregate (~19.8MB) fits the round-8 #3 MaxTxBytes floor
 	}
 	for _, c := range good {
 		p := base()
