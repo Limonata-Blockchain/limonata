@@ -166,7 +166,15 @@ VerifyVoteExtension), the ExtendVote adversary moved behind the `dkgattack` buil
 binary gets a no-op), PoK chain-id domain separation (cross-chain/fork replay), the fail-closed
 whale guard on submits, the refundable anti-sybil submit bond, ingest-verified-share DLEQ de-dup,
 derive-time offline-victim poison detection + attribution, exec-off submit refusal (no silent
-user-tx loss), and the decrypted-exec cumulative-gas de-overshoot (deferred, no tx loss).
+user-tx loss), the decrypted-exec cumulative-gas de-overshoot (deferred, no tx loss), the submit-
+bond partial burn (real anti-sybil cost), the genesis Verified-trust hole (imported shares are
+never trusted as pre-verified; recovery re-verifies), PoK verification ordered LAST among the
+CheckTx rejection gates (cheap gates reject doomed spam before the EC verify), and rejection of a
+zero-scalar enc key.
+
+**Operator note (residual #3, spam defaults):** the encrypted path is off by default; when enabling
+it, set a non-zero `EncSubmitBond` + `EncSubmitBondBurnBps` and a `MaxInFlightEncTx` sized to the
+fleet - the defaults are permissive and the bond+burn is the economic anti-sybil lever.
 
 The former duplicate-DLEQ perf item is FIXED: an ingest-`Verified` flag on `EncShare` lets the
 decrypt-path recover skip re-verifying VE-sourced shares (index-range + dedup guards still apply;
