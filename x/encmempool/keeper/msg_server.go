@@ -242,6 +242,15 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "DKG enabled but no active threshold key yet")
 		}
 	}
+	// round-9 #4 (fail-closed whale guard): if a single operator in the active committee owns >= the
+	// reconstruction threshold of eval-points, it can decrypt this ciphertext ALONE - the encrypted
+	// mempool offers NO confidentiality in that stake topology. Refuse the submission rather than lull
+	// the user into sending a "private" tx a whale reads. This does not (and cannot) create
+	// confidentiality; decentralization does. Deterministic (committed round + key).
+	if epoch > 0 && m.Keeper.CommitteeConcentrationBreached(goCtx, epoch) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
+			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (an operator holds enough decryption power to decrypt alone) - send a normal transaction, or wait for the committee to decentralize")
+	}
 	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body, epoch)
 	ctx.EventManager().EmitEvent(sdk.NewEvent(
 		"encmempool_encrypted_submitted",

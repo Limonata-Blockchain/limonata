@@ -7,6 +7,7 @@ package keeper
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"sort"
@@ -273,4 +274,37 @@ func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
 		tt = 1
 	}
 	return uint32(tt), degraded
+}
+
+// CommitteeConcentrationBreached reports whether a single operator in the epoch's committee owns
+// >= the reconstruction threshold of Shamir eval-points, i.e. it can reconstruct the decryption key
+// ALONE - so the encrypted mempool provides NO confidentiality against it (round-9 #4, the "whale"
+// topology). SubmitEncrypted uses this as a FAIL-CLOSED gate: it refuses "confidential" submissions
+// in that state rather than offer false confidentiality. This does NOT create confidentiality
+// (impossible against a legitimately key-holding whale); only decentralization does.
+//
+// Deterministic: a pure function of the committed DkgRound + ActiveThresholdKey. Legacy/unweighted
+// committees (Weighted==false, no recorded stake) are EXEMPT - they are not the stake-topology case
+// this guards, and the trusted-setup epoch 0 never reaches here.
+func (k Keeper) CommitteeConcentrationBreached(ctx context.Context, epoch uint64) bool {
+	if epoch == 0 {
+		return false
+	}
+	ak, ok := k.GetActiveKey(ctx, epoch)
+	if !ok || ak.Threshold == 0 {
+		return false
+	}
+	round, ok := k.GetDkgRound(ctx, epoch)
+	if !ok || len(round.Members) == 0 {
+		return false
+	}
+	for _, m := range round.Members {
+		if !m.Weighted {
+			return false // unweighted (legacy) committee: not the stake-concentration case
+		}
+		if uint32(len(m.OwnedEvalPoints())) >= ak.Threshold {
+			return true // this operator alone holds >= t points -> decrypts alone
+		}
+	}
+	return false
 }
