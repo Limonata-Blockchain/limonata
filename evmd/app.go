@@ -672,7 +672,7 @@ func NewExampleApp(
 	// it can be injected into the valgrant precompile via DefaultStaticPrecompiles.
 	// StakingKeeper (read-only) lets the encmempool DKG EndBlocker learn the bonded
 	// validator set (the keyper set) and re-run the DKG when it changes.
-	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]), app.StakingKeeper)
+	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]), app.StakingKeeper, app.EVMKeeper, app.AccountKeeper)
 	app.GasSponsorKeeper = gassponsorkeeper.NewKeeper(
 		runtime.NewKVStoreService(keys[gassponsortypes.StoreKey]),
 		app.ContestKeeper,

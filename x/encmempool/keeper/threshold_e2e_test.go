@@ -23,7 +23,7 @@ func newKeeper(t *testing.T, height int64) (keeper.Keeper, sdk.Context) {
 	key := storetypes.NewKVStoreKey(types.StoreKey)
 	tkey := storetypes.NewTransientStoreKey("transient_encmempool")
 	testCtx := testutil.DefaultContextWithDB(t, key, tkey)
-	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil)
+	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil, nil, nil)
 	ctx := testCtx.Ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager()).
 		WithConsensusParams(cmtproto.ConsensusParams{Abci: &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 1}})
 	return k, ctx

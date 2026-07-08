@@ -11,19 +11,28 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	anteinterfaces "github.com/cosmos/evm/ante/interfaces"
 	"github.com/cosmos/evm/x/encmempool/types"
+	evmkeeper "github.com/cosmos/evm/x/vm/keeper"
 )
 
 // Keeper for x/encmempool. State is plain JSON-in-store (no proto), like x/contest.
 // stakingKeeper is read-only and only consulted by the DKG EndBlocker to learn the
 // bonded validator set (may be nil in unit tests that never exercise that path).
+//
+// evmKeeper + accountKeeper are used ONLY by the decrypt->EXECUTE re-injection path
+// (EncExecEnabled, see evm_exec.go + DESIGN_EVM_REINJECTION.md). BOTH nil => execution is
+// disabled - the dormant default AND the minimal-unit-test path. They are set only in the full
+// app wiring (evmd/app.go).
 type Keeper struct {
 	storeService  corestore.KVStoreService
 	stakingKeeper types.StakingKeeper
+	evmKeeper     *evmkeeper.Keeper
+	accountKeeper anteinterfaces.AccountKeeper
 }
 
-func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper) Keeper {
-	return Keeper{storeService: ss, stakingKeeper: sk}
+func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper, evm *evmkeeper.Keeper, ak anteinterfaces.AccountKeeper) Keeper {
+	return Keeper{storeService: ss, stakingKeeper: sk, evmKeeper: evm, accountKeeper: ak}
 }
 
 func (k Keeper) store(ctx context.Context) corestore.KVStore { return k.storeService.OpenKVStore(ctx) }

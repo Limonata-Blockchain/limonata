@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
@@ -298,9 +299,19 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 		have, need int
 	}
 	var candidates []deferCand // matured-but-short, within grace — awaiting a fair defer slot
+	// EVM re-injection (P2): decrypted txs execute this block up to a cumulative gas ceiling. When
+	// on and the budget is spent, we STOP processing further matured ciphertexts — they stay in
+	// state (ref-counts intact) and drain on a later block (the deterministic bounded-scan suffix),
+	// never dropped. execGasUsed is updated by the success branch below.
+	execOn := k.encExecEnabled(p.EncExecEnabled)
+	execCeiling := decryptExecGasCeiling(ctx)
+	var execGasUsed uint64
 	for i := range matured {
 		if !selected[i] {
 			continue // fairness-deferred to a later block (still in state, ref-counts intact)
+		}
+		if execOn && execGasUsed >= execCeiling {
+			break // decrypted-tx exec budget exhausted; defer the rest to a later block
 		}
 		e := matured[i]
 		processed++
@@ -355,17 +366,20 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 					sdk.NewAttribute("reason", err.Error())))
 			default:
 				plaintext, derr := threshold.Decrypt(shared, &threshold.Ciphertext{A: e.A, Nonce: e.Nonce, Body: e.Body})
-				if derr == nil {
-					// CRITICAL (review #1): NEVER emit the plaintext. A decryption-share reveal that
-					// publishes the plaintext lets a searcher read it and front-run - the exact anti-MEV
-					// break this module exists to prevent. The plaintext is either EXECUTED in the EVM
-					// (P2, when EncExecEnabled + the re-injection pipeline land) or, until then, consumed
-					// silently. We record only that decryption succeeded (length, never content) so the
-					// DKG machinery stays observable.
-					//
-					// TODO(P2, DESIGN_EVM_REINJECTION.md): when p.EncExecEnabled, decode `plaintext` as an
-					// RLP EVM tx and run it through the mini-ante + EVMKeeper.ApplyTransaction pipeline in
-					// this deterministic `order`, before this block's normal txs.
+				if derr != nil {
+					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
+						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+						sdk.NewAttribute("reason", derr.Error())))
+					return // release stays true -> the ciphertext is consumed
+				}
+				k.resetDecryptStrandStreak(ctx, e.Epoch) // MED-2: this epoch decrypts -> clear its strand streak
+
+				// CRITICAL (review #1): NEVER emit the plaintext - a public reveal lets a searcher
+				// front-run. Either EXECUTE the decrypted EVM tx (P2, atomically in this block before
+				// normal txs, so its position is already fixed and no one can front-run it) or, when the
+				// execution path is off, consume it and record only that decryption happened (length,
+				// never content).
+				if !execOn {
 					ctx.EventManager().EmitEvent(sdk.NewEvent(
 						"encmempool_decrypted",
 						sdk.NewAttribute("submitter", e.Submitter),
@@ -375,13 +389,33 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 						sdk.NewAttribute("plaintext_len", strconv.Itoa(len(plaintext))),
 						sdk.NewAttribute("executed", "false"),
 					))
-					k.resetDecryptStrandStreak(ctx, e.Epoch) // MED-2: this epoch decrypts -> clear its strand streak
 					order++
-				} else {
-					ctx.EventManager().EmitEvent(sdk.NewEvent("encmempool_decrypt_failed",
-						sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
-						sdk.NewAttribute("reason", derr.Error())))
+					return
 				}
+
+				// P2: execute on a PER-TX cache context with an isolated gas meter, so a reverted/
+				// failed tx rolls back cleanly and one tx's meter reset cannot corrupt the block meter.
+				// Commit only when the tx was actually included (executed==true, revert included).
+				childCtx, commit := ctx.CacheContext()
+				childCtx = childCtx.WithGasMeter(storetypes.NewInfiniteGasMeter())
+				res := k.executeDecryptedTx(childCtx, plaintext)
+				if res.executed {
+					commit()
+					execGasUsed += res.gasUsed
+				}
+				ctx.EventManager().EmitEvent(sdk.NewEvent(
+					"encmempool_tx_reinjected",
+					sdk.NewAttribute("submitter", e.Submitter),
+					sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+					sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
+					sdk.NewAttribute("execution_order", strconv.FormatUint(order, 10)),
+					sdk.NewAttribute("outcome", res.tag),
+					sdk.NewAttribute("executed", strconv.FormatBool(res.executed)),
+					sdk.NewAttribute("reverted", strconv.FormatBool(res.reverted)),
+					sdk.NewAttribute("gas_used", strconv.FormatUint(res.gasUsed, 10)),
+					sdk.NewAttribute("tx_hash", res.txHash),
+				))
+				order++
 			}
 		}(e)
 		// Release the ciphertext + shares + ALL ref-counts (global, per-submitter, and — for a
