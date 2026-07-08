@@ -90,9 +90,14 @@ func rekeyedTo(k keeper.Keeper, ctx sdk.Context, epoch uint64) bool {
 // delegation triggers NO rekey — dormant behavior is byte-identical to pre-cycle-5.
 func TestStakeDrift_DefaultOffIsInert(t *testing.T) {
 	sk, ms := threeEqual()
-	p := transparentParams(2, 0) // DkgMaxEpochBlocks / DkgRekeyOnStakeDriftBps both 0
+	p := transparentParams(2, 0)
+	// Explicitly disable BOTH triggers: this test drives the keeper directly (no Validate),
+	// so it can exercise the dormant 0/0 behavior even though the shared fixture now arms a
+	// drift trigger to satisfy the finding-2 fail-closed Validate guard.
+	p.DkgMaxEpochBlocks = 0
+	p.DkgRekeyOnStakeDriftBps = 0
 	if p.DkgMaxEpochBlocks != 0 || p.DkgRekeyOnStakeDriftBps != 0 {
-		t.Fatal("fixture precondition: both drift triggers must default off")
+		t.Fatal("fixture precondition: both drift triggers must be off")
 	}
 	k, ctx := activeRoundFixture(t, sk, ms, p)
 

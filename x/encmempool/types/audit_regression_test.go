@@ -15,6 +15,7 @@ func TestRegression_ValidateRejectsBrokenThresholdParams(t *testing.T) {
 			RevealDelay: 1, MaxRevealWindow: 100,
 			EncEnabled: true, ThresholdPub: []byte{0x02, 0x01},
 			Threshold: 2, Keypers: []string{"k1", "k2", "k3"}, DecryptDelay: 1,
+			MaxInFlightEncTx: 32768, // finding 4: a live path needs a finite global admission cap
 		}
 	}
 
@@ -36,6 +37,8 @@ func TestRegression_ValidateRejectsBrokenThresholdParams(t *testing.T) {
 		{"threshold_exceeds_keypers", func(p *Params) { p.Threshold = 4 }},
 		{"empty_pub", func(p *Params) { p.ThresholdPub = nil }},
 		{"duplicate_keypers", func(p *Params) { p.Keypers = []string{"k1", "k1", "k2"} }},
+		// finding 4: a live enc path must not run with the global admission cap disabled.
+		{"max_in_flight_zero", func(p *Params) { p.MaxInFlightEncTx = 0 }},
 	}
 	for _, c := range cases {
 		p := base()

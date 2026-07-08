@@ -297,6 +297,18 @@ func (m msgServer) SubmitDecryptionShare(goCtx context.Context, msg *types.MsgSu
 		}
 	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
+	// WRITE-ONCE (audit finding 8): the legacy tx share path performs no ingress DLEQ
+	// check, and SetEncShare overwrites the eval-point slot. Without this, an authorized
+	// keyper could submit a valid share, then OVERWRITE it with garbage before maturity to
+	// retract its contribution and push the ciphertext below threshold (a strand/halt lever).
+	// First-wins, mirroring the transparent VE ingest path's dedup: once a slot is filled,
+	// reject the resubmit. RecoverVerified still drops an invalid FIRST share on the decrypt
+	// path, so this closes only the retraction lever, never a correctness path.
+	if m.hasEncShareAt(goCtx, msg.DecryptHeight, msg.Seq, msg.Index) {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"a decryption share is already recorded for (decrypt_height=%d, seq=%d, index=%d); shares are write-once",
+			msg.DecryptHeight, msg.Seq, msg.Index)
+	}
 	if err := m.SetEncShare(goCtx, types.EncShare{
 		Keyper: msg.Keyper, DecryptHeight: msg.DecryptHeight, Seq: msg.Seq, Index: msg.Index, D: msg.D, Proof: msg.Proof,
 	}); err != nil {

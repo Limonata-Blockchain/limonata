@@ -69,9 +69,14 @@ func newKeeperSK(t *testing.T, height int64, sk types.StakingKeeper) (keeper.Kee
 func transparentParams(thr uint32, maxMembers uint32) types.Params {
 	return types.Params{
 		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, DecryptDelay: 2,
-		DkgEnabled: true, DkgTransparent: true, DkgStartHeight: 1,
+		MaxInFlightEncTx: 32768, // finding 4: a live enc path requires a finite global admission cap
+		DkgEnabled:       true, DkgTransparent: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMaxMembers: maxMembers,
 		DkgRetryBackoff: 5, DkgMaxAttempts: 8, DkgMinRekeyGap: 0,
+		// finding 2 fail-closed guard: a live transparent path must arm a staleness-rekey
+		// trigger. Drift-only (not epoch cadence) so it never fires in short test windows
+		// unless a test explicitly drifts stake (the stake-drift tests override this).
+		DkgRekeyOnStakeDriftBps: 500,
 		// HIGH-3: a REDUCED stake-apportionment budget keeps test dealings small/fast while
 		// still exercising the stake-weighted eval-point path (the live default is 256).
 		// S=128 is the SMALLEST budget that satisfies the cycle-3 H-A coupling for the

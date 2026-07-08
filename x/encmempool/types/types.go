@@ -403,6 +403,18 @@ func DefaultParams() Params {
 		// ~30 blocks (~60s at 2s blocks — roughly one deal+complaint window). Governance
 		// tunable; 0 disables. A genuine settled change is not delayed (see field doc).
 		DkgMinRekeyGap: 30,
+		// AUDIT FINDING 2: bound decryption-power staleness by DEFAULT. MembersHash covers
+		// OPERATORS only, so a pure re-delegation (same operator set, shifted weights) moves
+		// live stake away from the frozen eval-point snapshot WITHOUT re-keying; left at 0/0
+		// these triggers are off and a validator keeps decryption weight from a stale stake
+		// snapshot until the reactive decrypt-health backstop happens to trip. Ship active
+		// (governance-tunable) defaults: rekey the SAME committee against a FRESH snapshot when
+		// a coalition's stake fraction has drifted >= 5% (500 bps) from the snapshot, and at
+		// least once per ~24h (43200 blocks @ ~2s) as a slow-accumulation backstop the drift
+		// metric alone could miss. Both are gap-dampened by DkgMinRekeyGap (no rekey storm) and
+		// only matter on the transparent path (DkgEnabled is itself default-off).
+		DkgRekeyOnStakeDriftBps: 500,
+		DkgMaxEpochBlocks:       43200,
 	}
 }
 
@@ -497,10 +509,29 @@ func (p Params) Validate() error {
 	if p.DecryptDelay == 0 {
 		return fmt.Errorf("decrypt_delay must be >= 1 when enc_enabled (else EncTx are never decrypted and never GC'd)")
 	}
+	// AUDIT FINDING 4: a zero global in-flight ceiling DISABLES ingress admission control
+	// (msg_server enforces the global cap only when > 0). The keeper's always-on absolute
+	// constant ceiling only scans/drops MATURED ciphertexts, so with a long DecryptDelay an
+	// attacker can accumulate large IMMATURE encrypted state before that backstop ever bites.
+	// Require a finite global cap whenever the encrypted path is actually live. (0 stays
+	// permitted while EncEnabled is off, where the whole path is inert.)
+	if p.MaxInFlightEncTx == 0 {
+		return fmt.Errorf("max_in_flight_enc_tx must be >= 1 when enc_enabled (0 disables the global admission cap)")
+	}
 	// When the DKG supplies the active key, the trusted-setup params.ThresholdPub/Threshold/
 	// Keypers are the epoch-0 fallback and need not be populated; the DKG member set was
 	// already validated above.
 	if p.DkgEnabled {
+		// AUDIT FINDING 2 (fail-closed, mirroring the MaxInFlightEncTx>=1 guard): on the LIVE
+		// transparent stake-weighted path, at least one staleness-rekey trigger MUST be armed.
+		// MembersHash covers OPERATORS only (dkg.go), so a pure re-delegation shifts live stake
+		// away from the frozen eval-point snapshot WITHOUT re-keying; with both triggers 0 a
+		// validator keeps decryption weight from a stale stake snapshot until the reactive
+		// decrypt-health backstop happens to trip. Governance may TUNE the values (bounded above
+		// elsewhere) but not disable BOTH while the encrypted transparent path is live.
+		if p.DkgTransparent && p.DkgMaxEpochBlocks == 0 && p.DkgRekeyOnStakeDriftBps == 0 {
+			return fmt.Errorf("transparent DKG on a live encrypted path requires a staleness-rekey trigger: set dkg_max_epoch_blocks or dkg_rekey_on_stake_drift_bps > 0")
+		}
 		return nil
 	}
 	if p.Threshold == 0 {

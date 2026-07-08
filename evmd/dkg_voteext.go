@@ -383,6 +383,12 @@ func (app *EVMD) buildDkgComplaints(ctx sdk.Context, ek *dkgnode.EncKey, op stri
 
 // ---- VerifyVoteExtension: lenient structural check (heavy validation is on-chain) ----
 
+// veObjectOpen is the JSON object-open byte. A marshalled VoteExtension contains it ONLY
+// as a structural delimiter (all field values are uint64 or Go-base64 []byte, whose
+// alphabet excludes '{', and there are no free-form string fields), so counting it is an
+// exact upper bound on the object count — see the pre-decode bound in the handler below.
+var veObjectOpen = []byte{'{'}
+
 func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler {
 	return func(ctx sdk.Context, req *abci.RequestVerifyVoteExtension) (*abci.ResponseVerifyVoteExtension, error) {
 		accept := &abci.ResponseVerifyVoteExtension{Status: abci.ResponseVerifyVoteExtension_ACCEPT}
@@ -390,8 +396,32 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 		if len(req.VoteExtension) == 0 {
 			return accept, nil // a non-participating node is fine
 		}
+		// AUDIT FINDING 6: gate on veActive exactly as ExtendVote does. When the transparent
+		// VE path is not active, no honest node produces a NON-EMPTY extension, so refuse one
+		// here WITHOUT decoding it — this also removes the "feature off but still JSON-decoding
+		// attacker payloads" surface. veActive is a pure function of committed params + the
+		// consensus VE-enable height, identical across nodes at this height, so this can never
+		// false-reject an honest vote.
+		if !app.veActive(ctx) {
+			return reject, nil
+		}
 		if len(req.VoteExtension) > encmempooltypes.VoteExtMaxBytes {
 			return reject, nil // oversized: refuse (bounds block size — preserves VE <= 1 MiB)
+		}
+		p := app.EncMempoolKeeper.GetParams(ctx)
+		// AUDIT FINDING 6: bound the DECODE cost before UnmarshalVoteExtension. The 1-MiB byte
+		// cap alone lets a byzantine peer pack tens of thousands of tiny JSON objects and force
+		// that whole allocate-and-parse before the post-decode count caps below reject it. Every
+		// value in this payload is a uint64 or a Go-base64 []byte (base64's alphabet excludes
+		// '{'), and there are NO free-form string fields, so a '{' byte can only open a real
+		// object — the object count is an exact, adversary-robust upper bound computed in a
+		// single O(bytes) scan with no allocation. An honest extension holds at most the
+		// top-level object + a dealing wrapper + <=S sealed shares + <=VoteExtShareCap()
+		// decryption shares + <=committee complaints, all bounded by VoteExtShareCap(); reject
+		// (safely) well above that. Only a lenient local pre-filter — the authoritative bound is
+		// the keeper's deterministic PreBlock verify budget.
+		if bytes.Count(req.VoteExtension, veObjectOpen) > 8+3*p.VoteExtShareCap() {
+			return reject, nil
 		}
 		ve, ok := encmempooltypes.UnmarshalVoteExtension(req.VoteExtension)
 		if !ok {
@@ -413,7 +443,7 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 		// within-block dedup + global O(cap × S) ceiling) is enforced in the keeper's
 		// ConsumeVoteExtensions/ingestDecryptSharesBounded. Params are committed
 		// consensus state (GetParams falls back to defaults), so both caps are deterministic per height.
-		p := app.EncMempoolKeeper.GetParams(ctx)
+		// (p was read above for the pre-decode object bound; reuse it.)
 		if len(ve.Shares) > p.VoteExtShareCap() {
 			return reject, nil
 		}
