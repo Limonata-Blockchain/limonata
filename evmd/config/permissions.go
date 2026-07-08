@@ -10,6 +10,7 @@ import (
 	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	cosmosevmutils "github.com/cosmos/evm/utils"
+	encmempooltypes "github.com/cosmos/evm/x/encmempool/types"
 	erc20types "github.com/cosmos/evm/x/erc20/types"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
 	gassponsortypes "github.com/cosmos/evm/x/gassponsor/types"
@@ -86,6 +87,11 @@ var maccPerms = map[string][]string{
 	// DESTROY pool LIMO (BurnPool: removes it from the module account + total supply)
 	// to prove reclaimed bootstrap capital never returns to anyone. It never mints.
 	valgranttypes.ModuleName: {authtypes.Burner},
+
+	// Limonata encrypted mempool: holds the REFUNDABLE anti-sybil submit bonds in escrow while a
+	// ciphertext is in flight (round-9 #1). No perms - it only ever holds and returns escrowed
+	// user funds (never mints/burns); the bond is refunded in full when the ciphertext is released.
+	encmempooltypes.ModuleName: nil,
 }
 
 // GetMaccPerms returns a copy of the module account permissions

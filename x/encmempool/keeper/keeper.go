@@ -9,6 +9,8 @@ import (
 
 	corestore "cosmossdk.io/core/store"
 
+	sdkmath "cosmossdk.io/math"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	anteinterfaces "github.com/cosmos/evm/ante/interfaces"
@@ -29,10 +31,11 @@ type Keeper struct {
 	stakingKeeper types.StakingKeeper
 	evmKeeper     *evmkeeper.Keeper
 	accountKeeper anteinterfaces.AccountKeeper
+	bankKeeper    types.BankKeeper // round-9 #1: escrow/refund the submit bond; nil => bonding disabled
 }
 
-func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper, evm *evmkeeper.Keeper, ak anteinterfaces.AccountKeeper) Keeper {
-	return Keeper{storeService: ss, stakingKeeper: sk, evmKeeper: evm, accountKeeper: ak}
+func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper, evm *evmkeeper.Keeper, ak anteinterfaces.AccountKeeper, bk types.BankKeeper) Keeper {
+	return Keeper{storeService: ss, stakingKeeper: sk, evmKeeper: evm, accountKeeper: ak, bankKeeper: bk}
 }
 
 func (k Keeper) store(ctx context.Context) corestore.KVStore { return k.storeService.OpenKVStore(ctx) }
@@ -180,6 +183,33 @@ func (k Keeper) releaseEncTx(ctx sdk.Context, e types.EncTx) {
 		k.decEpochEncCount(ctx, e.Epoch)
 		k.maybePruneEpoch(ctx, e.Epoch)
 	}
+	k.refundBond(ctx, e) // round-9 #1: return the escrowed anti-sybil bond, whatever the release cause
+}
+
+// refundBond returns the anti-sybil bond escrowed for an EncTx (round-9 #1) IN FULL to its
+// submitter. Called from releaseEncTx, the SINGLE choke point every EncTx removal passes through, so
+// a matured decrypt AND a last-resort drop both refund. It returns exactly the amount stamped on the
+// EncTx (immune to a later param change), and the module account always holds it (escrowed at submit),
+// so the transfer cannot fail on funds. Deterministic (bank sends + committed EncTx fields).
+func (k Keeper) refundBond(ctx sdk.Context, e types.EncTx) {
+	if e.Bond == 0 || k.bankKeeper == nil {
+		return
+	}
+	addr, err := sdk.AccAddressFromBech32(e.Submitter)
+	if err != nil {
+		return // submitter was bech32-validated at escrow, so this is unreachable; skip rather than panic
+	}
+	coins := sdk.NewCoins(sdk.NewCoin(e.BondDenom, sdkmath.NewIntFromUint64(e.Bond)))
+	_ = k.bankKeeper.SendCoinsFromModuleToAccount(ctx, types.ModuleName, addr, coins)
+}
+
+// stampBond records the escrowed bond onto an already-stored EncTx (round-9 #1). Called from
+// SubmitEncrypted right after SubmitEncTx, once the bond has been escrowed to the module account, so
+// releaseEncTx later refunds exactly this amount.
+func (k Keeper) stampBond(ctx context.Context, e types.EncTx, bond uint64, denom string) {
+	e.Bond = bond
+	e.BondDenom = denom
+	_ = k.store(ctx).Set(encTxKey(e.DecryptHeight, e.Seq), mustJSON(e))
 }
 
 func (k Keeper) GetEncTx(ctx context.Context, decryptHeight, seq uint64) (types.EncTx, bool) {

@@ -10,6 +10,8 @@ import (
 
 	errorsmod "cosmossdk.io/errors"
 
+	sdkmath "cosmossdk.io/math"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
@@ -251,7 +253,26 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
 			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (an operator holds enough decryption power to decrypt alone) - send a normal transaction, or wait for the committee to decentralize")
 	}
+	// round-9 #1: ESCROW the refundable anti-sybil bond. Done LAST, after every rejection check
+	// (PoK, admission, concentration) has passed, so a rejected submit never escrows; and BEFORE
+	// SubmitEncTx (which cannot fail), so the escrow and the stored ciphertext are all-or-nothing.
+	// A submitter that cannot fund the bond is rejected here with no state change. releaseEncTx
+	// refunds it in full when the ciphertext leaves state.
+	bond, bondDenom := p.EncSubmitBond, p.EncSubmitBondDenom
+	if bond > 0 && m.bankKeeper != nil {
+		addr, aerr := sdk.AccAddressFromBech32(msg.Submitter)
+		if aerr != nil {
+			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidAddress, "submitter must be a valid bech32 address to post the submit bond")
+		}
+		coins := sdk.NewCoins(sdk.NewCoin(bondDenom, sdkmath.NewIntFromUint64(bond)))
+		if err := m.bankKeeper.SendCoinsFromAccountToModule(goCtx, addr, types.ModuleName, coins); err != nil {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInsufficientFunds, "cannot escrow the %s submit bond: %s", coins, err.Error())
+		}
+	}
 	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body, epoch)
+	if bond > 0 && m.bankKeeper != nil {
+		m.stampBond(goCtx, e, bond, bondDenom) // record what was escrowed so the refund is exact
+	}
 	ctx.EventManager().EmitEvent(sdk.NewEvent(
 		"encmempool_encrypted_submitted",
 		sdk.NewAttribute("submitter", msg.Submitter),

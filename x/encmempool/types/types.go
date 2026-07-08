@@ -5,6 +5,8 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
@@ -36,6 +38,16 @@ type Params struct {
 	// constant ceiling in the keeper still guarantees bounded state as a last resort). ---
 	MaxInFlightEncTx        uint64 `json:"max_in_flight_enc_tx"`        // global ceiling on un-matured EncTx (0 = disabled)
 	MaxInFlightPerSubmitter uint64 `json:"max_in_flight_per_submitter"` // per-submitter ceiling on un-matured EncTx (0 = disabled)
+
+	// --- REFUNDABLE anti-sybil submit bond (round-9 #1). SubmitEncrypted escrows EncSubmitBond of
+	// EncSubmitBondDenom from the submitter into the module account; it is refunded IN FULL when the
+	// ciphertext is released (matured OR dropped). The per-submitter rate limit stays per-address (a
+	// global cap would re-introduce one-address censorship), so this bond is the COST dimension: a
+	// flooder must lock capital proportional to its in-flight flood, while a legitimate user pays only
+	// the opportunity cost of a briefly-locked deposit. 0 = disabled (the default; the amount actually
+	// escrowed is stamped onto each EncTx so a later param change never mis-refunds an in-flight one). ---
+	EncSubmitBond      uint64 `json:"enc_submit_bond,omitempty"`       // bond amount per submit (0 = no bond)
+	EncSubmitBondDenom string `json:"enc_submit_bond_denom,omitempty"` // denom of the bond (required when bond > 0)
 
 	// MaxVerifyOpsPerBlock is the HARD per-block budget on first-time decryption-share DLEQ verifications
 	// (CRIT-2 K_max). It caps the O(t) EC verify work a single block performs REGARDLESS of the share
@@ -373,6 +385,11 @@ type EncTx struct {
 	Nonce         []byte `json:"nonce"` // AES-GCM nonce
 	Body          []byte `json:"body"`  // AES-256-GCM ciphertext
 	Epoch         uint64 `json:"epoch"` // DKG epoch whose key this was encrypted to (0 = legacy)
+	// Bond/BondDenom record the refundable anti-sybil bond ESCROWED for this ciphertext at submit
+	// (round-9 #1), stamped here so releaseEncTx refunds EXACTLY what was locked even if the param
+	// changed meanwhile. 0 = no bond was taken.
+	Bond      uint64 `json:"bond,omitempty"`
+	BondDenom string `json:"bond_denom,omitempty"`
 }
 
 // EncShare is a keyper's threshold decryption share (x_i * A) for one EncTx.
@@ -567,6 +584,12 @@ func (p Params) Validate() error {
 	// permitted while EncEnabled is off, where the whole path is inert.)
 	if p.MaxInFlightEncTx == 0 {
 		return fmt.Errorf("max_in_flight_enc_tx must be >= 1 when enc_enabled (0 disables the global admission cap)")
+	}
+	// round-9 #1: a positive submit bond needs a valid denom to escrow/refund in.
+	if p.EncSubmitBond > 0 {
+		if err := sdk.ValidateDenom(p.EncSubmitBondDenom); err != nil {
+			return fmt.Errorf("enc_submit_bond_denom is required and must be a valid denom when enc_submit_bond > 0: %w", err)
+		}
 	}
 	// When the DKG supplies the active key, the trusted-setup params.ThresholdPub/Threshold/
 	// Keypers are the epoch-0 fallback and need not be populated; the DKG member set was

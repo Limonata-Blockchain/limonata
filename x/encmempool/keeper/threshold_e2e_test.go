@@ -19,11 +19,17 @@ import (
 // newKeeper wires a keeper over an in-memory store with a test context at the
 // given block height.
 func newKeeper(t *testing.T, height int64) (keeper.Keeper, sdk.Context) {
+	return newKeeperBank(t, height, nil)
+}
+
+// newKeeperBank builds a keeper with an optional BankKeeper (round-9 #1 bond tests pass a mock; all
+// other tests pass nil, which disables bonding).
+func newKeeperBank(t *testing.T, height int64, bk types.BankKeeper) (keeper.Keeper, sdk.Context) {
 	t.Helper()
 	key := storetypes.NewKVStoreKey(types.StoreKey)
 	tkey := storetypes.NewTransientStoreKey("transient_encmempool")
 	testCtx := testutil.DefaultContextWithDB(t, key, tkey)
-	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil, nil, nil)
+	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil, nil, nil, bk)
 	ctx := testCtx.Ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager()).
 		WithConsensusParams(cmtproto.ConsensusParams{Abci: &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 1}})
 	return k, ctx
