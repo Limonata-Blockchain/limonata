@@ -63,7 +63,7 @@ func TestC9Probe_HonestManyCiphertextsOneEpoch_AllIngestOneBlock(t *testing.T) {
 		t.Fatalf("precondition: honest_A should serve %d shares (owned per ct), built %d", C*owned, len(shares))
 	}
 
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 		{Operator: "honest_A", VE: types.VoteExtension{Shares: shares}},
 	})
@@ -108,7 +108,7 @@ func TestC9Probe_MaxSprayAttacker_CannotInflateWithNonProcessedChaff(t *testing.
 
 	consume := func(extra []types.VoteExtShare) int {
 		branch, _ := base.CacheContext()
-		ing := branch.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+		ing := branch.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 		c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 			{Operator: "attacker", VE: types.VoteExtension{Shares: append(append([]types.VoteExtShare(nil), realChaff...), extra...)}},
 		})
@@ -158,7 +158,7 @@ func TestC9Probe_ProcessedSetCap_BeyondWindowChaffClassifiedOut(t *testing.T) {
 		es = append(es, c.k.SubmitEncTx(base, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	// Chaff ONLY at the two beyond-window ciphertexts (es[ctCap], es[ctCap+1]) — real cts, attacker-owned
 	// points, valid slots — but outside the oldest-ctCap processed set.
 	beyond := c8ChaffAcross(t, c, []types.EncTx{es[ctCap], es[ctCap+1]}, "attacker", 1)
@@ -170,7 +170,7 @@ func TestC9Probe_ProcessedSetCap_BeyondWindowChaffClassifiedOut(t *testing.T) {
 	}
 
 	// Control: chaff at an IN-window ciphertext (the oldest) IS verified (and rejected as chaff).
-	ing2 := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing2 := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	inWindow := c8ChaffAcross(t, c, []types.EncTx{es[0]}, "attacker", 1)
 	c.k.ConsumeVoteExtensions(ing2, []keeper.VEEntry{
 		{Operator: "attacker", VE: types.VoteExtension{Shares: inWindow}},
@@ -202,7 +202,7 @@ func TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals(t *testing.T) {
 	e2 := c.k.SubmitEncTx(base, "user", 10, 2, ct2.A, ct2.Nonce, ct2.Body, 1) // matures @12
 
 	// Block 11: honest_A+honest_B serve real shares for BOTH cts; attacker sprays chaff at its points on BOTH.
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	honest := func(op string) []types.VoteExtShare {
 		return append(veSharesFor(t, c, base, e1, ct1, op), veSharesFor(t, c, base, e2, ct2, op)...)
 	}
@@ -299,7 +299,7 @@ func TestC9Probe_MultiCiphertextBound_OrderIndependent(t *testing.T) {
 	}
 	consumeOn := func(entries []keeper.VEEntry) [][]types.EncShare {
 		branch, _ := base.CacheContext()
-		c.k.ConsumeVoteExtensions(branch.WithBlockHeight(31).WithEventManager(sdk.NewEventManager()), entries)
+		c.k.ConsumeVoteExtensions(branch.WithBlockHeight(32).WithEventManager(sdk.NewEventManager()), entries)
 		out := make([][]types.EncShare, C)
 		for i, e := range es {
 			got := c.k.CollectShares(branch, e.DecryptHeight, e.Seq)

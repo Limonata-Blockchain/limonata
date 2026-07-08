@@ -262,6 +262,16 @@ func (m msgServer) SubmitDecryptionShare(goCtx context.Context, msg *types.MsgSu
 	if len(msg.D) == 0 {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing decryption share (d)")
 	}
+	// CRITICAL MATURITY GATE (anti-MEV confidentiality): reject a share for a ciphertext that has
+	// not matured. A stored share is public state and t of them reconstruct x*A = the AES key, so
+	// admitting an early share on this legacy tx path would let any observer decrypt the body before
+	// its decrypt_height. Mirrors the transparent consume-path gate; keyed on the msg's own height so
+	// it holds regardless of whether the referenced ciphertext still exists in state.
+	if msg.DecryptHeight > uint64(sdk.UnwrapSDKContext(goCtx).BlockHeight()) {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"decryption share submitted before maturity (decrypt_height %d > current height %d)",
+			msg.DecryptHeight, sdk.UnwrapSDKContext(goCtx).BlockHeight())
+	}
 	if p.DkgEnabled {
 		// Authorize against the active round for the EncTx's epoch. The EncTx tells us
 		// which epoch (=> which Qual member set) this share belongs to.

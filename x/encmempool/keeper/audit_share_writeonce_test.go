@@ -15,7 +15,7 @@ import (
 // maturity to retract its contribution and strand the ciphertext. This pins first-wins:
 // the first submit is stored, the overwrite is rejected, and the stored value is unchanged.
 func TestLegacyDecryptionShareWriteOnce(t *testing.T) {
-	k, ctx := newKeeper(t, 10)
+	k, ctx := newKeeper(t, 12)
 	keypers := []string{"cosmosKEYPER1", "cosmosKEYPER2", "cosmosKEYPER3"}
 	// Legacy keyper path: EncEnabled, DkgEnabled=false, DkgTransparent=false. SetParams does
 	// not run Validate, so the exact threshold-pub bytes are irrelevant to this path.
@@ -49,10 +49,48 @@ func TestLegacyDecryptionShareWriteOnce(t *testing.T) {
 	}
 }
 
+// CRITICAL maturity gate (anti-MEV confidentiality): a decryption share for a ciphertext that
+// has NOT matured (decrypt_height > current height) must be REJECTED at ingress. A stored share
+// is public state and t of them reconstruct the AES key, so accepting an early share would let
+// any observer decrypt the body before its decrypt_height. The same share is accepted once the
+// height reaches maturity.
+func TestDecryptionShareRejectedBeforeMaturity(t *testing.T) {
+	keypers := []string{"cosmosKEYPER1", "cosmosKEYPER2", "cosmosKEYPER3"}
+	share := &types.MsgSubmitDecryptionShare{
+		Keyper: keypers[0], DecryptHeight: 12, Seq: 0, Index: 1, D: []byte{0x01},
+	}
+
+	// At height 10, a share for a ciphertext maturing at 12 is too early -> rejected, nothing stored.
+	kEarly, ctxEarly := newKeeper(t, 10)
+	if err := kEarly.SetParams(ctxEarly, enableParams([]byte{0x02, 0x01}, 2, 2, keypers)); err != nil {
+		t.Fatal(err)
+	}
+	msEarly := keeper.NewMsgServerImpl(kEarly)
+	if _, err := msEarly.SubmitDecryptionShare(ctxEarly, share); err == nil {
+		t.Fatal("a share for a not-yet-matured ciphertext (decrypt_height 12 > height 10) must be rejected")
+	}
+	if n := len(kEarly.CollectShares(ctxEarly, 12, 0)); n != 0 {
+		t.Fatalf("no share may be stored before maturity, got %d", n)
+	}
+
+	// At height 12 (maturity), the same share is accepted.
+	kMature, ctxMature := newKeeper(t, 12)
+	if err := kMature.SetParams(ctxMature, enableParams([]byte{0x02, 0x01}, 2, 2, keypers)); err != nil {
+		t.Fatal(err)
+	}
+	msMature := keeper.NewMsgServerImpl(kMature)
+	if _, err := msMature.SubmitDecryptionShare(ctxMature, share); err != nil {
+		t.Fatalf("a share at/after maturity must be accepted: %v", err)
+	}
+	if n := len(kMature.CollectShares(ctxMature, 12, 0)); n != 1 {
+		t.Fatalf("matured share must be stored, got %d", n)
+	}
+}
+
 // Sanity: the same guard does not block DISTINCT slots (a keyper legitimately owning
 // several eval-points, or different ciphertexts, still stores each once).
 func TestLegacyDecryptionShareDistinctSlotsOK(t *testing.T) {
-	k, ctx := newKeeper(t, 10)
+	k, ctx := newKeeper(t, 12)
 	keypers := []string{"cosmosKEYPER1", "cosmosKEYPER2", "cosmosKEYPER3"}
 	if err := k.SetParams(ctx, enableParams([]byte{0x02, 0x01}, 2, 2, keypers)); err != nil {
 		t.Fatal(err)

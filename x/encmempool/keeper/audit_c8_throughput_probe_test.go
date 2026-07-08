@@ -63,7 +63,7 @@ func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.
 	// Every operator serves REAL DLEQ-valid shares for ALL 3 ciphertexts, GROUPED oldest-first —
 	// byte-for-byte the wire shape app.buildDecryptShares emits (iterate in-flight oldest-first,
 	// inner loop over owned points). 4 ops * 3 cts * 8 points = 96 valid shares this block.
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	var entries []keeper.VEEntry
 	total := 0
 	for _, op := range ops {
@@ -137,7 +137,7 @@ func TestC9_ComputeBound_HoldsUnderFullCommitteeFlood(t *testing.T) {
 	// (a) EXACT no-clamp full-committee flood: 5 ciphertexts, repeats=1. Each op serves 5*8=40 <= 256
 	// (no per-VE clamp); per ciphertext all 4 ops' 8 points == S=32 verify, so the block does exactly
 	// 5 * S = 160 verifications — the honest-liveness scaling, bounded by cap * S.
-	exactIng := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	exactIng := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	var exact []keeper.VEEntry
 	for _, op := range []string{"attacker", "honest_A", "honest_B", "honest_C"} {
 		exact = append(exact, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: c8ChaffAcross(t, c, es[:5], op, 1)}})
@@ -197,7 +197,8 @@ func TestC9_DrainRate_FullThroughput(t *testing.T) {
 	}
 
 	// ONE block of the full committee serving all 5 ciphertexts makes ALL 5 decryptable.
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	// Shares may only be served at/after maturity (@30 = submit 10 + delay 20), so consume there.
+	ing := base.WithBlockHeight(30).WithEventManager(sdk.NewEventManager())
 	var entries []keeper.VEEntry
 	for _, op := range ops {
 		var shares []types.VoteExtShare

@@ -149,7 +149,7 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 	// Honest A + B contribute their 16 REAL points through the VOTE-EXTENSION ingest path
 	// (proving valid shares ARE accepted by the new ingest verification); the attacker sprays 8
 	// chaff shares at its OWN owned points on the same block.
-	ing := ctx.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 		{Operator: "honest_A", VE: types.VoteExtension{Shares: veSharesFor(t, c, ctx, e, ct, "honest_A")}},
 		{Operator: "honest_B", VE: types.VoteExtension{Shares: veSharesFor(t, c, ctx, e, ct, "honest_B")}},
@@ -214,7 +214,9 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 // is first-wins-deduped (never re-verified, never duplicated).
 func TestC7_IngestVerifiesDLEQ_Unit(t *testing.T) {
 	c := c7Committee(t)
-	ctx := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
+	// Ingest at the ciphertext's maturity (submit 10 + delay 2 = 12): shares are only stored at/
+	// after decrypt_height (the anti-MEV maturity gate).
+	ctx := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	ct, err := threshold.Encrypt(c.ak.Pub, []byte("unit"))
 	if err != nil {
 		t.Fatal(err)

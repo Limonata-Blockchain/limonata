@@ -165,7 +165,7 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 			}
 		}
 
-		// Decryption shares for not-yet-matured ciphertexts I can serve.
+		// Decryption shares for MATURED ciphertexts I can serve (never before decrypt_height).
 		ve.Shares = app.buildDecryptShares(ctx, ek, op)
 
 		// Justified complaints against QUAL-candidate dealers, ONLY inside the complaint window
@@ -190,12 +190,14 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 	}
 }
 
-// buildDecryptShares produces this node's DLEQ-proved decryption shares for in-flight
-// ciphertexts of epochs it holds shares for — both NOT-YET-MATURED ones and matured ones
-// still inside the keeper's bounded decrypt-deferral window (cycle-3 H-B: a matured
-// ciphertext short of t shares is deferred up to StrandedDecryptGraceBlocks before its loud
-// drop, so late shares from a recovering validator must keep being served or the deferral
-// could never heal anything). HIGH-3: on the stake-weighted path this node owns a SET of
+// buildDecryptShares produces this node's DLEQ-proved decryption shares for MATURED in-flight
+// ciphertexts of epochs it holds shares for — only ciphertexts whose decrypt_height has been
+// reached (the maturity gate below), and among those the ones still inside the keeper's bounded
+// decrypt-deferral window (cycle-3 H-B: a matured ciphertext short of t shares is deferred up to
+// StrandedDecryptGraceBlocks before its loud drop, so late shares from a recovering validator
+// must keep being served or the deferral could never heal anything). A share must NEVER be served
+// before its ciphertext matures - that would expose the plaintext early (anti-MEV break).
+// HIGH-3: on the stake-weighted path this node owns a SET of
 // Shamir evaluation points, so it contributes ONE decryption share per owned point per
 // ciphertext. The per-epoch shares X_p are derived once from COMMITTED dealings + the
 // epoch's QUAL set, then reused.
@@ -222,6 +224,15 @@ func (app *EVMD) buildDecryptShares(ctx sdk.Context, ek *dkgnode.EncKey, op stri
 	k.IterateInFlightFrom(ctx, from, shareCap, func(e encmempooltypes.EncTx) bool {
 		if len(out) >= shareCap {
 			return false // vote-extension share budget reached
+		}
+		// CRITICAL MATURITY GATE (anti-MEV confidentiality): serve shares ONLY for ciphertexts that
+		// have matured (decrypt_height <= h). A share is x_i*A and t of them reconstruct the AES key,
+		// so serving them before decrypt_height would expose the plaintext early. Entries are visited
+		// in ascending (decryptHeight, seq) order, so the first not-yet-matured entry ends the window.
+		// (The deterministic authoritative gate is the consume-side processed-set check; this keeps an
+		// honest node from wasting its per-VE budget on shares the chain would reject.)
+		if e.DecryptHeight > h {
+			return false
 		}
 		if e.Epoch == 0 {
 			return true // legacy trusted-setup path is not served by the in-node DKG

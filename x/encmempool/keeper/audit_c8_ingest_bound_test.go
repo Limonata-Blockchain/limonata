@@ -88,7 +88,7 @@ func TestC8_PerOperatorCap_ExcessDroppedBeforeVerify(t *testing.T) {
 		t.Fatalf("precondition: expected %d chaff shares, built %d", owned*repeats, len(chaff))
 	}
 
-	ing := ctx.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 		{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
 	})
@@ -130,7 +130,7 @@ func TestC9_PerCiphertextBudget_ScalesWithRealCiphertextsNotRepeats(t *testing.T
 	// padding magnitude — which the within-block dedup collapses. Verifications must be owned*nct in BOTH.
 	for _, repeats := range []int{1, 2} {
 		branch, _ := ctx.CacheContext()
-		ing := branch.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+		ing := branch.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 		chaff := c8ChaffAcross(t, c, es, "attacker", repeats)
 		c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 			{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
@@ -178,7 +178,7 @@ func TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS(t *testing.T) {
 	for _, floodCts := range []int{1, 5, 15, 30} {
 		for _, repeats := range []int{1, 10, 40} {
 			branch, _ := base.CacheContext()
-			ing := branch.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+			ing := branch.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 			chaff := c8ChaffAcross(t, c, es[:floodCts], "attacker", repeats)
 			c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 				{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
@@ -200,7 +200,7 @@ func TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS(t *testing.T) {
 	// HIGH-B: re-sending the SAME fat chaff every block cannot escalate — a FIXED per-block cost.
 	chaff := c8ChaffAcross(t, c, es, "attacker", 1) // 30 cts * 8 pts = 240 distinct slots, re-sent verbatim
 	var prev = -1
-	for h := int64(11); h <= 16; h++ {
+	for h := int64(12); h <= 17; h++ {
 		branch, _ := base.CacheContext()
 		ing := branch.WithBlockHeight(h).WithEventManager(sdk.NewEventManager())
 		c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
@@ -238,7 +238,7 @@ func TestC8_PerVECap_ClampsOversizedExtension(t *testing.T) {
 		t.Fatalf("precondition: need > shareCap(%d) shares to exercise the clamp, built %d", shareCap, len(chaff))
 	}
 
-	ing := ctx.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
 		{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
 	})
@@ -266,7 +266,7 @@ func TestC8_BoundPreservesCycle7Fix_NoHonestStarve(t *testing.T) {
 	}
 	e := c.k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1) // matures @12
 
-	ing := ctx.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	// Attacker sorts FIRST (name-min) AND sprays a fat repeated flood; the bound must still let the
 	// honest operators (sorted after) verify their full share sets — no global-budget monopoly.
 	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
@@ -344,7 +344,7 @@ func TestC8_Bound_OrderIndependent(t *testing.T) {
 	}
 	consumeOn := func(entries []keeper.VEEntry) []types.EncShare {
 		branch, _ := base.CacheContext()
-		c.k.ConsumeVoteExtensions(branch.WithBlockHeight(31).WithEventManager(sdk.NewEventManager()), entries)
+		c.k.ConsumeVoteExtensions(branch.WithBlockHeight(32).WithEventManager(sdk.NewEventManager()), entries)
 		got := c.k.CollectShares(branch, e.DecryptHeight, e.Seq)
 		sortShares(got)
 		return got

@@ -131,7 +131,7 @@ func TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected(t *tes
 	wrong := keeper.VEEntry{Operator: "op2", VE: types.VoteExtension{Shares: []types.VoteExtShare{
 		{Epoch: 1, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: op1Pts[0], D: []byte("d")},
 	}}}
-	w.k.ConsumeVoteExtensions(w.ctx.WithBlockHeight(3), []keeper.VEEntry{wrong})
+	w.k.ConsumeVoteExtensions(w.ctx.WithBlockHeight(12), []keeper.VEEntry{wrong})
 	if got := w.k.CollectShares(w.ctx, e.DecryptHeight, e.Seq); len(got) != 0 {
 		t.Fatalf("share at a co-member's point must be rejected, have %d", len(got))
 	}
@@ -140,7 +140,7 @@ func TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected(t *tes
 	right := keeper.VEEntry{Operator: "op2", VE: types.VoteExtension{Shares: []types.VoteExtShare{
 		provedShareAt(t, w, ak, ct, "op2", op2Pts[0], e),
 	}}}
-	w.k.ConsumeVoteExtensions(w.ctx.WithBlockHeight(3), []keeper.VEEntry{right})
+	w.k.ConsumeVoteExtensions(w.ctx.WithBlockHeight(12), []keeper.VEEntry{right})
 	got := w.k.CollectShares(w.ctx, e.DecryptHeight, e.Seq)
 	if len(got) != 1 || got[0].Index != op2Pts[0] || got[0].Keyper != "op2" {
 		t.Fatalf("share at an owned point must be accepted: %+v", got)

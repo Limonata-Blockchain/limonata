@@ -53,7 +53,7 @@ func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 
 	// Every member's ONE vote extension carries its real shares for ct1 THEN ct2 (oldest-first,
 	// exactly as buildDecryptShares orders them). 8 + 8 = 16 real shares per member.
-	ing := base.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	var entries []keeper.VEEntry
 	for _, op := range servers {
 		sh := append(veSharesFor(t, c, base, e1, ct1, op), veSharesFor(t, c, base, e2, ct2, op)...)

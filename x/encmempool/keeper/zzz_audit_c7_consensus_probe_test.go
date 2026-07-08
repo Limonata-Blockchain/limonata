@@ -136,7 +136,7 @@ func TestC7Audit_ConsumePreBlock_AttackerSortsFirst_NoHaltNoStarve(t *testing.T)
 		})
 	}
 
-	ing := ctx.WithBlockHeight(11).WithEventManager(sdk.NewEventManager())
+	ing := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -206,7 +206,7 @@ func TestC7Audit_IngestVerdict_OrderIndependent(t *testing.T) {
 	}
 	consumeOn := func(entries []keeper.VEEntry) []types.EncShare {
 		branch, _ := base.CacheContext() // isolated overlay over identical committed state (a "node")
-		c.k.ConsumeVoteExtensions(branch.WithBlockHeight(31).WithEventManager(sdk.NewEventManager()), entries)
+		c.k.ConsumeVoteExtensions(branch.WithBlockHeight(32).WithEventManager(sdk.NewEventManager()), entries)
 		got := c.k.CollectShares(branch, e.DecryptHeight, e.Seq)
 		sortShares(got)
 		return got

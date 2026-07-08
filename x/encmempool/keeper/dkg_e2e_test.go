@@ -188,13 +188,15 @@ func TestOnChainDKG_FinalizeAndDecrypt(t *testing.T) {
 		t.Fatalf("enc tx epoch should be 1, got %d", e.Epoch)
 	}
 
-	// members 1 and 2 (any t) post proved shares
+	// members 1 and 2 (any t) post proved shares. Shares may only be submitted at/after the
+	// ciphertext's maturity (the anti-MEV maturity gate), so post them at decrypt_height.
+	shareCtx := ctx.WithBlockHeight(int64(e.DecryptHeight))
 	for _, m := range members[:thr] {
 		ds, proof, err := dkg.ProveDecryptShare(threshold.Share{Index: m.index, Xi: derived[m.index]}, ct)
 		if err != nil {
 			t.Fatalf("ProveDecryptShare: %v", err)
 		}
-		if _, err := ms.SubmitDecryptionShare(submitCtx, &types.MsgSubmitDecryptionShare{
+		if _, err := ms.SubmitDecryptionShare(shareCtx, &types.MsgSubmitDecryptionShare{
 			Keyper: m.acc, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: m.index,
 			D: ds.D, Proof: dkg.MarshalDLEQProof(proof),
 		}); err != nil {

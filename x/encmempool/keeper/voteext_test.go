@@ -345,7 +345,9 @@ func TestTransparent_DealingRejects(t *testing.T) {
 // finalized transparent committee so an authorized share also carries a verifiable proof.
 func TestTransparent_ShareIngest(t *testing.T) {
 	c := runTransparentDKG(t, map[string]int64{"op1": 100, "op2": 100, "op3": 100}, 32)
-	ctx := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
+	// Consume at the ciphertext's maturity (submit height 10 + delay 2 = 12): decryption shares are
+	// only ingested at/after decrypt_height (the anti-MEV maturity gate).
+	ctx := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	ct, err := threshold.Encrypt(c.ak.Pub, []byte("share-ingest"))
 	if err != nil {
 		t.Fatal(err)

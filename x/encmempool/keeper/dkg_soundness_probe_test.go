@@ -296,6 +296,8 @@ func TestRegression_MalformedEncShareA_LivenessPreserved(t *testing.T) {
 	var e types.EncTx
 	k.IterateEncTxAtHeight(submitCtx, 8, func(x types.EncTx) { e = x })
 
+	// Shares may only be submitted at/after maturity (anti-MEV maturity gate).
+	shareCtx := ctx.WithBlockHeight(int64(e.DecryptHeight))
 	for _, m := range members[1:] {
 		X := new(secp256k1Scalar)
 		first := true
@@ -315,7 +317,7 @@ func TestRegression_MalformedEncShareA_LivenessPreserved(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ms.SubmitDecryptionShare(submitCtx, &types.MsgSubmitDecryptionShare{
+		if _, err := ms.SubmitDecryptionShare(shareCtx, &types.MsgSubmitDecryptionShare{
 			Keyper: m.acc, DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: m.index,
 			D: ds.D, Proof: dkg.MarshalDLEQProof(proof),
 		}); err != nil {

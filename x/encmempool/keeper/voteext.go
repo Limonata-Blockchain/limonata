@@ -657,6 +657,14 @@ func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares 
 // The stored EncShare.Keyper is the operator address (attribution only); the decrypt path
 // (recoverSharedSecret) uses only Index/D/Proof. Returns whether it stored a new share.
 func (k Keeper) IngestDecryptShareFromVE(ctx sdk.Context, operator string, s types.VoteExtShare) bool {
+	// CRITICAL MATURITY GATE (defense-in-depth): never store a share for a not-yet-matured
+	// ciphertext - a stored share is public and t of them reconstruct the AES key, so an early
+	// share would expose the plaintext before its decrypt_height. The batch consume path enforces
+	// this via its processed-set; this single-share primitive (currently test-only) enforces it
+	// directly so it can never bypass the gate if it is ever wired into a live path.
+	if s.DecryptHeight > uint64(ctx.BlockHeight()) {
+		return false
+	}
 	member, ctA, epoch, ok := k.classifyDecryptShare(ctx, operator, s, nil)
 	if !ok {
 		return false
@@ -947,6 +955,17 @@ func (k Keeper) ingestDecryptSharesBounded(ctx sdk.Context, canon []VEEntry, p t
 	}
 	processed := make(map[txKey]bool, maxVerifyCiphertextsPerBlock)
 	k.IterateInFlightFrom(ctx, from, maxVerifyCiphertextsPerBlock, func(e types.EncTx) bool {
+		// CRITICAL MATURITY GATE (anti-MEV confidentiality): NEVER store a decryption share for a
+		// ciphertext that has not matured (decrypt_height > h). A stored share is public state, and
+		// t stored shares reconstruct x*A = the AES key, so admitting shares early would let any
+		// observer decrypt the body BEFORE its decrypt_height - defeating the timing guarantee the
+		// whole scheme exists for. Entries are visited in ascending (decryptHeight, seq) order, so
+		// the first not-yet-matured entry ends the matured window. This is the AUTHORITATIVE gate:
+		// even a byzantine node serving early shares cannot get them stored, because a share whose
+		// (decryptHeight, seq) is absent from `processed` is dropped below.
+		if e.DecryptHeight > h {
+			return false
+		}
 		processed[txKey{decryptHeight: e.DecryptHeight, seq: e.Seq}] = true
 		return true
 	})
