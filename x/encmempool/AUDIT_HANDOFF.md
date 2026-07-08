@@ -115,10 +115,27 @@ and assess severity; do not re-report them as new without engaging the rationale
    all-or-nothing and every release path refunds. Refs: `keeper/msg_server.go`, `keeper/keeper.go`
    refundBond.
 
-4. **Proposer can omit DKG vote-extension injection — ABCI++ dilemma (DESIGN).** A proposer may
-   inject nothing on its blocks without failing consensus (injection is opportunistic; a proposer
-   with no extensions and a censoring one are indistinguishable at Txs[0]). Making injection
-   consensus-required has a real liveness cost. Refs: `evmd/dkg_voteext.go` wrapDkgProcessProposal.
+4. **Proposer can omit DKG vote-extension injection — ABCI++ dilemma (DESIGN, unresolved).** A
+   proposer may inject nothing on its own blocks. A non-proposer in ProcessProposal does NOT have
+   H-1's extended commit (only the proposer does, via PrepareProposal's LocalLastCommit), so it
+   CANNOT independently tell a censoring proposer from one that genuinely had no extensions -
+   requiring injection would false-reject legitimately-empty blocks and risk a HALT. Mitigation:
+   DKG progresses on any NON-censored proposer's blocks and the deal/complaint windows + auto-retry
+   tolerate censored slots, so a minority of censoring proposers delays but does not stall DKG. A
+   hard fix needs a protocol change (persisted extended-commit view or a slashing signal). Refs:
+   `evmd/dkg_voteext.go` wrapDkgProcessProposal.
+
+7. **Node-local secret-scalar ops use variable-time (NonConst) EC mul — side-channel (LOW).** Share
+   proving / decryption (`threshold/threshold.go`, `dkg/proof.go`) use `ScalarMultNonConst` /
+   `ScalarBaseMultNonConst` with SECRET scalars. Not a remote/consensus break, but a validator
+   key/share timing side-channel on a shared or observable host. The decred secp256k1 lib exposes
+   only NonConst variants, so a true constant-time fix needs a different EC backend - scoped as a
+   library-level change, not a local patch. Operator mitigation: run validators on dedicated hosts.
+
+8. **`EncExecEnabled=false` user submits — now REFUSED (round-10 #4).** SubmitEncrypted rejects a
+   user submission while execution is off (a matured ciphertext would be decrypted + consumed
+   without executing = silent user-tx loss). The keeper decrypt path still runs inert for bring-up
+   via direct SubmitEncTx. Refs: `keeper/msg_server.go`.
 
 5. **Genesis DKG-state serialization — DONE (was §6).** ExportGenesis/InitGenesis now round-trip
    the full DKG/threshold state (EncSeq, EncTx, shares, DkgRounds, dealings, ActiveKeys, epochs,
@@ -146,7 +163,8 @@ vote-extension shape caps enforced on the AUTHORITATIVE consume path (not only g
 VerifyVoteExtension), the ExtendVote adversary moved behind the `dkgattack` build tag (production
 binary gets a no-op), PoK chain-id domain separation (cross-chain/fork replay), the fail-closed
 whale guard on submits, the refundable anti-sybil submit bond, ingest-verified-share DLEQ de-dup,
-and derive-time offline-victim poison detection + attribution.
+derive-time offline-victim poison detection + attribution, exec-off submit refusal (no silent
+user-tx loss), and the decrypted-exec cumulative-gas de-overshoot (deferred, no tx loss).
 
 The former duplicate-DLEQ perf item is FIXED: an ingest-`Verified` flag on `EncShare` lets the
 decrypt-path recover skip re-verifying VE-sourced shares (index-range + dedup guards still apply;
