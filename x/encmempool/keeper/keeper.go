@@ -70,7 +70,14 @@ func (k Keeper) SetCommit(ctx context.Context, c types.Commit) error {
 	if err != nil {
 		return err
 	}
-	return k.store(ctx).Set(commitKey(c.Height, c.Sender, c.Seq), bz)
+	st := k.store(ctx)
+	key := commitKey(c.Height, c.Sender, c.Seq)
+	// EXTERNAL-REVIEW #4: bump the admission ref-counts only for a genuinely NEW commit (idempotent — the
+	// seq is monotonic so this is always new in practice, but the existence check keeps the count exact).
+	if existing, _ := st.Get(key); existing == nil {
+		k.incCommitCount(ctx, c.Sender)
+	}
+	return st.Set(key, bz)
 }
 
 func (k Keeper) GetCommit(ctx context.Context, height uint64, sender string, seq uint64) (types.Commit, bool) {
@@ -86,7 +93,14 @@ func (k Keeper) GetCommit(ctx context.Context, height uint64, sender string, seq
 }
 
 func (k Keeper) DeleteCommit(ctx context.Context, height uint64, sender string, seq uint64) {
-	_ = k.store(ctx).Delete(commitKey(height, sender, seq))
+	st := k.store(ctx)
+	key := commitKey(height, sender, seq)
+	// EXTERNAL-REVIEW #4: dec the admission ref-counts only if the commit was actually present, so a
+	// double-delete (reveal path + GC path) can never underflow the count.
+	if existing, _ := st.Get(key); existing != nil {
+		k.decCommitCount(ctx, sender)
+	}
+	_ = st.Delete(key)
 }
 
 // --- pending reveals ---
@@ -339,6 +353,52 @@ func (k Keeper) incSubmitterEncCount(ctx context.Context, submitter string) {
 // this const is the safe always-on backstop.
 const maxEncSubmitsPerBlockPerSubmitter = 4
 
+// maxCiphertextBodyBytes caps the GCM-sealed ciphertext body at ingress (external-review #2). The plaintext
+// is a single anti-MEV transaction; 16 KiB is generous for one (a swap/trade is a few hundred bytes) while
+// bounding per-ciphertext state + the later AES-GCM decrypt cost, so MaxInFlightEncTx * body stays bounded.
+const maxCiphertextBodyBytes = 16384
+
+// commit/reveal admission ceilings (external-review #4): bound the in-flight (un-revealed) commit state so
+// the permissionless CommitTx path cannot be spammed into unbounded KV state + O(N) BeginBlock GC scans.
+const (
+	maxInFlightCommits  = 32768
+	maxCommitsPerSender = 2048
+)
+
+// --- commit/reveal in-flight ref-counts (O(1) admission gauges, inc in SetCommit, dec in DeleteCommit) ---
+
+func submitterCommitCountKey(sender string) []byte {
+	return concat(types.SubmitterCommitCountPrefix, []byte(sender))
+}
+
+// GetGlobalCommitCount returns the number of in-flight (un-revealed, un-GC'd) commits across all senders.
+func (k Keeper) GetGlobalCommitCount(ctx context.Context) uint64 {
+	return k.readU64(ctx, types.GlobalCommitCountKey)
+}
+
+// GetSubmitterCommitCount returns a sender's in-flight commit count (record deleted at zero).
+func (k Keeper) GetSubmitterCommitCount(ctx context.Context, sender string) uint64 {
+	return k.readU64(ctx, submitterCommitCountKey(sender))
+}
+
+func (k Keeper) incCommitCount(ctx context.Context, sender string) {
+	_ = k.store(ctx).Set(types.GlobalCommitCountKey, u64(k.GetGlobalCommitCount(ctx)+1))
+	_ = k.store(ctx).Set(submitterCommitCountKey(sender), u64(k.GetSubmitterCommitCount(ctx, sender)+1))
+}
+
+func (k Keeper) decCommitCount(ctx context.Context, sender string) {
+	if g := k.GetGlobalCommitCount(ctx); g > 1 {
+		_ = k.store(ctx).Set(types.GlobalCommitCountKey, u64(g-1))
+	} else {
+		_ = k.store(ctx).Delete(types.GlobalCommitCountKey)
+	}
+	if s := k.GetSubmitterCommitCount(ctx, sender); s > 1 {
+		_ = k.store(ctx).Set(submitterCommitCountKey(sender), u64(s-1))
+	} else {
+		_ = k.store(ctx).Delete(submitterCommitCountKey(sender))
+	}
+}
+
 // EXTERNAL-REVIEW #7: key the per-block submit-rate counter by (height, submitter) so past-block entries
 // form a delete-able prefix range and are GC'd (gcEncSubmitRate), instead of leaving one permanent entry
 // per distinct-ever-submitter (a paid-sybil state leak the old submitter-only key allowed).
@@ -348,9 +408,10 @@ func encSubmitRateKey(height uint64, submitter string) []byte {
 
 // maxRateGCPerBlock bounds how many stale submit-rate entries BeginBlock reclaims per block; the entries
 // sort height-ascending so the oldest (stale) ones are reclaimed first and the backlog drains steadily.
-// Set above the realistic per-block distinct-submitter inflow (bounded by block gas / min submit cost) so
-// the drain keeps pace with steady-state churn; a transient burst still drains over subsequent blocks.
-const maxRateGCPerBlock = 2048
+// Set above the realistic per-block distinct-submitter inflow (a submit costs base gas, so even a
+// high-gas-limit block admits well under this many distinct submitters) so the drain keeps pace with
+// steady-state churn; a transient burst above it still drains, bounded, over subsequent blocks.
+const maxRateGCPerBlock = 8192
 
 // bumpEncSubmitsThisBlock increments and returns this submitter's admission count for `height`. The
 // record is keyed by (height, submitter) so each block's counter is a fresh entry (count only), and

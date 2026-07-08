@@ -115,4 +115,11 @@ var (
 	// Byzantine committee member cannot flap its own key every block to force a member-change re-genesis
 	// (MembersHash binds the enc key since external-review #4). Deleted with the registration (DeleteEncPubKey).
 	EncKeyRotatedHeightPrefix = []byte{0x22} // 0x22 | operatorAddr -> uint64 (be): height of last key change
+
+	// GlobalCommitCountKey / SubmitterCommitCountPrefix ref-count the in-flight (un-revealed, un-GC'd)
+	// commit/reveal commits, so CommitTx can REJECT at ingress once a ceiling is reached — bounding the
+	// attacker-controlled commit state and therefore the O(N) BeginBlock GC scan (external-review #4). The
+	// old commit/reveal path had NO admission cap. Maintained O(1) (inc in SetCommit, dec in DeleteCommit).
+	GlobalCommitCountKey       = []byte{0x23} // -> uint64 (be): # of in-flight commits across all senders
+	SubmitterCommitCountPrefix = []byte{0x24} // 0x24 | sender -> uint64 (be): # of in-flight commits for that sender
 )

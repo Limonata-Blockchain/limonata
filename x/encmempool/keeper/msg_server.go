@@ -95,6 +95,16 @@ func (m msgServer) CommitTx(goCtx context.Context, msg *types.MsgCommitTx) (*typ
 	if len(msg.CommitHash) != sha256.Size {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "commit_hash must be %d bytes", sha256.Size)
 	}
+	// EXTERNAL-REVIEW #4: ADMISSION CONTROL for the permissionless commit/reveal path (previously
+	// uncapped). Reject at ingress once the global OR per-sender in-flight commit ceiling is reached, so a
+	// spammer cannot grow un-revealed commit state without bound (which would also grow the O(N) BeginBlock
+	// GC scan). O(1) maintained ref-counts, never an O(backlog) scan.
+	if m.GetGlobalCommitCount(goCtx) >= maxInFlightCommits {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "commit mempool full: %d in-flight commits at the ceiling", maxInFlightCommits)
+	}
+	if m.GetSubmitterCommitCount(goCtx, msg.Sender) >= maxCommitsPerSender {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "sender is at its in-flight commit ceiling (%d commits)", maxCommitsPerSender)
+	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
 	height := uint64(ctx.BlockHeight())
 	seq := m.nextSeq(goCtx)
@@ -178,6 +188,13 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if len(msg.Nonce) != threshold.NonceSize {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "nonce must be %d bytes, got %d", threshold.NonceSize, len(msg.Nonce))
 	}
+	// EXTERNAL-REVIEW #2: cap the ciphertext BODY size at ingress. The plaintext is one anti-MEV tx, so a
+	// GCM-sealed body far above a generous tx size is padding; without this, tx-size/gas is the only brake
+	// on per-ciphertext state + later AES-GCM decrypt work, and MaxInFlightEncTx ciphertexts each at the
+	// (multi-MB) tx limit is a real transient-state / decrypt-cost lever. maxCiphertextBodyBytes bounds it.
+	if len(msg.Body) > maxCiphertextBodyBytes {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "ciphertext body exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.Body))
+	}
 	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a
 	// flooder cannot grow EncTx state (nor the per-block decrypt scan) without bound, nor starve
 	// honest ciphertexts. The checks read O(1) maintained counters (never an O(backlog) scan).
@@ -236,6 +253,11 @@ func (m msgServer) SubmitDecryptionShare(goCtx context.Context, msg *types.MsgSu
 	p := m.GetParams(goCtx)
 	if !p.EncEnabled {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
+	}
+	// EXTERNAL-REVIEW #7: replaced by the transparent vote-extension decryption-share path — reject under
+	// DkgTransparent so the tx path (member-index based) cannot write into a weighted round.
+	if p.DkgTransparent {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "transparent DKG is active: the vote-extension share path replaces MsgSubmitDecryptionShare")
 	}
 	if len(msg.D) == 0 {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing decryption share (d)")
@@ -328,6 +350,12 @@ func (m msgServer) DkgDeal(goCtx context.Context, msg *types.MsgDkgDeal) (*types
 	if !p.DkgEnabled {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "DKG is not enabled")
 	}
+	// EXTERNAL-REVIEW #7: the TRANSPARENT path (vote extensions) fully replaces this signed-tx deal path and
+	// uses weighted eval points, not the raw member indices this handler writes. Reject it under
+	// DkgTransparent so a stale/incompatible tx can never write semantically-wrong state into a weighted round.
+	if p.DkgTransparent {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "transparent DKG is active: the vote-extension deal path replaces MsgDkgDeal")
+	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
 	round, ok := m.GetDkgRound(goCtx, msg.Epoch)
 	if !ok || round.Status != types.DkgStatusOpen {
@@ -411,6 +439,10 @@ func (m msgServer) DkgComplaint(goCtx context.Context, msg *types.MsgDkgComplain
 	p := m.GetParams(goCtx)
 	if !p.DkgEnabled {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "DKG is not enabled")
+	}
+	// EXTERNAL-REVIEW #7: replaced by the transparent vote-extension complaint path — reject under DkgTransparent.
+	if p.DkgTransparent {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "transparent DKG is active: the vote-extension complaint path replaces MsgDkgComplaint")
 	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
 	round, ok := m.GetDkgRound(goCtx, msg.Epoch)
