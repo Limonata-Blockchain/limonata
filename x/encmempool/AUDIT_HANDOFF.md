@@ -89,26 +89,31 @@ currently stake-concentrated; mainnet decentralization is the resolution, not a 
 These are already-identified and (where noted) deliberately deferred. Please VERIFY the reasoning
 and assess severity; do not re-report them as new without engaging the rationale.
 
-1. **Topology / whale (see §3) — NOT a code bug.** A stake-dominant operator decrypts alone.
-   Resolution = stake decentralization + (optionally) a fail-closed round-open VP-cap that refuses
-   to provide false confidentiality when too concentrated. Auditor input on the VP-cap design is
-   welcome.
+1. **Topology / whale (see §3) — fundamental; now FAIL-CLOSED.** A stake-dominant operator decrypts
+   alone; no code can create confidentiality against a legitimately key-holding whale (math, not a
+   bug). What is now enforced: `SubmitEncrypted` FAILS CLOSED (`CommitteeConcentrationBreached`) when
+   a committee member owns >= the reconstruction threshold of eval-points, refusing to accept a
+   "confidential" submission a whale would read rather than lie. Actual confidentiality still requires
+   stake decentralization. Auditor: verify the concentration test + that the fail-closed is honest.
 
-2. **Offline-victim dealer poisoning — reactive-only (DESIGN).** Complaints are produced only by
-   the affected validator during the complaint window; a dealer that poisons shares for an
-   OFFLINE validator survives into QUAL. Mitigation is REACTIVE: DLEQ verification drops bad
-   partials on the decrypt path, and a decrypt-health streak (now 16 stranded maturities, lowered
-   from 32) force-rekeys. The STRUCTURAL fix (proactive derive-time Feldman verification, "the
-   belt") was **attempted and reverted** — it broke the HIGH-2 complaint repro and the DLEQ
-   backstop already prevents silent corruption. Refs: `evmd/dkg_voteext.go` buildDkgComplaints,
-   `dkgnode/enckey.go:177,216`, `keeper/endblock.go` decryptHealthStrandThreshold.
+2. **Offline-victim dealer poisoning — DETECTED + attributed; auto-rekey scoped.** The in-window
+   complaint channel misses a dealer that poisons a validator OFFLINE for the whole complaint window.
+   Now: `dkgnode.DetectPoisonedDealers` runs the Feldman check POST-finalization at derive time, so a
+   returning victim attributes the poison to the specific dealer (logged for operator action); the
+   DLEQ backstop prevents corruption and the health rekey (16 strands) recovers liveness
+   automatically. REMAINING (scoped, not built): the AUTOMATIC post-final exclusion->rekey — tractable
+   and Byzantine-safe by reusing the existing framing-resistant justified complaint (a false complaint
+   fails the on-chain VerifyShare), but a consensus-gating + rekey change that needs its own review
+   cycle (the class that regressed the HIGH-2 repro before). Refs: `dkgnode/enckey.go`
+   DetectPoisonedDealers, `evmd/dkg_voteext.go` buildDkgComplaints.
 
-3. **Sybil encrypted-submit spam — needs an ECONOMIC mechanism (DESIGN).** Admission is
-   per-submitter (4/block) by DELIBERATE choice: a global cap re-introduces one-address
-   censorship/DoS. A funded Sybil set can keep the per-block DLEQ-verify budget saturated. The
-   complete fix is a stake/price ingress gate (a mechanism with UX implications), not a constant —
-   a design decision for Limonata, informed by this audit. Refs: `keeper/msg_server.go` +
-   `keeper/keeper.go:356`.
+3. **Sybil encrypted-submit spam — now priced (REFUNDABLE BOND).** Admission stays per-submitter (a
+   global cap re-introduces one-address censorship). The cost dimension is now a refundable bond
+   (`EncSubmitBond`/`EncSubmitBondDenom`, gov param, default 0): `SubmitEncrypted` escrows it to the
+   module account; `releaseEncTx` refunds it in full on release. A flooder locks capital
+   proportional to its flood; a legit user pays only opportunity cost. Auditor: verify the escrow is
+   all-or-nothing and every release path refunds. Refs: `keeper/msg_server.go`, `keeper/keeper.go`
+   refundBond.
 
 4. **Proposer can omit DKG vote-extension injection — ABCI++ dilemma (DESIGN).** A proposer may
    inject nothing on its blocks without failing consensus (injection is opportunistic; a proposer
@@ -139,14 +144,14 @@ correctness (fee-collector conservation, reverted-create nonce bump, per-tx + bl
 TxIndex isolation, blob-tx reject), genesis DKG-state round-tripping with recomputed ref-counts,
 vote-extension shape caps enforced on the AUTHORITATIVE consume path (not only gossip-time
 VerifyVoteExtension), the ExtendVote adversary moved behind the `dkgattack` build tag (production
-binary gets a no-op), and PoK chain-id domain separation (cross-chain/fork replay).
+binary gets a no-op), PoK chain-id domain separation (cross-chain/fork replay), the fail-closed
+whale guard on submits, the refundable anti-sybil submit bond, ingest-verified-share DLEQ de-dup,
+and derive-time offline-victim poison detection + attribution.
 
-**Known MEDIUM perf item (not a safety bug):** decryption shares are DLEQ-verified at vote-extension
-ingest AND again in `recoverSharedSecret`/`RecoverVerifiedWithKeys` at decrypt time. The Y-cache
-bounds the per-verify cost and the per-block verify budget bounds the total, so it is not a DoS
-lever, but the hot path does duplicate DLEQ work. A "verified-at-ingest" marker could let the
-decrypt path skip re-verifying VE-sourced shares (legacy-tx shares still need it). Deferred as an
-optimization. Refs: `keeper/voteext.go` recoverSharedSecret, `dkg/proof.go` RecoverVerifiedWithKeys.
+The former duplicate-DLEQ perf item is FIXED: an ingest-`Verified` flag on `EncShare` lets the
+decrypt-path recover skip re-verifying VE-sourced shares (index-range + dedup guards still apply;
+legacy-tx shares stay re-verified). Refs: `keeper/abci.go` recoverSharedSecret, `dkg/proof.go`
+RecoverVerifiedWithKeys preVerified.
 
 ---
 
