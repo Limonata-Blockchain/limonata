@@ -339,32 +339,62 @@ func (k Keeper) incSubmitterEncCount(ctx context.Context, submitter string) {
 // this const is the safe always-on backstop.
 const maxEncSubmitsPerBlockPerSubmitter = 4
 
-func encSubmitRateKey(submitter string) []byte {
-	return concat(types.EncSubmitRatePrefix, []byte(submitter))
+// EXTERNAL-REVIEW #7: key the per-block submit-rate counter by (height, submitter) so past-block entries
+// form a delete-able prefix range and are GC'd (gcEncSubmitRate), instead of leaving one permanent entry
+// per distinct-ever-submitter (a paid-sybil state leak the old submitter-only key allowed).
+func encSubmitRateKey(height uint64, submitter string) []byte {
+	return concat(types.EncSubmitRatePrefix, u64(height), []byte(submitter))
 }
 
+// maxRateGCPerBlock bounds how many stale submit-rate entries BeginBlock reclaims per block; the entries
+// sort height-ascending so the oldest (stale) ones are reclaimed first and the backlog drains steadily.
+const maxRateGCPerBlock = 512
+
 // bumpEncSubmitsThisBlock increments and returns this submitter's admission count for `height`. The
-// record (be(height)||be(count)) lazily resets to 1 the first time the submitter submits at a new
-// height, so there is exactly ONE record per submitter (reused across blocks, no leak) and the
-// increment is O(1) in canonical DeliverTx order — deterministic on every node. A rejected submit's
-// bump is discarded with its branched store, so the persisted count tracks ADMITTED submits.
+// record is keyed by (height, submitter) so each block's counter is a fresh entry (count only), and
+// past-block entries are reclaimed by gcEncSubmitRate in BeginBlock (EXTERNAL-REVIEW #7: the previous
+// submitter-only key never deleted, leaking one entry per distinct-ever-submitter). The increment is O(1)
+// in canonical DeliverTx order — deterministic on every node. A rejected submit's bump is discarded with
+// its branched store, so the persisted count tracks ADMITTED submits.
 func (k Keeper) bumpEncSubmitsThisBlock(ctx context.Context, submitter string, height uint64) uint64 {
-	key := encSubmitRateKey(submitter)
+	key := encSubmitRateKey(height, submitter) // height is IN the key -> each block's counter is separate
 	bz, _ := k.store(ctx).Get(key)
-	var sh, cnt uint64
-	if len(bz) == 16 {
-		sh = binary.BigEndian.Uint64(bz[:8])
-		cnt = binary.BigEndian.Uint64(bz[8:])
-	}
-	if sh != height {
-		cnt = 0 // first submit at a new height: reset
+	var cnt uint64
+	if len(bz) == 8 {
+		cnt = binary.BigEndian.Uint64(bz)
 	}
 	cnt++
-	out := make([]byte, 16)
-	binary.BigEndian.PutUint64(out[:8], height)
-	binary.BigEndian.PutUint64(out[8:], cnt)
+	out := make([]byte, 8)
+	binary.BigEndian.PutUint64(out, cnt)
 	_ = k.store(ctx).Set(key, out)
 	return cnt
+}
+
+// gcEncSubmitRate reclaims up to maxRateGCPerBlock submit-rate entries from PAST blocks (height < current).
+// Entries sort height-ascending, so the scan visits the oldest first and stops the instant it reaches the
+// current height — bounded work per block that keeps the counter's KV footprint at ~one block's submitters.
+func (k Keeper) gcEncSubmitRate(ctx context.Context, currentHeight uint64) {
+	st := k.store(ctx)
+	it, err := st.Iterator(types.EncSubmitRatePrefix, prefixEnd(types.EncSubmitRatePrefix))
+	if err != nil {
+		return
+	}
+	pfxLen := len(types.EncSubmitRatePrefix)
+	var stale [][]byte
+	for ; it.Valid() && len(stale) < maxRateGCPerBlock; it.Next() {
+		key := it.Key()
+		if len(key) < pfxLen+8 {
+			continue
+		}
+		if binary.BigEndian.Uint64(key[pfxLen:pfxLen+8]) >= currentHeight {
+			break // reached current/future entries (height-ascending order) — nothing older remains
+		}
+		stale = append(stale, append([]byte(nil), key...))
+	}
+	it.Close()
+	for _, key := range stale {
+		_ = st.Delete(key)
+	}
 }
 
 func (k Keeper) decSubmitterEncCount(ctx context.Context, submitter string) {

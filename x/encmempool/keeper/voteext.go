@@ -71,7 +71,9 @@ func encKeyOwnerKey(key []byte) []byte    { return concat(types.EncKeyOwnerPrefi
 // (the caller feeds entries in a canonical, operator-sorted order). Returns whether it
 // wrote a new/rotated key.
 func (k Keeper) RecordEncPubKey(ctx sdk.Context, operator string, key, pop []byte) bool {
-	if operator == "" || !dkg.ValidCompressedPoint(key) {
+	// EXTERNAL-REVIEW #2: key is a 33-byte point (ValidCompressedPoint); cap the PoP too (an honest DER
+	// ECDSA proof is ~72 bytes) so an announcement cannot carry a padded multi-KB pop blob.
+	if operator == "" || !dkg.ValidCompressedPoint(key) || len(pop) > maxEncKeyPoPBytes {
 		return false
 	}
 	cur, had := k.GetEncPubKey(ctx, operator)
@@ -125,6 +127,46 @@ func (k Keeper) IterateEncPubKeys(ctx context.Context, fn func(operator string, 
 	defer it.Close()
 	for ; it.Valid(); it.Next() {
 		fn(string(it.Key()[len(types.EncPubKeyPrefix):]), append([]byte(nil), it.Value()...))
+	}
+}
+
+// maxEncKeyGCPerBlock bounds how many stale enc-key registrations gcStaleEncKeys reclaims per sweep, so a
+// mass-unbond cannot make the sweep unbounded; the backlog drains over subsequent sweeps.
+const maxEncKeyGCPerBlock = 64
+
+// DeleteEncPubKey removes an operator's enc-key registration AND its reverse-owner index (lock-step with
+// RecordEncPubKey), freeing the key for reuse by another operator.
+func (k Keeper) DeleteEncPubKey(ctx sdk.Context, operator string) {
+	st := k.store(ctx)
+	if key, ok := k.GetEncPubKey(ctx, operator); ok {
+		_ = st.Delete(encKeyOwnerKey(key))
+	}
+	_ = st.Delete(encPubKeyKey(operator))
+}
+
+// gcStaleEncKeys reclaims enc-key registrations for operators that are no longer bonded validators
+// (EXTERNAL-REVIEW #8: member selection already IGNORES them, but the records — plus their reverse-owner
+// index that blocks another operator reusing that key — otherwise accumulate forever as the validator set
+// churns). Bounded to maxEncKeyGCPerBlock deletions per sweep. A validator that re-bonds simply
+// re-announces its key (idempotent) on its next vote, so deletion is safe. Deterministic: the bonded set
+// and the iteration order are pure functions of committed state.
+func (k Keeper) gcStaleEncKeys(ctx sdk.Context) {
+	if k.stakingKeeper == nil {
+		return
+	}
+	bonded := make(map[string]bool)
+	_ = k.stakingKeeper.IterateBondedValidatorsByPower(ctx, func(_ int64, v stakingtypes.ValidatorI) bool {
+		bonded[v.GetOperator()] = true
+		return false
+	})
+	var stale []string
+	k.IterateEncPubKeys(ctx, func(operator string, _ []byte) {
+		if len(stale) < maxEncKeyGCPerBlock && !bonded[operator] {
+			stale = append(stale, operator)
+		}
+	})
+	for _, op := range stale {
+		k.DeleteEncPubKey(ctx, op)
 	}
 }
 
@@ -542,8 +584,12 @@ func validateDealingShape(round types.DkgRound, commitments [][]byte, encShares 
 		if len(s.Nonce) != threshold.NonceSize {
 			return fmt.Errorf("enc_share for eval point %d has bad nonce length %d", s.MemberIndex, len(s.Nonce))
 		}
-		if len(s.Body) == 0 {
-			return fmt.Errorf("empty enc_share body for eval point %d", s.MemberIndex)
+		if n := len(s.Body); n == 0 || n > maxEncShareBodyBytes {
+			// EXTERNAL-REVIEW #2: an honest GCM-sealed share body is ~48 bytes; cap it so a dealer cannot pad
+			// each of the `want` enc_shares up to the 1-MiB VE limit (structurally valid junk every node then
+			// unmarshals, validates, and STORES). The rest of the dealing is already byte-bounded: exactly t
+			// commitments + want enc_shares, each A/commitment a 33-byte point, nonce an exact length.
+			return fmt.Errorf("enc_share body for eval point %d has bad length %d", s.MemberIndex, n)
 		}
 		seen[s.MemberIndex] = true
 	}
@@ -673,6 +719,15 @@ const MaxVerifyCiphertextsPerBlock = maxVerifyCiphertextsPerBlock
 // against) pair cost at most ONE verify per epoch; a quota of 8/block over the window (default 10)
 // clears every honest accuser's real complaints (a round with > that many bad dealers fails QUAL anyway).
 const maxComplaintVerifiesPerAccuser = 8
+
+// EXTERNAL-REVIEW #2 field-byte caps: VerifyVoteExtension bounds the VE's TOTAL bytes (1 MiB) + element
+// COUNTS, and the crypto fields are self-bounding (a 33-byte point, a 64-byte DLEQ proof — ParseDLEQProof
+// rejects any other length). These cap the two remaining variable-length fields so a peer cannot pad a
+// structurally-valid VE that every node then unmarshals / validates / stores.
+const (
+	maxEncShareBodyBytes = 128 // honest GCM-sealed DKG share body is ~48 bytes
+	maxEncKeyPoPBytes    = 128 // honest DER ECDSA proof-of-possession is ~70-72 bytes
+)
 
 // consumeCaches memoizes the two committed-state decodes the cheap share classification repeats
 // across a block: the DKG round (which carries the whole member set) and the in-flight ciphertext. It

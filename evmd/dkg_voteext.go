@@ -39,6 +39,17 @@ import (
 // keeps the whole surface off.
 // ============================================================================
 
+// EXTERNAL-REVIEW #2 field-byte caps (mirrors the keeper-side authoritative caps): the honest maxima for
+// the VE's variable-length fields, used to reject a padded-but-structurally-valid extension in
+// VerifyVoteExtension. Generous vs the true honest sizes (a 33-byte compressed point, a 64-byte DLEQ
+// proof, a ~48-byte sealed share, a ~72-byte DER PoP) so an honest node is never rejected.
+const (
+	veMaxPointBytes        = 33
+	veMaxDleqProofBytes    = 64
+	veMaxEncShareBodyBytes = 128
+	veMaxPoPBytes          = 128
+)
+
 // veInjectMarker prefixes the injected ExtendedCommitInfo pseudo-tx so ProcessProposal /
 // PreBlock can recognize + strip it. A real protobuf-encoded sdk.Tx never begins with 0x00
 // (protobuf field 0 is invalid), so this cannot collide with a genuine tx.
@@ -423,6 +434,38 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 		// ownership / store-read work on the deterministic PreBlock complaint path. Refuse the padding early.
 		if len(ve.Complaints) > p.EffectiveMaxMembers() {
 			return reject, nil
+		}
+		// EXTERNAL-REVIEW #2: cap each variable-length FIELD's bytes to its honest maximum. The total (1 MiB)
+		// and element COUNTS are already bounded, and most fields are self-bounding fixed-size crypto (a
+		// 33-byte point; a 64-byte DLEQ proof — the keeper's parses reject any other length). Without this a
+		// peer could pad the enc_share bodies / PoP into a structurally-valid multi-hundred-KB extension that
+		// every node unmarshals + reprocesses (the injected-commit trim only sheds it when the AGGREGATE
+		// exceeds MaxTxBytes). Rejecting an honest node's extension is impossible — these exceed every honest
+		// size. Mirrors the authoritative keeper caps (validateDealingShape / RecordEncPubKey).
+		if len(ve.EncPubKey) > veMaxPointBytes || len(ve.EncPubKeyPoP) > veMaxPoPBytes {
+			return reject, nil
+		}
+		if ve.Dealing != nil {
+			for i := range ve.Dealing.Commitments {
+				if len(ve.Dealing.Commitments[i]) > veMaxPointBytes {
+					return reject, nil
+				}
+			}
+			for i := range ve.Dealing.EncShares {
+				if len(ve.Dealing.EncShares[i].A) > veMaxPointBytes || len(ve.Dealing.EncShares[i].Body) > veMaxEncShareBodyBytes {
+					return reject, nil
+				}
+			}
+		}
+		for i := range ve.Shares {
+			if len(ve.Shares[i].D) > veMaxPointBytes || len(ve.Shares[i].Proof) > veMaxDleqProofBytes {
+				return reject, nil
+			}
+		}
+		for i := range ve.Complaints {
+			if len(ve.Complaints[i].SharedPoint) > veMaxPointBytes || len(ve.Complaints[i].DleqProof) > veMaxDleqProofBytes {
+				return reject, nil
+			}
 		}
 		// Everything else (crypto validity, membership, dedup) is enforced deterministically on-chain in
 		// ProcessProposal + PreBlock, so accept structurally-valid extensions generously — an honest

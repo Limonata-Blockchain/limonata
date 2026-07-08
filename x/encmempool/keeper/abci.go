@@ -54,6 +54,10 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	p := k.GetParams(ctx)
 	cur := uint64(ctx.BlockHeight())
 
+	// EXTERNAL-REVIEW #7: reclaim past-block submit-rate counter entries (bounded per block) so the
+	// per-submitter rate state cannot leak permanently. No-op (empty iterator) when nothing was submitted.
+	k.gcEncSubmitRate(ctx, cur)
+
 	// 1. Collect pending reveals into an explicit slice (keys already sorted).
 	var pending []types.PendingReveal
 	k.IteratePending(ctx, func(pr types.PendingReveal) { pending = append(pending, pr) })

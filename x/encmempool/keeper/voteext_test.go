@@ -15,6 +15,7 @@ import (
 
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 	"github.com/cosmos/cosmos-sdk/runtime"
 	"github.com/cosmos/cosmos-sdk/testutil"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -60,7 +61,8 @@ func newKeeperSK(t *testing.T, height int64, sk types.StakingKeeper) (keeper.Kee
 	tkey := storetypes.NewTransientStoreKey("transient_encmempool_ve")
 	testCtx := testutil.DefaultContextWithDB(t, key, tkey)
 	k := keeper.NewKeeper(runtime.NewKVStoreService(key), sk)
-	ctx := testCtx.Ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager())
+	ctx := testCtx.Ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager()).
+		WithConsensusParams(cmtproto.ConsensusParams{Abci: &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 1}})
 	return k, ctx
 }
 

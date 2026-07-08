@@ -403,8 +403,13 @@ func ParseDLEQProof(b []byte) (*DLEQProof, error) {
 	copy(zb[:], b[32:])
 	c := new(secp256k1.ModNScalar)
 	z := new(secp256k1.ModNScalar)
-	c.SetBytes(&cb)
-	z.SetBytes(&zb)
+	// EXTERNAL-REVIEW #10: reject NON-CANONICAL scalar encodings (a 32-byte value >= the group order, which
+	// SetBytes would silently reduce mod q). Ignoring the overflow flag left byte-malleability in a crypto-
+	// critical path — two distinct 64-byte blobs decoding to the same (C,Z). Honest proofs are always
+	// canonical (< q), so this rejects only malleated/garbage encodings, never a valid proof.
+	if c.SetBytes(&cb) != 0 || z.SetBytes(&zb) != 0 {
+		return nil, fmt.Errorf("dleq proof scalar is not canonical (>= group order)")
+	}
 	return &DLEQProof{C: c, Z: z}, nil
 }
 

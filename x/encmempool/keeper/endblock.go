@@ -103,6 +103,19 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 	if !p.DkgEnabled {
 		return
 	}
+	// EXTERNAL-REVIEW #6: the transparent path's dealings/shares/complaints ride CometBFT vote extensions.
+	// Do NOT open/finalize/retry rounds until VE is SCHEDULED and this height has reached the enable height
+	// (scheduled-but-future, or never scheduled) — no vote-extension path could feed a round, so it would
+	// churn open->fail->retry forever. UpdateParams refuses to ENABLE the transparent DKG without VE
+	// scheduled; this is the runtime counterpart that also covers VE scheduled for a LATER height. The gate
+	// is height >= enableHeight (not the handlers' strict >): a round MAY open at the enable height because
+	// ExtendVote runs there and its first real dealings land at enableHeight+1, within the round's window.
+	if p.DkgTransparent {
+		cp := ctx.ConsensusParams()
+		if cp.Abci == nil || cp.Abci.VoteExtensionsEnableHeight == 0 || ctx.BlockHeight() < cp.Abci.VoteExtensionsEnableHeight {
+			return
+		}
+	}
 	h := uint64(ctx.BlockHeight())
 	if h < p.DkgStartHeight {
 		return
@@ -112,6 +125,12 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 	// block) so finalize never does the whole O(S*t) precompute in one EndBlock. Runs every block
 	// regardless of round state; a no-op once the cache is fully warm.
 	k.advancePrecomputeShareKeys(ctx)
+
+	// EXTERNAL-REVIEW #8: periodically reclaim enc-key registrations of validators that have since
+	// unbonded (bounded per sweep). Amortized to every 64th block — the set churns slowly.
+	if h%64 == 0 {
+		k.gcStaleEncKeys(ctx)
+	}
 
 	cur := k.GetCurrentEpoch(ctx)
 	var lastRound types.DkgRound
@@ -303,7 +322,12 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 	// pathologically large governance-set window cannot overflow uint64 and wrap the
 	// deadline below the current height (which would make deals/complaints instantly
 	// "closed" and jam the round machine).
-	dealDeadline := addSat(h, max64(p.DkgDealWindow, 1))
+	// EXTERNAL-REVIEW #3: floor the DEAL window at 2 for the SAME ABCI++ build->consume lag the complaint
+	// window floors for. A dealing built at ExtendVote(X) is consumed at PreBlock(X+1); the earliest a
+	// member can deal is ExtendVote(OpenHeight+1), consumed at PreBlock(OpenHeight+2), so DealDeadline must
+	// be >= OpenHeight+2 (window >= 2) or NO dealing is ever ingested and the round can never finalize
+	// (governance could otherwise set a valid DkgDealWindow=1 that permanently dead-rounds key generation).
+	dealDeadline := addSat(h, max64(p.DkgDealWindow, minComplaintWindowBlocks))
 	round := types.DkgRound{
 		Epoch:        epoch,
 		OpenHeight:   h,

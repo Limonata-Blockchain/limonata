@@ -15,8 +15,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	evmtypes "github.com/cosmos/evm/x/vm/types"
 	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
+	evmtypes "github.com/cosmos/evm/x/vm/types"
 	vpcaptypes "github.com/cosmos/evm/x/vpcap/types"
 )
 

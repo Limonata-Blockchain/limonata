@@ -58,7 +58,8 @@ func TestReg_H1_UpdateParamsRejectsTransparentWithoutVE(t *testing.T) {
 	gov := govAuthority()
 	raw := mustParamsJSON(t, transparentParams(1, 0)) // DkgEnabled && DkgTransparent
 
-	// VE NOT scheduled (default consensus params: Abci nil) -> REJECT.
+	// VE NOT scheduled (clear the helper's default consensus params: Abci nil) -> REJECT.
+	ctx = ctx.WithConsensusParams(cmtproto.ConsensusParams{})
 	if _, err := ms.UpdateParams(ctx, &types.MsgUpdateParams{Authority: gov, Params: raw}); err == nil {
 		t.Fatal("HIGH-1: enabling dkg_transparent with vote extensions unscheduled must be rejected")
 	}

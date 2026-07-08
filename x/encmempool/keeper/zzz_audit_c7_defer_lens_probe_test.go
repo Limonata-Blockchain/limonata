@@ -236,7 +236,6 @@ func TestAudit_C7_InsufficientVerifiedFlood_DeferCapBounded(t *testing.T) {
 	t.Logf("SAFE: insufficient-verified flood is bounded at the 128 defer-cap (%d deferred, %d capped-dropped via releaseEncTx)", deferred, capped)
 }
 
-
 func submitterName(i int) string {
 	const alpha = "0123456789abcdefghijklmnopqrstuvwxyz"
 	return "flooder-" + string([]byte{alpha[i/36], alpha[i%36]})

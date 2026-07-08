@@ -552,6 +552,13 @@ func MembersHash(members []types.RoundMember) []byte {
 	for _, m := range members {
 		h.Write([]byte(m.OperatorAddr))
 		h.Write([]byte{0})
+		// EXTERNAL-REVIEW #4: bind each member's announced ENC KEY into the hash so a key ROTATION changes
+		// MembersHash and triggers a member-change re-genesis (the new epoch seals shares to the new key).
+		// Without this, MembersHash saw only the operator set, so a rotated/compromised key kept being used
+		// until decrypt-health failures (MED-2) eventually stranded + rekeyed. The 33-byte key is length-
+		// fixed and the NUL separators keep the encoding unambiguous — still a pure function of committed state.
+		h.Write(m.EncPubKey)
+		h.Write([]byte{0})
 	}
 	return h.Sum(nil)
 }

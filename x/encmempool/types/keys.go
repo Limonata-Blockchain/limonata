@@ -79,7 +79,7 @@ var (
 	// increment is O(1) in canonical DeliverTx order and never leaks. It is PER-SUBMITTER (never a
 	// single global slot) so no one address can monopolize ingress or let a proposer censor the
 	// encrypted mempool by ordering its own ciphertexts first.
-	EncSubmitRatePrefix = []byte{0x1D} // 0x1D | submitter -> be(height)||be(count) (16 bytes)
+	EncSubmitRatePrefix = []byte{0x1D} // 0x1D | be(height) | submitter -> be(count) (8 bytes); GC'd past current height
 	// ActiveShareKeyPrefix caches the epoch's PUBLIC share keys Y_index = SharePubKey(PublicCommitments,
 	// index), precomputed once at finalize (Fix 1 C4'), so each decryption-share DLEQ verify is an O(1)
 	// cache read instead of an O(t) Horner recompute — the block-time flattener that closes HIGH-U's
