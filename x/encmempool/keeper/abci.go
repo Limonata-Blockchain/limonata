@@ -397,8 +397,15 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 				// failed tx rolls back cleanly and one tx's meter reset cannot corrupt the block meter.
 				// Commit only when the tx was actually included (executed==true, revert included).
 				childCtx, commit := ctx.CacheContext()
-				childCtx = childCtx.WithGasMeter(storetypes.NewInfiniteGasMeter())
-				res := k.executeDecryptedTx(childCtx, plaintext)
+				// Fresh infinite gas meter (isolate the block meter) + a HIGH, distinct TxIndex per
+				// decrypted tx (audit A1): the EVM object store is keyed by TxIndex and reset only at
+				// Commit, so running at the default TxIndex 0 would let a decrypted tx's transient
+				// gas/sponsor state bleed into the first normal DeliverTx (also TxIndex 0). The base is
+				// far above any real per-block tx count so it never collides with normal indices.
+				childCtx = childCtx.
+					WithGasMeter(storetypes.NewInfiniteGasMeter()).
+					WithTxIndex(reinjectTxIndexBase + int(order))
+				res := k.executeDecryptedTx(childCtx, plaintext, execCeiling)
 				if res.executed {
 					commit()
 					execGasUsed += res.gasUsed

@@ -27,6 +27,17 @@ import (
 // execute on a later block (the deterministic bounded-scan suffix).
 const maxDecryptExecGasPerBlockBps = 2500
 
+// defaultDecryptExecGasPerBlock is the per-block decrypt-exec gas budget used when the block gas
+// limit is unavailable/unlimited (evmd disables the block gas meter and the default consensus
+// MaxGas is -1). Audit D2: without a floor the ceiling would be 0, and an ON feature would then
+// STRAND every matured ciphertext (break before consume). 30M gas ~ a couple of heavy txs/block.
+const defaultDecryptExecGasPerBlock = 30_000_000
+
+// reinjectTxIndexBase offsets the per-tx TxIndex of decrypted txs far above any real per-block tx
+// count, so their EVM object-store transient state (gas-used / sponsor, keyed by TxIndex, reset only
+// at Commit) never collides with the normal DeliverTx txs at indices 0..N (audit A1).
+const reinjectTxIndexBase = 1 << 30
+
 // encExecEnabled reports whether decrypt->execute re-injection should run this block: the governance
 // param is on AND the EVM/account keepers were wired (both nil in the minimal unit-test build). When
 // false, decryptMatured takes the P0 no-execution path (decrypt + consume, never emit plaintext).
@@ -54,13 +65,26 @@ type decryptExecOutcome struct {
 //
 // v1 fork-safety: a tx whose top-level `To` is a registered precompile is REJECTED (precompiles call
 // other keepers and are the most likely source of context-sensitive behavior outside a normal tx).
-func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte) decryptExecOutcome {
+func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget uint64) decryptExecOutcome {
 	// 1. Decode the RLP Ethereum transaction.
 	tx := new(ethtypes.Transaction)
 	if err := tx.UnmarshalBinary(plaintext); err != nil {
 		return decryptExecOutcome{tag: "invalid_rlp"}
 	}
 	txHash := tx.Hash().Hex()
+
+	// Blob txs (EIP-4844) are rejected by the normal EVM ante's AcceptedTxType allowlist and carry
+	// blob-fee accounting this BeginBlock path does not set up; refuse them (audit).
+	if tx.Type() == ethtypes.BlobTxType {
+		return decryptExecOutcome{tag: "unsupported_tx_type", txHash: txHash}
+	}
+	// Per-tx gas cap (audit D1): the child runs on an infinite gas meter, so without this a single
+	// decrypted tx could declare an arbitrarily large gas limit and burn seconds of BeginBlock EVM
+	// compute before the cumulative ceiling check fires. A tx above the whole-block decrypt budget
+	// can never execute, so reject it here (it is consumed, not deferred).
+	if gasBudget > 0 && tx.Gas() > gasBudget {
+		return decryptExecOutcome{tag: "gas_too_large", txHash: txHash}
+	}
 
 	// 2. Load the EVM config and recover the sender with the chain-rules signer (bad sig / wrong
 	//    chain-id => rejected, not a panic).
@@ -122,11 +146,13 @@ func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte) decryptExe
 		return decryptExecOutcome{tag: "exec_error", txHash: txHash}
 	}
 
-	// 9. Increment the nonce for a CALL (a contract-CREATE already bumped it inside the StateDB).
-	if tx.To() != nil {
-		if acc := k.accountKeeper.GetAccount(ctx, sdk.AccAddress(from.Bytes())); acc != nil {
-			_ = evmante.IncrementNonce(ctx, k.accountKeeper, acc, tx.Nonce())
-		}
+	// 9. Increment the nonce UNCONDITIONALLY (audit C1). It is idempotent: a SUCCESSFUL contract-
+	//    CREATE already bumped the sequence inside the StateDB, so IncrementNonce sees txNonce <
+	//    sequence and no-ops; but a REVERTED create's StateDB bump is rolled back by ApplyTransaction,
+	//    and a CALL never bumps at all, so those still need the manual increment. Without this, a
+	//    reverted create is charged a fee but keeps its nonce -> the identical tx replays forever.
+	if acc := k.accountKeeper.GetAccount(ctx, sdk.AccAddress(from.Bytes())); acc != nil {
+		_ = evmante.IncrementNonce(ctx, k.accountKeeper, acc, tx.Nonce())
 	}
 
 	out := decryptExecOutcome{executed: true, gasUsed: res.GasUsed, txHash: txHash, tag: "executed"}
@@ -139,16 +165,16 @@ func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte) decryptExe
 
 // decryptExecGasCeiling returns this block's cumulative EVM-gas budget for decrypted-tx execution
 // (a fraction of the block gas limit).
+// decryptExecGasCeiling returns this block's cumulative EVM-gas budget for decrypted-tx execution.
+// It is NEVER 0 while execution is on: when a positive block gas limit is known it is
+// maxDecryptExecGasPerBlockBps of it, otherwise the defaultDecryptExecGasPerBlock floor (audit D2 -
+// a 0 ceiling would strand every ciphertext). Deterministic: consensus params + the fixed constants.
 func decryptExecGasCeiling(ctx sdk.Context) uint64 {
-	blockLimit := uint64(0)
-	if bg := ctx.BlockGasMeter(); bg != nil {
-		blockLimit = bg.Limit()
-	}
 	if cp := ctx.ConsensusParams(); cp.Block != nil && cp.Block.MaxGas > 0 {
-		blockLimit = uint64(cp.Block.MaxGas) //#nosec G115
+		frac := uint64(cp.Block.MaxGas) / 10000 * maxDecryptExecGasPerBlockBps //#nosec G115
+		if frac < defaultDecryptExecGasPerBlock {
+			return frac
+		}
 	}
-	if blockLimit == 0 {
-		return 0 // unknown -> no execution budget (caller treats 0 as "skip execution")
-	}
-	return blockLimit / 10000 * maxDecryptExecGasPerBlockBps
+	return defaultDecryptExecGasPerBlock
 }

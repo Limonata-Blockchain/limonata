@@ -95,22 +95,25 @@ func TestReinjection(t *testing.T) {
 	ethSigner := ethtypes.LatestSignerForChainID(evmtypes.GetEthChainConfig().ChainID)
 	recipient := common.HexToAddress("0x00000000000000000000000000000000000000ff")
 
-	// fundSender generates a fresh EOA and funds it 1e18.
-	fundSender := func(ctx sdk.Context) (common.Address, string, func(nonce uint64, value *big.Int) []byte) {
+	// fundSender generates a fresh EOA, funds it 1e18, and returns builders: mkTx (a value
+	// transfer) and mkRaw (an arbitrary signed legacy tx, for the create + gas-cap regressions).
+	fundSender := func(ctx sdk.Context) (common.Address, string, func(nonce uint64, value *big.Int) []byte, func(*ethtypes.LegacyTx) []byte) {
 		key, err := crypto.GenerateKey()
 		require.NoError(t, err)
 		addr := crypto.PubkeyToAddress(key.PublicKey)
 		require.NoError(t, testutil.FundAccount(ctx, app.BankKeeper, sdk.AccAddress(addr.Bytes()),
 			sdk.NewCoins(sdk.NewCoin(denom, math.NewInt(1_000_000_000_000_000_000)))))
-		mkTx := func(nonce uint64, value *big.Int) []byte {
-			txdata := &ethtypes.LegacyTx{Nonce: nonce, To: &recipient, Value: value, Gas: 21000, GasPrice: big.NewInt(1_000_000_000)}
+		sign := func(txdata *ethtypes.LegacyTx) []byte {
 			ethTx, err := ethtypes.SignTx(ethtypes.NewTx(txdata), ethSigner, key)
 			require.NoError(t, err)
 			rlp, err := ethTx.MarshalBinary()
 			require.NoError(t, err)
 			return rlp
 		}
-		return addr, sdk.AccAddress(addr.Bytes()).String(), mkTx
+		mkTx := func(nonce uint64, value *big.Int) []byte {
+			return sign(&ethtypes.LegacyTx{Nonce: nonce, To: &recipient, Value: value, Gas: 21000, GasPrice: big.NewInt(1_000_000_000)})
+		}
+		return addr, sdk.AccAddress(addr.Bytes()).String(), mkTx, sign
 	}
 
 	// (1) HAPPY PATH: a decrypted transfer executes, fees are sound, nonce increments, no re-run.
@@ -119,7 +122,7 @@ func TestReinjection(t *testing.T) {
 		pub, shares, err := threshold.Setup(3, 2)
 		require.NoError(t, err)
 		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
-		sender, submitter, mkTx := fundSender(ctx)
+		sender, submitter, mkTx, _ := fundSender(ctx)
 		value := big.NewInt(1000)
 		gasPrice := big.NewInt(1_000_000_000)
 
@@ -161,7 +164,7 @@ func TestReinjection(t *testing.T) {
 		ctx := newExecCtx(app)
 		pub, shares, _ := threshold.Setup(3, 2)
 		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
-		sender, submitter, mkTx := fundSender(ctx)
+		sender, submitter, mkTx, _ := fundSender(ctx)
 
 		submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(5, big.NewInt(1000)), submitter) // nonce 5, seq 0
 
@@ -181,7 +184,7 @@ func TestReinjection(t *testing.T) {
 		ctx := newExecCtx(app)
 		pub, shares, _ := threshold.Setup(3, 2)
 		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, false))) // exec OFF
-		sender, submitter, mkTx := fundSender(ctx)
+		sender, submitter, mkTx, _ := fundSender(ctx)
 
 		e := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(0, big.NewInt(1000)), submitter)
 
@@ -194,5 +197,47 @@ func TestReinjection(t *testing.T) {
 		require.Equal(t, uint64(0), app.EVMKeeper.GetNonce(bctx, sender), "no execution => nonce unchanged")
 		_, stillThere := app.EncMempoolKeeper.GetEncTx(bctx, e.DecryptHeight, e.Seq)
 		require.False(t, stillThere, "ciphertext consumed even without execution")
+	})
+
+	// (4) audit C1: a REVERTED contract-CREATE must still INCREMENT the nonce (else the identical
+	// tx replays forever). Init code 0xfe (INVALID) reverts, consuming all gas.
+	t.Run("reverted_create_increments_nonce", func(t *testing.T) {
+		ctx := newExecCtx(app)
+		pub, shares, _ := threshold.Setup(3, 2)
+		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
+		sender, submitter, _, mkRaw := fundSender(ctx)
+
+		create := mkRaw(&ethtypes.LegacyTx{Nonce: 0, To: nil, Value: big.NewInt(0), Gas: 100000, GasPrice: big.NewInt(1_000_000_000), Data: []byte{0xfe}})
+		submitAndShare(t, app, ctx, pub, shares, keypers, create, submitter)
+
+		bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
+		require.NoError(t, app.EncMempoolKeeper.BeginBlock(bctx))
+
+		exec, _ := reinjectAttr(bctx, "executed")
+		rev, _ := reinjectAttr(bctx, "reverted")
+		require.Equal(t, "true", exec, "the create tx was included")
+		require.Equal(t, "true", rev, "the 0xfe init code must revert")
+		require.Equal(t, uint64(1), app.EVMKeeper.GetNonce(bctx, sender), "a reverted create MUST still bump the nonce (no replay)")
+	})
+
+	// (5) audit D1: a tx whose gas limit exceeds the per-block decrypt budget is rejected (never
+	// executed), so a single tx cannot burn unbounded BeginBlock compute.
+	t.Run("gas_too_large_rejected", func(t *testing.T) {
+		ctx := newExecCtx(app)
+		pub, shares, _ := threshold.Setup(3, 2)
+		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
+		sender, submitter, _, mkRaw := fundSender(ctx)
+
+		// ceiling = min(30M, 25% of MaxGas=100M=25M) = 25M; ask for 50M.
+		huge := mkRaw(&ethtypes.LegacyTx{Nonce: 0, To: &recipient, Value: big.NewInt(1000), Gas: 50_000_000, GasPrice: big.NewInt(1_000_000_000)})
+		submitAndShare(t, app, ctx, pub, shares, keypers, huge, submitter)
+
+		bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
+		require.NoError(t, app.EncMempoolKeeper.BeginBlock(bctx))
+
+		tag, found := reinjectAttr(bctx, "outcome")
+		require.True(t, found)
+		require.Equal(t, "gas_too_large", tag, "a tx above the block decrypt-gas budget must be rejected")
+		require.Equal(t, uint64(0), app.EVMKeeper.GetNonce(bctx, sender), "rejected tx must not execute")
 	})
 }
