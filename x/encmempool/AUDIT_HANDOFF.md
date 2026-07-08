@@ -107,13 +107,15 @@ and assess severity; do not re-report them as new without engaging the rationale
    cycle (the class that regressed the HIGH-2 repro before). Refs: `dkgnode/enckey.go`
    DetectPoisonedDealers, `evmd/dkg_voteext.go` buildDkgComplaints.
 
-3. **Sybil encrypted-submit spam — now priced (REFUNDABLE BOND).** Admission stays per-submitter (a
-   global cap re-introduces one-address censorship). The cost dimension is now a refundable bond
-   (`EncSubmitBond`/`EncSubmitBondDenom`, gov param, default 0): `SubmitEncrypted` escrows it to the
-   module account; `releaseEncTx` refunds it in full on release. A flooder locks capital
-   proportional to its flood; a legit user pays only opportunity cost. Auditor: verify the escrow is
-   all-or-nothing and every release path refunds. Refs: `keeper/msg_server.go`, `keeper/keeper.go`
-   refundBond.
+3. **Sybil encrypted-submit spam — now PRICED (bond + partial burn).** Admission stays per-submitter
+   (a global cap re-introduces one-address censorship). The cost is a bond (`EncSubmitBond`/
+   `EncSubmitBondDenom`, gov param, default 0) that `SubmitEncrypted` escrows and `releaseEncTx`
+   returns - PLUS a burn fraction `EncSubmitBondBurnBps` (0..10000): on release the module BURNS
+   `bond*bps/10000` and refunds the rest, so every submit costs a real, non-refundable amount a
+   funded swarm cannot recover (a pure refundable bond is only a capital-lockup bar). Amounts are
+   stamped on the EncTx (immune to a param change). Auditor: verify escrow is all-or-nothing, every
+   release path burns+refunds, and the burn cannot exceed the bond. Refs: `keeper/msg_server.go`,
+   `keeper/keeper.go` refundBond.
 
 4. **Proposer can omit DKG vote-extension injection — ABCI++ dilemma (DESIGN, unresolved).** A
    proposer may inject nothing on its own blocks. A non-proposer in ProcessProposal does NOT have
