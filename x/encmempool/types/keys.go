@@ -109,4 +109,10 @@ var (
 	// the slot only ever affects a Byzantine owner, never an honest one (which never fails DLEQ). Deleted
 	// with the ciphertext's shares when it leaves state (releaseEncTx).
 	RejectedDecryptSharePrefix = []byte{0x21} // 0x21 | be(decryptHeight) | be(seq) | be(index) -> {1}
+
+	// EncKeyRotatedHeightPrefix records the height at which each operator last CHANGED its announced enc key
+	// (first announce or rotation). A rotation within encKeyRotationCooldownBlocks is refused, so a
+	// Byzantine committee member cannot flap its own key every block to force a member-change re-genesis
+	// (MembersHash binds the enc key since external-review #4). Deleted with the registration (DeleteEncPubKey).
+	EncKeyRotatedHeightPrefix = []byte{0x22} // 0x22 | operatorAddr -> uint64 (be): height of last key change
 )

@@ -545,8 +545,11 @@ func (k Keeper) ActiveMembers(ctx context.Context, p types.Params) []types.Round
 	return out
 }
 
-// MembersHash is a deterministic digest of the active operator set — the re-run
-// trigger. Only the identity/order of members matters (not their enc keys).
+// MembersHash is a deterministic digest of the active committee — the re-run trigger. It covers each
+// member's identity/order AND its announced enc key (external-review #4: a key rotation must re-genesis so
+// the epoch stops sealing to a stale key; rotations are rate-limited in RecordEncPubKey so this cannot be
+// flapped for churn). It does NOT cover weights/eval-points, so AllocateEvalPoints (which mutates only
+// those) never changes the hash after openRound computes it.
 func MembersHash(members []types.RoundMember) []byte {
 	h := sha256.New()
 	for _, m := range members {

@@ -8,6 +8,7 @@ package keeper
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"sort"
 
@@ -89,14 +90,46 @@ func (k Keeper) RecordEncPubKey(ctx sdk.Context, operator string, key, pop []byt
 	if owner, ok := k.GetEncKeyOwner(ctx, key); ok && owner != operator {
 		return false
 	}
-	// Rotation: drop the reverse index for this operator's previous key before rebinding.
+	h := uint64(ctx.BlockHeight())
+	// EXTERNAL-REVIEW #4 FOLLOW-UP (rekey-churn): MembersHash binds the enc key, so an un-throttled rotation
+	// would let ONE Byzantine committee member flap its own key every block to force a member-change
+	// re-genesis every round (free, perpetual griefing). Rate-limit a ROTATION (replacing an existing key)
+	// per operator: a rotation within encKeyRotationCooldownBlocks is refused (the operator keeps its current
+	// key until the cooldown elapses). A FIRST announce is never throttled, and a legitimate rotation (key
+	// compromise, rare) simply lands one cooldown later.
 	if had {
-		_ = k.store(ctx).Delete(encKeyOwnerKey(cur))
+		if last, ok := k.getEncKeyRotatedHeight(ctx, operator); ok && h < last+encKeyRotationCooldownBlocks {
+			return false
+		}
+		_ = k.store(ctx).Delete(encKeyOwnerKey(cur)) // drop the reverse index for the previous key
 	}
 	st := k.store(ctx)
 	_ = st.Set(encPubKeyKey(operator), append([]byte(nil), key...))
 	_ = st.Set(encKeyOwnerKey(key), []byte(operator))
+	k.setEncKeyRotatedHeight(ctx, operator, h)
 	return true
+}
+
+// encKeyRotationCooldownBlocks is the minimum spacing between an operator's enc-key CHANGES. It is well
+// above the default round length (deal+complaint windows) so a key rotation cannot out-pace round finalize
+// to churn the committee, yet short enough that a legitimate compromise-driven rotation lands within
+// minutes at ~2s blocks.
+const encKeyRotationCooldownBlocks uint64 = 200
+
+func encKeyRotatedHeightKey(operator string) []byte {
+	return concat(types.EncKeyRotatedHeightPrefix, []byte(operator))
+}
+
+func (k Keeper) getEncKeyRotatedHeight(ctx sdk.Context, operator string) (uint64, bool) {
+	bz, err := k.store(ctx).Get(encKeyRotatedHeightKey(operator))
+	if err != nil || len(bz) != 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(bz), true
+}
+
+func (k Keeper) setEncKeyRotatedHeight(ctx sdk.Context, operator string, height uint64) {
+	_ = k.store(ctx).Set(encKeyRotatedHeightKey(operator), u64(height))
 }
 
 // GetEncKeyOwner returns the operator that owns an announced enc key, if any (the reverse
@@ -142,6 +175,7 @@ func (k Keeper) DeleteEncPubKey(ctx sdk.Context, operator string) {
 		_ = st.Delete(encKeyOwnerKey(key))
 	}
 	_ = st.Delete(encPubKeyKey(operator))
+	_ = st.Delete(encKeyRotatedHeightKey(operator)) // clear the rotation cooldown so a re-bond re-announces fresh
 }
 
 // gcStaleEncKeys reclaims enc-key registrations for operators that are no longer bonded validators

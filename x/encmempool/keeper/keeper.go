@@ -348,7 +348,9 @@ func encSubmitRateKey(height uint64, submitter string) []byte {
 
 // maxRateGCPerBlock bounds how many stale submit-rate entries BeginBlock reclaims per block; the entries
 // sort height-ascending so the oldest (stale) ones are reclaimed first and the backlog drains steadily.
-const maxRateGCPerBlock = 512
+// Set above the realistic per-block distinct-submitter inflow (bounded by block gas / min submit cost) so
+// the drain keeps pace with steady-state churn; a transient burst still drains over subsequent blocks.
+const maxRateGCPerBlock = 2048
 
 // bumpEncSubmitsThisBlock increments and returns this submitter's admission count for `height`. The
 // record is keyed by (height, submitter) so each block's counter is a fresh entry (count only), and

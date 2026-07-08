@@ -446,13 +446,21 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 			return reject, nil
 		}
 		if ve.Dealing != nil {
+			// Loose element-COUNT caps (the authoritative consume path pins them to EXACTLY the round's t /
+			// total-eval-points; these upper bounds reject gross padding at the peer). Commitments == t <= S
+			// and enc_shares == total eval points <= S, so S (EffectiveShareBudget) bounds both.
+			s := p.EffectiveShareBudget()
+			if len(ve.Dealing.Commitments) > s || len(ve.Dealing.EncShares) > s {
+				return reject, nil
+			}
 			for i := range ve.Dealing.Commitments {
 				if len(ve.Dealing.Commitments[i]) > veMaxPointBytes {
 					return reject, nil
 				}
 			}
 			for i := range ve.Dealing.EncShares {
-				if len(ve.Dealing.EncShares[i].A) > veMaxPointBytes || len(ve.Dealing.EncShares[i].Body) > veMaxEncShareBodyBytes {
+				es := &ve.Dealing.EncShares[i]
+				if len(es.A) > veMaxPointBytes || len(es.Body) > veMaxEncShareBodyBytes || len(es.Nonce) > threshold.NonceSize {
 					return reject, nil
 				}
 			}

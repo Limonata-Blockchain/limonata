@@ -153,6 +153,35 @@ func TestTransparent_EncKeyIdempotentAndDormant(t *testing.T) {
 	}
 }
 
+// TestTransparent_EncKeyRotationCooldown locks in the external-review #4 FOLLOW-UP: because MembersHash
+// binds the enc key, an un-throttled rotation would let one member flap its key to force committee
+// re-genesis every round. RecordEncPubKey rate-limits rotations per operator — first announce is free, a
+// rotation within the cooldown is refused (original key kept), a rotation after the cooldown succeeds.
+func TestTransparent_EncKeyRotationCooldown(t *testing.T) {
+	m1a := newMember("opA", "")
+	m1b := newMember("opA", "") // same operator, a DIFFERENT key (a rotation target)
+	k, ctx := newKeeperSK(t, 10, &mockStaking{})
+	_ = k.SetParams(ctx, transparentParams(1, 0))
+
+	if !k.RecordEncPubKey(ctx.WithBlockHeight(10), m1a.op, m1a.pub, encPoP(m1a)) {
+		t.Fatal("first announce should register")
+	}
+	// Immediate rotation to a fresh key: refused (within the cooldown) -> churn guard holds.
+	if k.RecordEncPubKey(ctx.WithBlockHeight(11), m1b.op, m1b.pub, encPoP(m1b)) {
+		t.Fatal("rotation within the cooldown must be refused")
+	}
+	if got, _ := k.GetEncPubKey(ctx, m1a.op); !bytes.Equal(got, m1a.pub) {
+		t.Fatal("a refused rotation must leave the original key in place")
+	}
+	// After the cooldown (200 blocks) elapses, the rotation is accepted.
+	if !k.RecordEncPubKey(ctx.WithBlockHeight(210), m1b.op, m1b.pub, encPoP(m1b)) {
+		t.Fatal("rotation after the cooldown must be accepted")
+	}
+	if got, _ := k.GetEncPubKey(ctx, m1a.op); !bytes.Equal(got, m1b.pub) {
+		t.Fatal("an accepted rotation must install the new key")
+	}
+}
+
 // setupTransparentRound opens epoch 1 over the 3 given members via the real EndBlocker,
 // after auto-registering their enc keys through ConsumeVoteExtensions (the announce path).
 func setupTransparentRound(t *testing.T, members []member) (keeper.Keeper, sdk.Context, types.DkgRound, types.Params) {
