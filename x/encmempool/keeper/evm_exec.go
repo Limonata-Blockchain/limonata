@@ -163,16 +163,17 @@ func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget 
 	return out
 }
 
-// decryptExecGasCeiling returns this block's cumulative EVM-gas budget for decrypted-tx execution
-// (a fraction of the block gas limit).
 // decryptExecGasCeiling returns this block's cumulative EVM-gas budget for decrypted-tx execution.
 // It is NEVER 0 while execution is on: when a positive block gas limit is known it is
-// maxDecryptExecGasPerBlockBps of it, otherwise the defaultDecryptExecGasPerBlock floor (audit D2 -
-// a 0 ceiling would strand every ciphertext). Deterministic: consensus params + the fixed constants.
+// maxDecryptExecGasPerBlockBps of it, otherwise (or if that fraction rounds to 0 for a tiny MaxGas)
+// the defaultDecryptExecGasPerBlock floor (audit round-8 #4 - the old `MaxGas/10000*bps` truncated
+// to 0 for MaxGas < 10000 and returned it, stranding every ciphertext). Computed as MaxGas/(10000/
+// bps) to avoid the truncate-to-0 while staying overflow-safe. Deterministic: consensus params + the
+// fixed constants.
 func decryptExecGasCeiling(ctx sdk.Context) uint64 {
 	if cp := ctx.ConsensusParams(); cp.Block != nil && cp.Block.MaxGas > 0 {
-		frac := uint64(cp.Block.MaxGas) / 10000 * maxDecryptExecGasPerBlockBps //#nosec G115
-		if frac < defaultDecryptExecGasPerBlock {
+		frac := uint64(cp.Block.MaxGas) / (10000 / maxDecryptExecGasPerBlockBps) //#nosec G115 -- 2500 bps => /4
+		if frac > 0 && frac < defaultDecryptExecGasPerBlock {
 			return frac
 		}
 	}

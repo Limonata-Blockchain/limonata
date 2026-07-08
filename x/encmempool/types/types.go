@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	sdkmath "cosmossdk.io/math"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // Params govern the commit-reveal timing. RevealDelay is the minimum number of
@@ -491,6 +493,14 @@ func (p Params) Validate() error {
 				}
 				if len(m.EncPubKey) != 33 {
 					return fmt.Errorf("dkg_members[%d]: enc_pubkey must be a 33-byte compressed key, got %d", i, len(m.EncPubKey))
+				}
+				// round-8 #6: POINT-validate the declared enc key (not just its length). A 33-byte
+				// non-point would be accepted at genesis but is unusable to seal shares to, silently
+				// breaking that member. Shares are sealed to a real secp256k1 point, so reject a
+				// non-point here (the transparent path announces real points via PoP; the legacy
+				// declared path had no such check).
+				if _, err := secp256k1.ParsePubKey(m.EncPubKey); err != nil {
+					return fmt.Errorf("dkg_members[%d]: enc_pubkey is not a valid compressed secp256k1 point: %w", i, err)
 				}
 				if seenOp[m.OperatorAddr] || seenAcc[m.AccountAddr] {
 					return fmt.Errorf("dkg_members[%d]: duplicate operator/account address", i)

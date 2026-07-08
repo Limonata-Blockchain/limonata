@@ -240,4 +240,26 @@ func TestReinjection(t *testing.T) {
 		require.Equal(t, "gas_too_large", tag, "a tx above the block decrypt-gas budget must be rejected")
 		require.Equal(t, uint64(0), app.EVMKeeper.GetNonce(bctx, sender), "rejected tx must not execute")
 	})
+
+	// (6) audit round-8 #4: a tiny-but-positive Block.MaxGas (< 10000) must NOT make the gas ceiling
+	// 0 - that would break the decrypt loop before it consumes anything, STRANDING every ciphertext.
+	// The ciphertext must still be PROCESSED (here rejected gas_too_large since 21000 > MaxGas/4) and
+	// CONSUMED, not left in state.
+	t.Run("low_maxgas_does_not_strand", func(t *testing.T) {
+		ctx := app.NewContext(false).WithBlockHeight(10).WithChainID(c.ChainID).
+			WithConsensusParams(cmtproto.ConsensusParams{Block: &cmtproto.BlockParams{MaxGas: 5000}})
+		pub, shares, _ := threshold.Setup(3, 2)
+		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
+		_, submitter, mkTx, _ := fundSender(ctx)
+
+		e := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(0, big.NewInt(1000)), submitter)
+		bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
+		require.NoError(t, app.EncMempoolKeeper.BeginBlock(bctx))
+
+		tag, found := reinjectAttr(bctx, "outcome")
+		require.True(t, found, "the ciphertext must be PROCESSED, not stranded (ceiling must be > 0)")
+		require.Equal(t, "gas_too_large", tag)
+		_, stillThere := app.EncMempoolKeeper.GetEncTx(bctx, e.DecryptHeight, e.Seq)
+		require.False(t, stillThere, "the ciphertext must be consumed, not stranded")
+	})
 }

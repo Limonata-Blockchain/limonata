@@ -452,6 +452,13 @@ func (m msgServer) DkgDeal(goCtx context.Context, msg *types.MsgDkgDeal) (*types
 		stored = append(stored, types.DkgStoredEncShare{MemberIndex: s.MemberIndex, A: s.A, Nonce: s.Nonce, Body: s.Body})
 	}
 
+	// FIRST-WINS (round-8 #6): a dealer may deal ONCE per round. Without this, a legacy signed
+	// DkgDeal could OVERWRITE its already-stored dealing (the transparent VE-ingest path is already
+	// first-wins), letting a member swap a good dealing for a bad one before finalize - a
+	// validator-abuse strand lever. Mirror the transparent guard: reject a second deal.
+	if _, exists := m.GetDealing(goCtx, msg.Epoch, idx); exists {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "dealer %s already dealt for epoch %d (deals are first-wins)", msg.Dealer, msg.Epoch)
+	}
 	dealing := types.Dealing{Epoch: msg.Epoch, DealerIndex: idx, Dealer: msg.Dealer, Commitments: msg.Commitments, EncShares: stored}
 	if err := m.SetDealing(goCtx, dealing); err != nil {
 		return nil, err

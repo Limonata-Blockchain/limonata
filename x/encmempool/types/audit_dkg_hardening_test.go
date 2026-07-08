@@ -2,6 +2,7 @@ package types
 
 import (
 	"bytes"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"testing"
 )
 
@@ -61,7 +62,9 @@ func TestTransparentRequiresRekeyTrigger(t *testing.T) {
 	// legacy (non-transparent) DKG path is not subject to the trigger requirement.
 	p = base()
 	p.DkgTransparent = false
-	p.DkgMembers = []DkgMember{{OperatorAddr: "op1", AccountAddr: "acc1", EncPubKey: make([]byte, 33)}}
+	// a REAL compressed secp256k1 point (the generator G) - a non-point is now rejected (round-8 #6).
+	genG := secp256k1.PrivKeyFromBytes([]byte{0x01}).PubKey().SerializeCompressed()
+	p.DkgMembers = []DkgMember{{OperatorAddr: "op1", AccountAddr: "acc1", EncPubKey: genG}}
 	p.DkgThreshold = 1
 	if err := p.Validate(); err != nil {
 		t.Fatalf("legacy declared DKG path must not require a rekey trigger: %v", err)
