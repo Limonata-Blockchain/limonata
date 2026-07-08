@@ -238,3 +238,43 @@ func TestRepro_ByzantineDealerInQual_BreaksLiveness_NoComplaintRecourse(t *testi
 		t.Logf("[no-recourse] transparent RoundMembers carry no AccountAddr -> MsgDkgComplaint memberIndexByAccount==0 -> complaint always 'not a member'")
 	}
 }
+
+// round-9 #2: the DERIVE-TIME belt. A returning offline victim (op1, whose points op3 poisoned while
+// op1 was offline for the complaint window) must, at derive time, DETECT and ATTRIBUTE the poison to
+// op3 - the residual the in-window complaint channel structurally cannot catch. An all-honest round
+// yields no reports.
+func TestDetectPoisonedDealers_AttributesOfflineVictimPoison(t *testing.T) {
+	pts := func(round types.DkgRound, op string) []uint64 {
+		vi := idxByOp(round, op)
+		for _, rm := range round.Members {
+			if rm.Index == vi {
+				return rm.OwnedEvalPoints()
+			}
+		}
+		return nil
+	}
+	deals := func(k keeper.Keeper, ctx sdk.Context, epoch uint64) map[uint64]types.Dealing {
+		m := map[uint64]types.Dealing{}
+		k.IterateDealings(ctx, epoch, func(d types.Dealing) { m[d.DealerIndex] = d })
+		return m
+	}
+
+	// POISONED (variant 2: opens but fails Feldman) -> op1 attributes it to op3.
+	k, ctx, round, ak, mem := setupPoisonRound(t, true, true)
+	reports := dkgnode.DetectPoisonedDealers(pts(round, mem[0].op), mem[0].priv, ak.Qual, deals(k, ctx, round.Epoch))
+	if len(reports) == 0 {
+		t.Fatal("returning victim op1 must detect the poison op3 planted on its points")
+	}
+	op3 := idxByOp(round, "op3")
+	for _, r := range reports {
+		if r.Dealer != op3 {
+			t.Fatalf("poison must be attributed to byzantine dealer op3 (idx %d), got dealer %d", op3, r.Dealer)
+		}
+	}
+
+	// CONTROL: an all-honest finalized round -> no poison reports.
+	k2, ctx2, round2, ak2, mem2 := setupPoisonRound(t, false, false)
+	if r := dkgnode.DetectPoisonedDealers(pts(round2, mem2[0].op), mem2[0].priv, ak2.Qual, deals(k2, ctx2, round2.Epoch)); len(r) != 0 {
+		t.Fatalf("an all-honest round must report no poison, got %d", len(r))
+	}
+}

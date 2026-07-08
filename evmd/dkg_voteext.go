@@ -317,6 +317,14 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 	if err != nil {
 		return &sharedCache{}
 	}
+	// round-9 #2: post-finalization derive-time poison detection. If a dealer poisoned one of this
+	// node's points while the node was OFFLINE for the complaint window (so buildDkgComplaints never
+	// ran for it), attribute it here so the operator can act; the automatic health rekey still
+	// recovers liveness. Node-local (ExtendVote), no committed-state effect.
+	for _, r := range dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, ak.Qual, dealings) {
+		ctx.Logger().Error("encmempool: DKG share poison detected (offline-victim residual); your derived share for this point is compromised - the health rekey will recover, investigate this dealer",
+			"epoch", epoch, "dealer", r.Dealer, "point", r.Point)
+	}
 	return &sharedCache{ok: true, shares: shares}
 }
 

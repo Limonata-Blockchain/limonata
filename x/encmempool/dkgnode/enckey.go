@@ -213,15 +213,62 @@ func DeriveShares(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []u
 	return out, nil
 }
 
-// NOTE (Fix 2 MF4, deferred refinement): a share-validity BELT here — VerifyShare(commitments, p, s)
-// against each QUAL dealer's Feldman commitments — would catch the offline-victim residual (a dealer
-// that poisoned only points whose owner was offline for the whole complaint window) at derive time
-// rather than downstream at RecoverVerified's DLEQ. It is NOT strictly required for safety (the
-// on-chain DLEQ over Y_p already drops a wrong partial, never silently corrupting decryption), and to
-// be useful it must ALSO trigger an early rekey (a threshold-witnessed signal that opens a fresh
-// epoch) instead of just skipping the point. That rekey-trigger is a consensus mechanism left as a
-// follow-up; the CORE HIGH-2/HIGH-3 closure is the complaint round (a bad dealer is DQ'd from QUAL
-// before it can poison anyone), which does not need this belt.
+// PoisonReport names a QUAL dealer whose sealed share to one of THIS node's eval points is missing,
+// unopenable, or inconsistent with the dealer's public Feldman commitments (round-9 #2).
+type PoisonReport struct {
+	Dealer uint64
+	Point  uint64
+}
+
+// DetectPoisonedDealers is the DERIVE-TIME belt for the offline-victim residual (round-9 #2). The
+// in-window complaint channel (buildDkgComplaints) catches a poisoning dealer BEFORE finalize - but
+// only for a validator that is ONLINE during the complaint window. A dealer that poisons only the
+// points of a validator OFFLINE for the whole window survives into QUAL, and the victim, on RETURN,
+// silently derives a bad aggregate share (its decrypt shares then fail DLEQ and ciphertexts strand
+// until the health rekey). This runs the same Feldman VerifyShare buildDkgComplaints uses, but
+// POST-finalization at derive time, so a returning victim can ATTRIBUTE which QUAL dealer poisoned it
+// (the caller logs it for operator action) instead of just seeing anonymous strands.
+//
+// It is detection + attribution ONLY: it does not change the derived shares (the aggregate is fixed
+// by QUAL and cannot be locally repaired) and safety never depended on it (the on-chain DLEQ already
+// drops the wrong partial, never corrupting decryption; the health rekey recovers liveness). Turning
+// a post-final detection into an AUTOMATIC exclusion->rekey - by accepting the existing framing-
+// resistant justified complaint (SharedPoint + DLEQ) POST-window and routing it to open a fresh epoch
+// - is Byzantine-safe (a false complaint against an honest dealer fails the on-chain VerifyShare, so
+// it cannot grief) but is a consensus-gating + rekey change that needs its own review cycle; it is the
+// scoped follow-up. Node-local (ExtendVote): touches no committed state.
+func DetectPoisonedDealers(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []uint64, dealings map[uint64]types.Dealing) []PoisonReport {
+	var reports []PoisonReport
+	for _, p := range myEvalPoints {
+		for _, dealer := range qual {
+			d, ok := dealings[dealer]
+			if !ok {
+				continue // a missing dealing is a separate liveness condition, not a poison attribution
+			}
+			var ct *threshold.Ciphertext
+			for i := range d.EncShares {
+				if d.EncShares[i].MemberIndex == p {
+					ct = &threshold.Ciphertext{A: d.EncShares[i].A, Nonce: d.EncShares[i].Nonce, Body: d.EncShares[i].Body}
+					break
+				}
+			}
+			if ct == nil {
+				reports = append(reports, PoisonReport{Dealer: dealer, Point: p})
+				continue
+			}
+			s, err := dkg.DecryptShareFrom(encPriv, p, ct)
+			if err != nil {
+				reports = append(reports, PoisonReport{Dealer: dealer, Point: p})
+				continue
+			}
+			commitments, perr := dkg.ParseCommitmentPoints(d.Commitments)
+			if perr != nil || !dkg.VerifyShare(commitments, p, s) {
+				reports = append(reports, PoisonReport{Dealer: dealer, Point: p})
+			}
+		}
+	}
+	return reports
+}
 
 // ProveShareFor produces a DLEQ-proved decryption share for ciphertext component A (r*G,
 // compressed) under this node's derived share. It wraps dkg.ProveDecryptShare.
