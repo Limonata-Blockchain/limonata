@@ -385,11 +385,38 @@ type EncShare struct {
 	Proof         []byte `json:"proof"` // DLEQ proof (C||Z, 64 bytes) binding D to Y_index; empty on legacy path
 }
 
+// EncKeyReg is a bonded validator's auto-announced DKG enc key, carried across a genesis-export
+// migration so the committee's key registrations survive (round-8 #5). The PoP is NOT carried - it
+// was verified when the key was first recorded; genesis is trusted.
+type EncKeyReg struct {
+	Operator string `json:"operator"`
+	Key      []byte `json:"key"` // 33-byte compressed secp256k1 enc key
+}
+
 // GenesisState is the x/encmempool genesis (plain JSON, no proto).
+//
+// Beyond params + the commit-reveal state, it carries the DKG / threshold-encryption state
+// (round-8 #5) so a genesis-EXPORT migration does not strand in-flight ciphertexts or reset the
+// DKG to epoch 0. These fields are EMPTY in the default/dormant genesis. The in-flight EncTx
+// REF-COUNTS (global / per-submitter / per-epoch) are deliberately NOT carried - InitGenesis
+// RECOMPUTES them from EncTxs so they can never be imported inconsistent. Ephemeral / self-
+// rebuilding state (share-key cache, negative caches, submit-rate, strand streaks, rotation
+// cooldowns, complaints) is also not carried.
 type GenesisState struct {
 	Params  Params          `json:"params"`
 	Commits []Commit        `json:"commits"`
 	Pending []PendingReveal `json:"pending"`
+
+	// --- DKG / threshold-encryption state ---
+	EncSeq       uint64               `json:"enc_seq,omitempty"`       // the monotonic enc-tx counter (0x05)
+	EncTxs       []EncTx              `json:"enc_txs,omitempty"`       // in-flight ciphertexts (0x06)
+	EncShares    []EncShare           `json:"enc_shares,omitempty"`    // decryption shares (0x07)
+	DkgRounds    []DkgRound           `json:"dkg_rounds,omitempty"`    // round records (0x10)
+	Dealings     []Dealing            `json:"dealings,omitempty"`      // stored dealings (0x11)
+	ActiveKeys   []ActiveThresholdKey `json:"active_keys,omitempty"`   // installed threshold keys (0x13)
+	CurrentEpoch uint64               `json:"current_epoch,omitempty"` // latest opened epoch (0x14)
+	ActiveEpoch  uint64               `json:"active_epoch,omitempty"`  // epoch of the serving key (0x15)
+	EncKeys      []EncKeyReg          `json:"enc_keys,omitempty"`      // announced committee enc keys (0x1A/0x1B)
 }
 
 func DefaultParams() Params {

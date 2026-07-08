@@ -115,11 +115,13 @@ and assess severity; do not re-report them as new without engaging the rationale
    with no extensions and a censoring one are indistinguishable at Txs[0]). Making injection
    consensus-required has a real liveness cost. Refs: `evmd/dkg_voteext.go` wrapDkgProcessProposal.
 
-5. **Genesis is not DKG-state-capable — SAFE today, SCOPED work (see §6).** ExportGenesis PANICS
-   (loud, no corruption) if encrypted txs are in flight; genesis carries only params/commits/
-   pending, not the DKG round/key/registrations/EncTx/shares/refcounts. **In-place upgrades (the
-   normal Cosmos path, which keeps the full KV store) are UNAFFECTED.** Only a genesis-export
-   migration with in-flight ciphertexts is blocked. The full serialization is scoped in §6.
+5. **Genesis DKG-state serialization — DONE (was §6).** ExportGenesis/InitGenesis now round-trip
+   the full DKG/threshold state (EncSeq, EncTx, shares, DkgRounds, dealings, ActiveKeys, epochs,
+   enc-key registrations); the ref-counts are RECOMPUTED from the imported EncTx set (never
+   carried) so they are always consistent. The export panic is removed. Verify the round-trip +
+   ref-count consistency in `keeper/genesis.go` + `keeper/audit_genesis_roundtrip_test.go`.
+   (Ephemeral state - caches, streaks, submit-rate, complaints, rotation cooldowns - is
+   intentionally not carried; it self-rebuilds after import.)
 
 6. **Decrypt→execute: precompile sub-call isolation is half-built (EncExecEnabled only).** The
    re-injection rejects a tx whose TOP-LEVEL `To` is a precompile, but a tx calling an ordinary
@@ -132,28 +134,19 @@ and assess severity; do not re-report them as new without engaging the rationale
 **Already fixed (do not re-report; verify if you wish):** DLEQ nonce/index binding (key-extraction),
 same-A replay via PoK-of-r, early decrypt-share exposure (maturity gate), VE-decode DoS,
 share/deal write-once (first-wins), admission-cap-disable, stale-stake rekey defaults, committee×
-share-budget→MaxTxBytes coupling, cache-context panic rollback, and the re-injection fee/nonce/gas
+share-budget→MaxTxBytes coupling, cache-context panic rollback, the re-injection fee/nonce/gas
 correctness (fee-collector conservation, reverted-create nonce bump, per-tx + block gas caps,
-TxIndex isolation, blob-tx reject).
+TxIndex isolation, blob-tx reject), and genesis DKG-state round-tripping with recomputed ref-counts.
 
 ---
 
-## 6. `#5` genesis DKG-state serialization — scoped spec (if commissioned)
+## 6. Genesis DKG-state serialization — IMPLEMENTED
 
-The safe interim is the export panic + "in-place upgrade only". A full implementation must:
-- **Serialize (add to `GenesisState`):** `EncSeq` (0x05), all `EncTx` (0x06), all `EncShare`
-  (0x07), all `DkgRound` (0x10), all `Dealing` (0x11), all `ActiveThresholdKey` (0x13),
-  `CurrentEpoch` (0x14), `ActiveEpoch` (0x15), all `EncPubKey` registrations (0x1A + rebuild the
-  0x1B reverse index on import).
-- **RECOMPUTE on import (never export — consistency):** all EncTx ref-counts —
-  `GlobalEncCount` (0x18), `SubmitterEncCount` (0x19), `EpochEncCount` (0x16) — by iterating the
-  imported EncTx set; and the commit ref-counts (0x23/0x24) from the imported Commits.
-- **Skip (ephemeral / self-rebuilding):** complaints (0x12), last-rekey height (0x17), complaint
-  negative-cache (0x1C), submit-rate (0x1D), share-key cache + cursor (0x1E/0x1F, the recover path
-  recomputes on a cache miss), decrypt-strand streak (0x20), rejected-share cache (0x21), key-
-  rotation cooldown (0x22).
-- **Test:** a round-trip that exports a populated state, imports into a fresh keeper, and asserts
-  BOTH the state AND every recomputed ref-count match the source (the consistency guarantee).
+Done (see residual #5 above). `keeper/genesis.go` serializes `EncSeq`, `EncTx`, `EncShare`,
+`DkgRound`, `Dealing`, `ActiveThresholdKey`, epochs, and `EncPubKey` registrations; recomputes the
+`GlobalEncCount`/`SubmitterEncCount`/`EpochEncCount` ref-counts from the imported EncTx set on
+import; and skips ephemeral/self-rebuilding state. The consistency guarantee is asserted by
+`keeper/audit_genesis_roundtrip_test.go` (state + every recomputed ref-count match the source).
 
 ---
 
