@@ -360,9 +360,14 @@ const maxCiphertextBodyBytes = 16384
 
 // commit/reveal admission ceilings (external-review #4): bound the in-flight (un-revealed) commit state so
 // the permissionless CommitTx path cannot be spammed into unbounded KV state + O(N) BeginBlock GC scans.
+// The per-sender cap is a TINY fraction (1/512) of the global, so SATURATING the global — which would then
+// reject honest senders' commits — needs ~512 funded sybil accounts, not the 16 a 1/16 ratio allowed
+// (audit F1). A legit anti-MEV user holds only a handful of un-revealed commits, so 64 is ample headroom.
+// (The COMPLETE anti-sybil answer is a stake/price gate on commit ingress — a design item, not a constant;
+// this keeps the un-priced path bounded and far harder to wedge in the meantime.)
 const (
 	maxInFlightCommits  = 32768
-	maxCommitsPerSender = 2048
+	maxCommitsPerSender = 64
 )
 
 // --- commit/reveal in-flight ref-counts (O(1) admission gauges, inc in SetCommit, dec in DeleteCommit) ---
@@ -372,6 +377,12 @@ func submitterCommitCountKey(sender string) []byte {
 }
 
 // GetGlobalCommitCount returns the number of in-flight (un-revealed, un-GC'd) commits across all senders.
+//
+// DEPLOYMENT NOTE (audit F2): these counters are seeded by SetCommit (fresh genesis + live CommitTx). If
+// this admission-cap feature is ever enabled via an IN-PLACE binary swap onto an ALREADY-POPULATED commit
+// store, add a one-time migration that rebuilds them (IterateCommits -> incCommitCount) — otherwise the
+// counter reads 0 until the pre-existing commit set turns over (bounded, self-healing, never underflows).
+// The module is dormant/audit-gated, so a fresh genesis (which re-runs SetCommit) needs no migration.
 func (k Keeper) GetGlobalCommitCount(ctx context.Context) uint64 {
 	return k.readU64(ctx, types.GlobalCommitCountKey)
 }
