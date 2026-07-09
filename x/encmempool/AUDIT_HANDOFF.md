@@ -175,9 +175,22 @@ never trusted as pre-verified; recovery re-verifies), PoK verification ordered L
 CheckTx rejection gates (cheap gates reject doomed spam before the EC verify), and rejection of a
 zero-scalar enc key.
 
-**Operator note (residual #3, spam defaults):** the encrypted path is off by default; when enabling
-it, set a non-zero `EncSubmitBond` + `EncSubmitBondBurnBps` and a `MaxInFlightEncTx` sized to the
-fleet - the defaults are permissive and the bond+burn is the economic anti-sybil lever.
+**Operator note (spam defaults + MaxTxBytes):** the encrypted path is off by default. When enabling
+it: (a) set a non-zero `EncSubmitBond` + `EncSubmitBondBurnBps` and a `MaxInFlightEncTx` sized to the
+fleet - the defaults are permissive and the bond+burn is the economic anti-sybil lever; (b) the DKG
+committee/share-budget coupling assumes the chain's consensus `MaxTxBytes >= ~20MB` - a chain set
+lower MUST size `dkg_max_members`/`dkg_share_budget` down, or the injected vote-extension commit will
+not fit and DKG will not progress (the runtime fallback is safe - no injection, not a halt - but the
+round stalls); (c) `MaxVerifyOpsPerBlock` cannot be tuned below `max(256, S)` (a single ciphertext
+needs up to S verifications) - lower S to lower per-block cost.
+
+**Round-12 hardening (all in the default/production binary):** env vars can no longer drive
+encmempool consensus state - the `ENCMEMPOOL_FORCE_UPGRADE`/`ENCMEMPOOL_ACTIVATION` path is behind
+the `encmempoolforce` build tag; the production binary compiles a no-op, so activation is only the
+deterministic baked GOV path (was a CRITICAL app-hash-divergence footgun). The legacy trusted-setup
+decrypt path is now Byzantine-safe (combination recovery accepts only the GCM-authenticated share
+set). RevealTx caps its payload + salt. The max DKG phase window is 10k blocks (was 100k), bounding
+a stuck-round freeze to hours. applyEncMempoolInit validates params before writing them.
 
 The former duplicate-DLEQ perf item is FIXED: an ingest-`Verified` flag on `EncShare` lets the
 decrypt-path recover skip re-verifying VE-sourced shares (index-range + dedup guards still apply;

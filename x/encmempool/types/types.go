@@ -55,11 +55,17 @@ type Params struct {
 	// mis-burns an in-flight one.
 	EncSubmitBondBurnBps uint32 `json:"enc_submit_bond_burn_bps,omitempty"`
 
-	// MaxVerifyOpsPerBlock is the HARD per-block budget on first-time decryption-share DLEQ verifications
+	// MaxVerifyOpsPerBlock is the per-block budget on first-time decryption-share DLEQ verifications
 	// (CRIT-2 K_max). It caps the O(t) EC verify work a single block performs REGARDLESS of the share
 	// budget S, so consensus block time stays flat under any valid S or a sybil share flood (excess
 	// ciphertexts defer + heal over later blocks). Governance-tunable so the live validator fleet can set
 	// it to its measured per-block hardware budget. 0 => the built-in defaultMaxVerifyOps.
+	//
+	// FLOOR (round-12 #7, be explicit): the EFFECTIVE ceiling is max(MaxVerifyOpsPerBlock, VoteExtShareCap)
+	// where VoteExtShareCap == max(256, S). A value set BELOW that floor is deliberately raised to it, NOT
+	// honored as-is - because a SINGLE ciphertext can need up to S share-verifications to reconstruct, so a
+	// cap under S could prevent ANY ciphertext from ever completing. So this bounds work from ABOVE but
+	// cannot be tuned below max(256, S); lowering per-block cost further requires lowering S.
 	MaxVerifyOpsPerBlock uint64 `json:"max_verify_ops_per_block"`
 
 	// --- on-chain validator DKG (OPT-IN; supersedes the LEGACY trusted setup
