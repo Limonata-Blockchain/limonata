@@ -672,7 +672,14 @@ func NewExampleApp(
 	// it can be injected into the valgrant precompile via DefaultStaticPrecompiles.
 	// StakingKeeper (read-only) lets the encmempool DKG EndBlocker learn the bonded
 	// validator set (the keyper set) and re-run the DKG when it changes.
-	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]), app.StakingKeeper, app.EVMKeeper, app.AccountKeeper, app.BankKeeper)
+	// NetCapKeeper is created HERE (before EncMempoolKeeper) so the decrypt->execute path can apply
+	// the net-seller cap (round-11 #1); it only needs AccountKeeper + BankKeeper, both already built.
+	app.NetCapKeeper = netcapkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[netcaptypes.StoreKey]),
+		app.AccountKeeper,
+	)
+	app.BankKeeper.AppendSendRestriction(app.NetCapKeeper.SendRestrictionFn)
+	app.EncMempoolKeeper = encmempoolkeeper.NewKeeper(runtime.NewKVStoreService(keys[encmempooltypes.StoreKey]), app.StakingKeeper, app.EVMKeeper, app.AccountKeeper, app.BankKeeper, app.NetCapKeeper)
 	app.GasSponsorKeeper = gassponsorkeeper.NewKeeper(
 		runtime.NewKVStoreService(keys[gassponsortypes.StoreKey]),
 		app.ContestKeeper,
@@ -693,11 +700,8 @@ func NewExampleApp(
 	// paths: (1) bank SendRestriction (cosmos sends + ERC20/WERC20 precompiles), registered
 	// here; (2) an EVM ante decorator for native eth value transfers (which bypass x/bank,
 	// committing via UncheckedSetBalance), wired in setAnteHandler.
-	app.NetCapKeeper = netcapkeeper.NewKeeper(
-		runtime.NewKVStoreService(keys[netcaptypes.StoreKey]),
-		app.AccountKeeper,
-	)
-	app.BankKeeper.AppendSendRestriction(app.NetCapKeeper.SendRestrictionFn)
+	// (NetCapKeeper is now instantiated ABOVE, before EncMempoolKeeper, so the decrypt->execute path
+	// receives a fully-initialized keeper - round-11 #1.)
 
 	app.ModuleManager = module.NewManager(
 		genutil.NewAppModule(

@@ -141,6 +141,17 @@ func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget,
 		return decryptExecOutcome{tag: "cant_transfer", txHash: txHash}
 	}
 
+	// round-11 #1: apply the net-seller cap to a native value transfer, exactly as the normal ante's
+	// NetCapEVMDecorator does (this BeginBlock path bypasses that ante). Runs on the child cache ctx,
+	// so the record commits atomically with the tx (rolled back if the tx is not committed). nil = off.
+	if k.netCapChecker != nil {
+		if to := tx.To(); to != nil && tx.Value() != nil && tx.Value().Sign() > 0 {
+			if err := k.netCapChecker.CheckAndRecord(ctx, sdk.AccAddress(from.Bytes()), sdk.AccAddress(to.Bytes()), sdkmath.NewIntFromBigInt(tx.Value())); err != nil {
+				return decryptExecOutcome{tag: "netcap_blocked", txHash: txHash}
+			}
+		}
+	}
+
 	// 6+7. Buy gas up front (ApplyTransaction only REFUNDS; without this its refund drains the fee
 	//      collector). sponsored=false routes the refund to the sender so the round-trip nets to
 	//      gasUsed*gasPrice.
@@ -149,9 +160,13 @@ func (k Keeper) executeDecryptedTx(ctx sdk.Context, plaintext []byte, gasBudget,
 		return decryptExecOutcome{tag: "fee_deduct", txHash: txHash}
 	}
 
-	// 8. Execute. A state-transition error (bad config, intrinsic gas, etc.) => caller discards the
-	//    child context. A revert is surfaced via res.Failed(), not an error - a normal reverting tx.
-	res, err := k.evmKeeper.ApplyTransaction(ctx, tx)
+	// 8. Execute with ALL PRECOMPILES BLOCKED (round-11 #1). The decrypted tx runs in BeginBlock,
+	//    OUTSIDE the normal EVM ante pipeline; without this, a tx (or a contract/constructor it calls)
+	//    could sub-CALL a bank/staking/gov/IBC/... precompile and drive native module state from an
+	//    abnormal phase. WithBlockedPrecompiles makes the EVM reject a precompile call at ANY depth
+	//    (the top-level reject above is the fast path; this closes the sub-call hole). Deterministic.
+	//    A state-transition error => caller discards the child context; a revert => res.Failed().
+	res, err := k.evmKeeper.ApplyTransaction(evmkeeper.WithBlockedPrecompiles(ctx), tx)
 	if err != nil {
 		return decryptExecOutcome{tag: "exec_error", txHash: txHash}
 	}

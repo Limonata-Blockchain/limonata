@@ -31,11 +31,12 @@ type Keeper struct {
 	stakingKeeper types.StakingKeeper
 	evmKeeper     *evmkeeper.Keeper
 	accountKeeper anteinterfaces.AccountKeeper
-	bankKeeper    types.BankKeeper // round-9 #1: escrow/refund the submit bond; nil => bonding disabled
+	bankKeeper    types.BankKeeper             // round-9 #1: escrow/refund the submit bond; nil => bonding disabled
+	netCapChecker anteinterfaces.NetCapChecker // round-11 #1: apply the net-seller cap to decrypted native transfers; nil => off
 }
 
-func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper, evm *evmkeeper.Keeper, ak anteinterfaces.AccountKeeper, bk types.BankKeeper) Keeper {
-	return Keeper{storeService: ss, stakingKeeper: sk, evmKeeper: evm, accountKeeper: ak, bankKeeper: bk}
+func NewKeeper(ss corestore.KVStoreService, sk types.StakingKeeper, evm *evmkeeper.Keeper, ak anteinterfaces.AccountKeeper, bk types.BankKeeper, ncc anteinterfaces.NetCapChecker) Keeper {
+	return Keeper{storeService: ss, stakingKeeper: sk, evmKeeper: evm, accountKeeper: ak, bankKeeper: bk, netCapChecker: ncc}
 }
 
 func (k Keeper) store(ctx context.Context) corestore.KVStore { return k.storeService.OpenKVStore(ctx) }

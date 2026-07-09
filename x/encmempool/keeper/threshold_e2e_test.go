@@ -29,7 +29,7 @@ func newKeeperBank(t *testing.T, height int64, bk types.BankKeeper) (keeper.Keep
 	key := storetypes.NewKVStoreKey(types.StoreKey)
 	tkey := storetypes.NewTransientStoreKey("transient_encmempool")
 	testCtx := testutil.DefaultContextWithDB(t, key, tkey)
-	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil, nil, nil, bk)
+	k := keeper.NewKeeper(runtime.NewKVStoreService(key), nil, nil, nil, bk, nil)
 	ctx := testCtx.Ctx.WithBlockHeight(height).WithEventManager(sdk.NewEventManager()).
 		WithConsensusParams(cmtproto.ConsensusParams{Abci: &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 1}})
 	return k, ctx

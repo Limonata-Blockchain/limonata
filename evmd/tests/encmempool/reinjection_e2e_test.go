@@ -126,7 +126,7 @@ func TestReinjection(t *testing.T) {
 		value := big.NewInt(1000)
 		gasPrice := big.NewInt(1_000_000_000)
 
-		e := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(0, value), submitter)
+	e := submitAndShare(t, app, ctx, pub, shares, keypers, mkTx(0, value), submitter)
 
 		feeColl := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
 		recipBefore := app.EVMKeeper.GetBalance(ctx, recipient).ToBig()
@@ -276,6 +276,31 @@ func TestReinjection(t *testing.T) {
 		require.Equal(t, "gas_too_large", tag)
 		_, stillThere := app.EncMempoolKeeper.GetEncTx(bctx, e.DecryptHeight, e.Seq)
 		require.False(t, stillThere, "the ciphertext must be consumed, not stranded")
+	})
+
+	// (8) round-11 #1: a decrypted tx targeting a precompile is BLOCKED (native module access from
+	// BeginBlock, outside the normal ante, is refused). Top-level here; the sub-call path is covered
+	// by the call-hook unit test (x/vm/keeper TestGetPrecompileBlockingCallHook) since the hook fires
+	// on every CALL frame.
+	t.Run("precompile_call_blocked", func(t *testing.T) {
+		ctx := newExecCtx(app)
+		pub, shares, err := threshold.Setup(3, 2)
+		require.NoError(t, err)
+		require.NoError(t, app.EncMempoolKeeper.SetParams(ctx, encParams(pub, keypers, true)))
+		sender, submitter, _, sign := fundSender(ctx)
+		bankPre := common.HexToAddress(evmtypes.BankPrecompileAddress)
+		raw := sign(&ethtypes.LegacyTx{Nonce: 0, To: &bankPre, Value: big.NewInt(0), Gas: 100000, GasPrice: big.NewInt(1_000_000_000)})
+		e := submitAndShare(t, app, ctx, pub, shares, keypers, raw, submitter)
+
+		bctx := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
+		require.NoError(t, app.EncMempoolKeeper.BeginBlock(bctx))
+
+		tag, found := reinjectAttr(bctx, "outcome")
+		require.True(t, found)
+		require.Equal(t, "precompile_blocked", tag, "a decrypted tx targeting a precompile must be blocked")
+		require.Equal(t, uint64(0), app.EVMKeeper.GetNonce(bctx, sender), "a blocked precompile tx must not execute")
+		_, still := app.EncMempoolKeeper.GetEncTx(bctx, e.DecryptHeight, e.Seq)
+		require.False(t, still, "blocked ciphertext is consumed, not stranded")
 	})
 
 	// (7) round-10 #5: cumulative exec gas must NOT overshoot the ceiling. With ceiling 25000

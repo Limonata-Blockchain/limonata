@@ -81,11 +81,17 @@ func (k *Keeper) NewEVMWithOverridePrecompiles(
 	evmHooks.AddCallHooks(
 		accessControl.GetCallHook(signer),
 	)
-	if overridePrecompiles {
+	switch {
+	case precompilesBlocked(ctx):
+		// round-11 #1: decrypted-tx execution runs with ALL precompiles blocked (any depth).
+		evmHooks.AddCallHooks(
+			k.GetPrecompileBlockingCallHook(ctx),
+		)
+	case overridePrecompiles:
 		evmHooks.AddCallHooks(
 			k.GetPrecompilesCallHook(ctx),
 		)
-	} else {
+	default:
 		evmHooks.AddCallHooks(
 			k.GetPrecompileRecipientCallHook(ctx),
 		)

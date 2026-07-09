@@ -114,3 +114,27 @@ func (m *mockPrecompiledContract) RequiredGas(input []byte) uint64 {
 func (m *mockPrecompiledContract) Run(evm *vm.EVM, contract *vm.Contract, readonly bool) ([]byte, error) {
 	return nil, nil
 }
+
+// round-11 #1: the blocking call hook (used by the encrypted-mempool decrypt->execute path via
+// WithBlockedPrecompiles) must REJECT any call whose recipient is a precompile - at ANY depth, since
+// the hook runs on every CALL frame - and allow normal calls. This is what stops a decrypted tx (or a
+// contract/constructor it sub-calls) from reaching a native module precompile in BeginBlock.
+func (suite *KeeperTestSuite) TestGetPrecompileBlockingCallHook() {
+	caller := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	precompileAddr := common.HexToAddress("0x0000000000000000000000000000000000001234")
+	normalAddr := common.HexToAddress("0x0000000000000000000000000000000000009999")
+
+	suite.Run("blocks a precompile recipient", func() {
+		suite.erc20Keeper.On("GetERC20PrecompileInstance", mock.Anything, precompileAddr).
+			Return(&mockPrecompiledContract{address: precompileAddr}, true, nil).Once()
+		hook := suite.vmKeeper.GetPrecompileBlockingCallHook(suite.ctx)
+		suite.Require().Error(hook(nil, caller, precompileAddr), "a call to a precompile must be blocked")
+	})
+
+	suite.Run("allows a non-precompile recipient", func() {
+		suite.erc20Keeper.On("GetERC20PrecompileInstance", mock.Anything, normalAddr).
+			Return(nil, false, nil).Once()
+		hook := suite.vmKeeper.GetPrecompileBlockingCallHook(suite.ctx)
+		suite.Require().NoError(hook(nil, caller, normalAddr), "a normal call must not be blocked")
+	})
+}
