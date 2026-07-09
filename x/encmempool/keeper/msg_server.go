@@ -143,6 +143,16 @@ func (m msgServer) RevealTx(goCtx context.Context, msg *types.MsgRevealTx) (*typ
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
 			"reveal too early: need height >= %d (commit %d + delay %d)", msg.CommitHeight+delay, msg.CommitHeight, delay)
 	}
+	// round-12 #6: cap the reveal payload + salt at ingress. Without this a committer can queue
+	// arbitrarily large PendingReveal blobs that BeginBlock materializes ALL of into one slice - a
+	// needless memory/IO surface (MaxInFlightCommits * multi-MB). The reveal is a single tx, so the
+	// same body cap as a ciphertext is generous; the salt is a short nonce.
+	if len(msg.RevealTx) > maxCiphertextBodyBytes {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "reveal_tx exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.RevealTx))
+	}
+	if len(msg.Salt) > maxRevealSaltBytes {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "salt exceeds the %d-byte cap (got %d)", maxRevealSaltBytes, len(msg.Salt))
+	}
 	// Binding: sha256(reveal_tx || salt) must equal the recorded commitment.
 	h := sha256.Sum256(append(append([]byte{}, msg.RevealTx...), msg.Salt...))
 	if !bytes.Equal(h[:], c.CommitHash) {

@@ -412,6 +412,10 @@ const maxEncSubmitsPerBlockPerSubmitter = 4
 // bounding per-ciphertext state + the later AES-GCM decrypt cost, so MaxInFlightEncTx * body stays bounded.
 const maxCiphertextBodyBytes = 16384
 
+// maxRevealSaltBytes caps the commit/reveal salt (round-12 #6). A salt is a short random nonce
+// (32 bytes is standard); 64 is generous. Bounds the per-PendingReveal state BeginBlock materializes.
+const maxRevealSaltBytes = 64
+
 // commit/reveal admission ceilings (external-review #4): bound the in-flight (un-revealed) commit state so
 // the permissionless CommitTx path cannot be spammed into unbounded KV state + O(N) BeginBlock GC scans.
 // The per-sender cap is a TINY fraction (1/512) of the global, so SATURATING the global — which would then

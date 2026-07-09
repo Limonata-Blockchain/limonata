@@ -649,10 +649,115 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 	if len(shares) < need {
 		return nil, need, errNotEnoughShares
 	}
-	ds := make([]*threshold.DecryptShare, 0, need)
-	for _, s := range shares[:need] {
-		ds = append(ds, &threshold.DecryptShare{Index: s.Index, D: s.D})
+	// round-12 #4 (legacy Byzantine safety): the legacy path carries NO per-share DLEQ, so blindly
+	// combining the first `need` shares lets ONE Byzantine keyper's bad share yield a wrong key and
+	// STRAND the ciphertext. Instead try combinations and accept the one whose AES-GCM decryption
+	// AUTHENTICATES (a wrong key fails the GCM tag), tolerating up to len(shares)-need bad shares. The
+	// legacy keyper set is small, so the enumeration is bounded; if too large, fall back to first-need.
+	shared, ok := k.legacyRecoverRobust(e, shares, need)
+	if !ok {
+		// We already have >= need shares (checked above), but no combination formed a usable key
+		// (e.g. threshold=0/empty, or unparseable shares). This is a genuine failure, NOT a
+		// wait-for-more-shares case: return a generic error so decryptMatured consumes it via
+		// encmempool_decrypt_failed (no strand), rather than errNotEnoughShares (which would defer).
+		return nil, need, errLegacyRecoverFailed
 	}
-	shared, err = threshold.Recover(ds)
-	return shared, need, err
+	return shared, need, nil
+}
+
+var errLegacyRecoverFailed = errors.New("legacy recover: no usable share combination")
+
+// maxLegacyRecoverCombos bounds the per-ciphertext combination search on the legacy path (round-12
+// #4). A legacy trusted-setup keyper set is small (e.g. 3-of-5), so C(n, need) is tiny; above this
+// bound the search falls back to the first-`need` shares (best effort) to keep BeginBlock work bounded.
+const maxLegacyRecoverCombos = 128
+
+// legacyRecoverRobust returns the threshold shared secret whose AES-GCM decryption of e authenticates,
+// searching combinations of `need` shares (round-12 #4). Deterministic: shares are in canonical order
+// and threshold.Recover/Decrypt are pure, so every node selects the same combination.
+func (k Keeper) legacyRecoverRobust(e types.EncTx, shares []types.EncShare, need int) (*secp256k1.JacobianPoint, bool) {
+	if need < 0 || len(shares) < need {
+		return nil, false
+	}
+	ct := &threshold.Ciphertext{A: e.A, Nonce: e.Nonce, Body: e.Body}
+	recover := func(idx []int) (*secp256k1.JacobianPoint, bool) {
+		ds := make([]*threshold.DecryptShare, len(idx))
+		for i, ci := range idx {
+			ds[i] = &threshold.DecryptShare{Index: shares[ci].Index, D: shares[ci].D}
+		}
+		shared, err := threshold.Recover(ds)
+		if err != nil {
+			return nil, false
+		}
+		if _, derr := threshold.Decrypt(shared, ct); derr != nil {
+			return nil, false // wrong key: GCM tag failed
+		}
+		return shared, true
+	}
+	// Too many combinations: best-effort first-`need` (bounds worst-case BeginBlock compute).
+	if countCombos(len(shares), need) > maxLegacyRecoverCombos {
+		first := make([]int, need)
+		for i := range first {
+			first[i] = i
+		}
+		return recover(first)
+	}
+	comb := make([]int, need)
+	var found *secp256k1.JacobianPoint
+	var rec func(start, depth int) bool
+	rec = func(start, depth int) bool {
+		if depth == need {
+			if shared, ok := recover(comb); ok {
+				found = shared
+				return true
+			}
+			return false
+		}
+		for i := start; i <= len(shares)-(need-depth); i++ {
+			comb[depth] = i
+			if rec(i+1, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+	if rec(0, 0) {
+		return found, true
+	}
+	// No combination AUTHENTICATED. Fall back to the first-`need` shares (the pre-#4 behavior) so the
+	// decrypt path runs its normal decrypt-or-fail: a genuinely undecryptable ciphertext (e.g. a
+	// malformed nonce, or a wrong body) still fails GRACEFULLY via encmempool_decrypt_failed and is
+	// consumed, exactly as before. This never yields a wrong-but-authenticating key - only the GCM-
+	// verified combination above is a success; the fallback key is expected to fail decryption.
+	first := make([]int, need)
+	for i := range first {
+		first[i] = i
+	}
+	ds := make([]*threshold.DecryptShare, need)
+	for i, ci := range first {
+		ds[i] = &threshold.DecryptShare{Index: shares[ci].Index, D: shares[ci].D}
+	}
+	shared, err := threshold.Recover(ds)
+	if err != nil {
+		return nil, false
+	}
+	return shared, true
+}
+
+// countCombos returns C(n, k), capped at maxLegacyRecoverCombos+1 to avoid overflow / needless work.
+func countCombos(n, k int) int {
+	if k < 0 || k > n {
+		return 0
+	}
+	if k > n-k {
+		k = n - k
+	}
+	res := 1
+	for i := 0; i < k; i++ {
+		res = res * (n - i) / (i + 1)
+		if res > maxLegacyRecoverCombos {
+			return maxLegacyRecoverCombos + 1
+		}
+	}
+	return res
 }

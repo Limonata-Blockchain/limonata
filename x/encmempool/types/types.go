@@ -694,9 +694,14 @@ const (
 	// maxDkgPhaseWindow is the OPERATIONAL upper bound (well below the 10M overflow guard) on the
 	// per-round phase windows and the decrypt delay. AUDIT FIX (GOV-1/GOV-5): a governance value near
 	// maxDkgWindowBlocks would open a round EndBlockDKG can never close (a years-away deadline) or pin
-	// an epoch's key/state for effectively ever. ~100k blocks (a couple of days at ~2s) is generous for
-	// any real phase yet always terminates.
-	maxDkgPhaseWindow uint64 = 100_000
+	// an epoch's key/state for effectively ever.
+	//
+	// round-12 #3: LOWERED 100_000 -> 10_000. While a round is Open and before its deadline,
+	// EndBlockDKG does not retry/rekey, so a stuck round (proposer censorship, VE that do not fit the
+	// block, no dealings) freezes DKG recovery for the whole window. A ~55h cap made that "days"; ~5.5h
+	// (10k blocks at ~2s) bounds it to hours while staying far above any real deal+complaint phase
+	// (defaults 20/10 blocks). A tighter mid-window liveness force-advance remains a design item.
+	maxDkgPhaseWindow uint64 = 10_000
 	// maxInFlightCeiling bounds the admission ceilings so a governance-set value cannot
 	// approach a uint64 overflow in the keeper's ref-count arithmetic.
 	maxInFlightCeiling uint64 = 1 << 40
