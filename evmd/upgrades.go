@@ -3,7 +3,7 @@ package evmd
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"fmt"
 	"os"
 	"slices"
 
@@ -136,7 +136,12 @@ const EncMempoolForceUpgradeEnv = "ENCMEMPOOL_FORCE_UPGRADE"
 // state divergence): it uses bakedEncActivation(), baked into the release binary.
 const EncMempoolActivationEnv = "ENCMEMPOOL_ACTIVATION"
 
-func encMempoolForceUpgrade() bool { return os.Getenv(EncMempoolForceUpgradeEnv) == "1" }
+// encMempoolForceUpgrade / envEncActivation / maybeRunEncMempoolForceInit (the env-driven,
+// single-operator FORCE path) live in upgrades_encforce.go behind the `encmempoolforce` build tag
+// (round-12 #1 CRITICAL). A production/default binary compiles the no-op stubs in
+// upgrades_encforce_stub.go, so NO environment variable can add a store, run migrations, or mutate
+// consensus params - eliminating the app-hash divergence a per-validator env would cause. The
+// deterministic GOV path (bakedEncActivation via the registered upgrade handler) is unaffected.
 
 // encActivation holds the parameters that turn the encrypted mempool ON.
 type encActivation struct {
@@ -170,28 +175,6 @@ func bakedEncActivation() (encActivation, bool) {
 	}, true
 }
 
-// envEncActivation parses ENCMEMPOOL_ACTIVATION for the FORCE / dry-run path.
-func envEncActivation() (encActivation, bool) {
-	raw := os.Getenv(EncMempoolActivationEnv)
-	if raw == "" {
-		return encActivation{}, false
-	}
-	var j struct {
-		ThresholdPub string   `json:"threshold_pub"`
-		Threshold    uint32   `json:"threshold"`
-		Keypers      []string `json:"keypers"`
-		DecryptDelay uint64   `json:"decrypt_delay"`
-	}
-	if err := json.Unmarshal([]byte(raw), &j); err != nil {
-		return encActivation{}, false
-	}
-	pub, err := base64.StdEncoding.DecodeString(j.ThresholdPub)
-	if err != nil || len(pub) == 0 || j.Threshold == 0 || len(j.Keypers) == 0 {
-		return encActivation{}, false
-	}
-	return encActivation{ThresholdPub: pub, Threshold: j.Threshold, Keypers: j.Keypers, DecryptDelay: j.DecryptDelay}, true
-}
-
 // applyEncMempoolInit activates the encrypted mempool deterministically from act,
 // preserving the existing reveal-path params (reveal_delay, max_reveal_window).
 // Idempotent (no-op if already enabled). If not configured it does nothing — the
@@ -212,6 +195,12 @@ func (app *EVMD) applyEncMempoolInit(ctx sdk.Context, act encActivation, configu
 	p.Threshold = act.Threshold
 	p.Keypers = act.Keypers
 	p.DecryptDelay = act.DecryptDelay
+	// round-12 #1 (CRITICAL): NEVER write params that fail validation. An upgrade activating the
+	// encrypted path with an invalid config (bad threshold/keyper split, zero decrypt delay, ...)
+	// must HALT the upgrade loudly, not silently install a broken live path.
+	if err := p.Validate(); err != nil {
+		return fmt.Errorf("encmempool activation params invalid, refusing to write: %w", err)
+	}
 	if err := app.EncMempoolKeeper.SetParams(ctx, p); err != nil {
 		return err
 	}
@@ -549,31 +538,5 @@ func (app *EVMD) maybeRunValGrantForceInit(ctx sdk.Context) error {
 // the first block after the binary swap it registers x/vpcap (RunMigrations runs
 // its InitGenesis) and activates the encrypted mempool from ENCMEMPOOL_ACTIVATION.
 // Runs exactly once. NEVER touches user funds.
-func (app *EVMD) maybeRunEncMempoolForceInit(ctx sdk.Context) error {
-	if !encMempoolForceUpgrade() {
-		return nil
-	}
-	vm, err := app.UpgradeKeeper.GetModuleVersionMap(ctx)
-	if err != nil {
-		return err
-	}
-	if _, registered := vm[vpcaptypes.ModuleName]; registered {
-		return nil // migrations already ran -> done
-	}
-	logger := ctx.Logger().With("upgrade", EncMempoolUpgradeName, "path", "force-operator")
-	logger.Info("running encmempool/vpcap force (non-gov) one-shot")
-
-	newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), vm)
-	if err != nil {
-		return err
-	}
-	if err := app.UpgradeKeeper.SetModuleVersionMap(ctx, newVM); err != nil {
-		return err
-	}
-	act, configured := envEncActivation()
-	if err := app.applyEncMempoolInit(ctx, act, configured); err != nil {
-		return err
-	}
-	logger.Info("encmempool/vpcap force one-shot complete")
-	return nil
-}
+// maybeRunEncMempoolForceInit is defined in upgrades_encforce.go (real, `encmempoolforce` build) and
+// upgrades_encforce_stub.go (no-op, default build) - round-12 #1.
