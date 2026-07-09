@@ -107,16 +107,16 @@ func chaffVESharesAt(c h3Committee, e types.EncTx, op string) []types.VoteExtSha
 }
 
 // c7Committee builds the canonical cycle-7 committee: 4 equal-stake members (each 25% stake, each
-// owns 8 of the S=32 eval points), t = floor(2*32/3) - 4 + 1 = 18. honest_A + honest_B own 16
+// owns 8 of the S=32 eval points), t = floor(2*32/3) + 1 = 22. honest_A + honest_B own 16
 // points (< t): their VALID shares alone cannot yet decrypt (the exact transient the grace
 // protects). honest_C is a lagging honest member. attacker is a single 25%-stake member — a
 // strict stake MINORITY (25% < 1/3).
 func c7Committee(t *testing.T) h3Committee {
 	t.Helper()
 	stakes := map[string]int64{"honest_A": 100, "honest_B": 100, "honest_C": 100, "attacker": 100}
-	c := runTransparentDKG(t, stakes, 32) // S=32=8n, n=4 -> t=18, each owns 8 points
-	if int(c.ak.Threshold) != 18 {
-		t.Fatalf("precondition: expected t=18, got %d", c.ak.Threshold)
+	c := runTransparentDKG(t, stakes, 32) // S=32=8n, n=4 -> t=22, each owns 8 points
+	if int(c.ak.Threshold) != 22 {
+		t.Fatalf("precondition: expected t=22, got %d", c.ak.Threshold)
 	}
 	for _, op := range []string{"honest_A", "honest_B", "honest_C", "attacker"} {
 		if len(c.memberPoints(op)) != 8 {
@@ -172,7 +172,7 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 		}
 	}
 
-	// FIX #2: matured @12 with 16 < t=18 VERIFIED shares -> DEFER (heal-eligible), NOT hard-drop.
+	// FIX #2: matured @12 with 16 < t=22 VERIFIED shares -> DEFER (heal-eligible), NOT hard-drop.
 	b12 := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
@@ -328,7 +328,7 @@ func TestC7_UnverifiedShareBypassingIngest_DefersNotDrops(t *testing.T) {
 		t.Fatalf("precondition: raw count must be padded to 24 (16 honest + 8 chaff), got %d", n)
 	}
 
-	// Matured @22: raw count 24 >= t=18 (count gate passes) and the attacker is present (stake
+	// Matured @22: raw count 24 >= t=22 (count gate passes) and the attacker is present (stake
 	// gate passes), so control reaches RecoverVerified — which drops the chaff (16 verified < 18)
 	// and returns ErrInsufficientVerified. Fix #3 routes that into the grace DEFER branch.
 	b22 := c.ctx.WithBlockHeight(22).WithEventManager(sdk.NewEventManager())
@@ -346,7 +346,7 @@ func TestC7_UnverifiedShareBypassingIngest_DefersNotDrops(t *testing.T) {
 	}
 
 	// HEAL: the lagging honest member's real shares land inside the grace -> next block decrypts.
-	_ = setValidShares(t, c, b22, e, ct, "honest_C") // +8 verified -> 24 verified >= t=18
+	_ = setValidShares(t, c, b22, e, ct, "honest_C") // +8 verified -> 24 verified >= t=22
 	b23 := c.ctx.WithBlockHeight(23).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b23); err != nil {
 		t.Fatal(err)

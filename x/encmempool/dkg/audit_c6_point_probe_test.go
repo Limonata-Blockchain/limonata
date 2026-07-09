@@ -56,3 +56,27 @@ func TestProbe_PointAtInfinityIngress(t *testing.T) {
 	out := compressCopy(&sum)
 	t.Logf("infinity aggregate compressed to %x (len %d); re-parse accepted=%v", out, len(out), ValidCompressedPoint(out))
 }
+
+func TestFinalizePublicRejectsInvalidAggregatePoint(t *testing.T) {
+	var g secp256k1.JacobianPoint
+	secp256k1.ScalarBaseMultNonConst(scalarFromUint(5), &g)
+	var negG secp256k1.JacobianPoint
+	negG.Set(&g)
+	negG.Y.Negate(1)
+	negG.Y.Normalize()
+
+	_, err := FinalizePublicWeighted(
+		[]uint64{1, 2},
+		1,
+		[]PublicDealing{
+			{Dealer: 1, Commitments: [][]byte{compressCopy(&g)}},
+			{Dealer: 2, Commitments: [][]byte{compressCopy(&negG)}},
+		},
+		nil,
+		nil,
+		2,
+	)
+	if err == nil {
+		t.Fatal("aggregate point-at-infinity must fail the DKG round, not install an invalid active key")
+	}
+}

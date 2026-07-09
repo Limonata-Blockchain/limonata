@@ -8,6 +8,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
 	"github.com/cosmos/evm/x/encmempool/dkg"
+	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
@@ -17,21 +18,35 @@ import (
 // makes the genesis path safe.
 func TestGenesisRoundTrip_DKGState(t *testing.T) {
 	src, ctx := newKeeper(t, 10)
-	require.NoError(t, src.SetParams(ctx, enableParams([]byte{0x02, 0x01}, 2, 2, []string{"kp1", "kp2"})))
+	params := enableParams([]byte{0x02, 0x01}, 2, 2, []string{"kp1", "kp2"})
+	params.MaxInFlightEncTx = 32768
+	params.MaxInFlightPerSubmitter = 2048
+	params.EncSubmitBond = 1_000_000
+	params.EncSubmitBondDenom = "stake"
+	params.EncSubmitBondBurnBps = 10000
+	require.NoError(t, src.SetParams(ctx, params))
+
+	genG := secp256k1.PrivKeyFromBytes([]byte{0x01}).PubKey().SerializeCompressed()
+	genH := secp256k1.PrivKeyFromBytes([]byte{0x02}).PubKey().SerializeCompressed()
+	genI := secp256k1.PrivKeyFromBytes([]byte{0x03}).PubKey().SerializeCompressed()
+	nonce := make([]byte, threshold.NonceSize)
 
 	// in-flight ciphertexts: 2 submitters, epochs {0, 5}
-	e1 := src.SubmitEncTx(ctx, "alice", 10, 2, []byte("a1"), []byte("n1"), []byte("b1"), 0)
-	e2 := src.SubmitEncTx(ctx, "alice", 10, 2, []byte("a2"), []byte("n2"), []byte("b2"), 5)
-	e3 := src.SubmitEncTx(ctx, "bob", 11, 2, []byte("a3"), []byte("n3"), []byte("b3"), 5)
-	require.NoError(t, src.SetEncShare(ctx, types.EncShare{Keyper: "kp1", DecryptHeight: e1.DecryptHeight, Seq: e1.Seq, Index: 1, D: []byte("d1")}))
-	require.NoError(t, src.SetEncShare(ctx, types.EncShare{Keyper: "kp2", DecryptHeight: e2.DecryptHeight, Seq: e2.Seq, Index: 2, D: []byte("d2")}))
+	e1 := src.SubmitEncTx(ctx, "alice", 10, 2, genG, nonce, []byte("b1"), 0)
+	e2 := src.SubmitEncTx(ctx, "alice", 10, 2, genH, nonce, []byte("b2"), 5)
+	e3 := src.SubmitEncTx(ctx, "bob", 11, 2, genI, nonce, []byte("b3"), 5)
+	require.NoError(t, src.SetEncShare(ctx, types.EncShare{Keyper: "kp1", DecryptHeight: e1.DecryptHeight, Seq: e1.Seq, Index: 1, D: genG}))
+	require.NoError(t, src.SetEncShare(ctx, types.EncShare{Keyper: "kp2", DecryptHeight: e2.DecryptHeight, Seq: e2.Seq, Index: 2, D: genH}))
 
 	// a DKG round + installed key + epochs
 	require.NoError(t, src.SetDkgRound(ctx, types.DkgRound{
 		Epoch: 5, OpenHeight: 1, DealDeadline: 3, ComplaintDeadline: 5, Threshold: 2, Status: "active",
-		Members: []types.RoundMember{{Index: 1, OperatorAddr: "op1", AccountAddr: "acc1"}},
+		Members: []types.RoundMember{
+			{Index: 1, OperatorAddr: "op1", AccountAddr: "acc1", EncPubKey: genG},
+			{Index: 2, OperatorAddr: "op2", AccountAddr: "acc2", EncPubKey: genH},
+		},
 	}))
-	require.NoError(t, src.SetActiveKey(ctx, types.ActiveThresholdKey{Epoch: 5, Pub: []byte("pub5"), Threshold: 2, Qual: []uint64{1, 2}}))
+	require.NoError(t, src.SetActiveKey(ctx, types.ActiveThresholdKey{Epoch: 5, Pub: genI, PublicCommitments: [][]byte{genG, genH}, Threshold: 2, Qual: []uint64{1, 2}}))
 	src.SetCurrentEpoch(ctx, 5)
 	src.SetActiveEpoch(ctx, 5)
 
@@ -58,6 +73,7 @@ func TestGenesisRoundTrip_DKGState(t *testing.T) {
 	require.Equal(t, 1, len(gs.DkgRounds))
 	require.Equal(t, 1, len(gs.ActiveKeys))
 	require.Equal(t, 1, len(gs.EncKeys))
+	require.NoError(t, gs.Validate())
 
 	dst, ctx2 := newKeeper(t, 20)
 	require.NoError(t, dst.InitGenesis(ctx2, *gs))
@@ -72,7 +88,7 @@ func TestGenesisRoundTrip_DKGState(t *testing.T) {
 	require.Equal(t, "active", r.Status)
 	ak, ok := dst.GetActiveKey(ctx2, 5)
 	require.True(t, ok)
-	require.Equal(t, []byte("pub5"), ak.Pub)
+	require.Equal(t, genI, ak.Pub)
 	require.Equal(t, uint64(5), dst.GetCurrentEpoch(ctx2))
 	require.Equal(t, uint64(5), dst.GetActiveEpoch(ctx2))
 	gotKey, ok := dst.GetEncPubKey(ctx2, "op1")
@@ -101,10 +117,7 @@ func TestGenesis_NeverTrustsImportedVerifiedShare(t *testing.T) {
 	gs.EncShares = []types.EncShare{{Keyper: "k", DecryptHeight: 12, Seq: 0, Index: 1, D: []byte("d"), Verified: true}}
 	require.Error(t, gs.Validate(), "a genesis asserting a pre-verified share must be rejected")
 
-	// Even if Validate is bypassed, InitGenesis must force Verified=false so recovery re-verifies.
+	// InitGenesis now enforces Validate itself, so a bypassed genesis is still rejected.
 	dst, ctx := newKeeper(t, 20)
-	require.NoError(t, dst.InitGenesis(ctx, *gs))
-	got := dst.CollectShares(ctx, 12, 0)
-	require.Len(t, got, 1)
-	require.False(t, got[0].Verified, "an imported share must never be trusted as pre-verified")
+	require.Error(t, dst.InitGenesis(ctx, *gs))
 }

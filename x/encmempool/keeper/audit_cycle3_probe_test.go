@@ -169,6 +169,7 @@ func TestReg_HA_ValidateRejectsBudgetBelowCommitteeCap(t *testing.T) {
 		{"S4096_over_ve_bound", 4096, 128},  // M-2: budget above the VE-size-derived ceiling
 		{"S2048_over_ceiling", 2048, 128},   // gov sweep: now above the lowered maxDkgShareBudget=1024
 		{"S1025_over_ceiling_min", 1025, 0}, // one above the lowered ceiling
+		{"S512_cap64_trim_budget", 512, 64}, // fits raw 20MB but not the proposer 7/8 injection budget
 	}
 	for _, c := range bad {
 		p := base()
@@ -185,7 +186,7 @@ func TestReg_HA_ValidateRejectsBudgetBelowCommitteeCap(t *testing.T) {
 	}{
 		{"defaults", 0, 0},              // 256 >= 8*16
 		{"S128_cap16_boundary", 128, 0}, // exactly 8*16
-		{"S512_cap64", 512, 64},         // 8*64 AND its 2/3 aggregate (~19.8MB) fits the round-8 #3 MaxTxBytes floor
+		{"S256_cap32", 256, 32},         // 8*32 and the >2/3 aggregate fits the proposer trim budget
 	}
 	for _, c := range good {
 		p := base()
@@ -248,7 +249,7 @@ func TestReg_HA_RuntimeCommitteeClamp(t *testing.T) {
 }
 
 // TestProbe_H3_ProductionBudget256 re-verifies HIGH-3 closure at the LIVE default budget
-// (S=256) with the corrected threshold t = floor(2S/3) - n + 1. A 1/3-stake seat-majority
+// (S=256) with the strict threshold t = floor(2S/3)+1. A 1/3-stake seat-majority
 // must hold < t points and be unable to reconstruct off-chain.
 func TestProbe_H3_ProductionBudget256(t *testing.T) {
 	stakes := map[string]int64{"honest_A": 5000, "honest_B": 5000}
@@ -256,8 +257,8 @@ func TestProbe_H3_ProductionBudget256(t *testing.T) {
 		stakes["attacker_"+string(rune('a'+i))] = 1000 // total attacker 5000 = 1/3 of 15000
 	}
 	c := runTransparentDKG(t, stakes, 256)
-	// n=7 committee: t = floor(512/3) - 7 + 1 = 164.
-	if want := uint32(2*256/3 - 7 + 1); c.ak.Threshold != want {
+	// n=7 committee: t = floor(512/3) + 1 = 171.
+	if want := uint32(2*256/3 + 1); c.ak.Threshold != want {
 		t.Fatalf("expected t=%d for S=256, n=7, got %d", want, c.ak.Threshold)
 	}
 	attackers := opsWithPrefix(c, "attacker")

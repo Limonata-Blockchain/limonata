@@ -183,7 +183,7 @@ func TestC9Probe_ProcessedSetCap_BeyondWindowChaffClassifiedOut(t *testing.T) {
 
 // TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals is guarantee (iii): the cycle-7 "chaff
 // rejected -> defer -> heal" behaviour survives the per-ciphertext budget across MULTIPLE ciphertexts.
-// TWO ciphertexts mature short (honest_A+honest_B = 16 < t=18 each) while the attacker sprays chaff at
+// TWO ciphertexts mature short (honest_A+honest_B = 16 < t=22 each) while the attacker sprays chaff at
 // its own points on BOTH; every honest share stores, all chaff is rejected, BOTH defer (not drop), and
 // BOTH heal from a late honest_C share within grace.
 func TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals(t *testing.T) {

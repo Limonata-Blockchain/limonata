@@ -79,6 +79,11 @@ func (m msgServer) UpdateParams(goCtx context.Context, msg *types.MsgUpdateParam
 			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
 				"dkg_transparent requires CometBFT vote extensions to be scheduled first (consensus param vote_extensions_enable_height must be non-zero)")
 		}
+		if cp.Block != nil && cp.Block.MaxBytes > 0 && !p.DkgInjectedCommitFitsMaxTxBytes(cp.Block.MaxBytes) {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"transparent DKG vote-extension aggregate is estimated at %d bytes but consensus max_tx_bytes is %d; lower dkg_max_members/dkg_share_budget or raise consensus block max bytes",
+				p.DkgInjectedCommitBytesUpperBound(), cp.Block.MaxBytes)
+		}
 	}
 	if err := m.SetParams(goCtx, p); err != nil {
 		return nil, err
@@ -139,9 +144,10 @@ func (m msgServer) RevealTx(goCtx context.Context, msg *types.MsgRevealTx) (*typ
 	}
 	// Reveal delay is evaluated at RUNTIME against current params and height.
 	delay := m.GetParams(goCtx).RevealDelay
-	if uint64(ctx.BlockHeight()) < msg.CommitHeight+delay {
+	matureHeight := addSat(msg.CommitHeight, delay)
+	if uint64(ctx.BlockHeight()) < matureHeight {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
-			"reveal too early: need height >= %d (commit %d + delay %d)", msg.CommitHeight+delay, msg.CommitHeight, delay)
+			"reveal too early: need height >= %d (commit %d + delay %d)", matureHeight, msg.CommitHeight, delay)
 	}
 	// round-12 #6: cap the reveal payload + salt at ingress. Without this a committer can queue
 	// arbitrarily large PendingReveal blobs that BeginBlock materializes ALL of into one slice - a
@@ -178,6 +184,7 @@ func (m msgServer) RevealTx(goCtx context.Context, msg *types.MsgRevealTx) (*typ
 // keyper shares — that ordering-before-readability is the anti-MEV property.
 func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEncrypted) (*types.MsgSubmitEncryptedResponse, error) {
 	p := m.GetParams(goCtx)
+	ctx := sdk.UnwrapSDKContext(goCtx)
 	if !p.EncEnabled {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
 	}
@@ -216,6 +223,23 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if len(msg.Body) > maxCiphertextBodyBytes {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "ciphertext body exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.Body))
 	}
+	// Re-audit: the transparent DKG decrypt-share path depends on proposer-injected vote extensions.
+	// If vote extensions are not active, or current consensus MaxBytes cannot fit the required injected
+	// commit, the app deliberately does not require injection (to avoid proposal halt), but then no DKG
+	// shares are consumed. Refuse new user ciphertexts in that state instead of accepting transactions
+	// that will strand/drop.
+	if st, unavailable := transparentDkgRuntimeUnavailable(ctx, p); unavailable {
+		switch st.reason {
+		case transparentDkgRuntimeVoteExtensionsInactive:
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"transparent DKG vote extensions are not active at height %d (vote_extensions_enable_height=%d); encrypted submissions are unavailable until vote extensions are active",
+				st.currentHeight, st.voteExtensionsEnableHeight)
+		case transparentDkgRuntimeInjectionOversize:
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"transparent DKG vote-extension aggregate is estimated at %d bytes but current consensus max_tx_bytes is %d; encrypted submissions are unavailable until dkg_max_members/dkg_share_budget or block max bytes is adjusted",
+				st.estimatedBytes, st.maxTxBytes)
+		}
+	}
 	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a
 	// flooder cannot grow EncTx state (nor the per-block decrypt scan) without bound, nor starve
 	// honest ciphertexts. The checks read O(1) maintained counters (never an O(backlog) scan).
@@ -227,7 +251,6 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if p.MaxInFlightPerSubmitter > 0 && m.GetSubmitterEncCount(goCtx, msg.Submitter) >= p.MaxInFlightPerSubmitter {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "submitter is at its in-flight ceiling (%d ciphertexts)", p.MaxInFlightPerSubmitter)
 	}
-	ctx := sdk.UnwrapSDKContext(goCtx)
 	// PER-SUBMITTER per-block admission RATE limit (Fix 1 C3'): the missing rate dimension on top of
 	// the standing per-submitter inventory cap. Being per-submitter (NOT a global slot) means no single
 	// address can monopolize ingress or let a proposer censor the encrypted mempool by ordering its own
@@ -237,6 +260,10 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	if m.bumpEncSubmitsThisBlock(goCtx, msg.Submitter, uint64(ctx.BlockHeight())) > maxEncSubmitsPerBlockPerSubmitter {
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
 			"submitter exceeded the per-block admission rate (%d ciphertexts this block)", maxEncSubmitsPerBlockPerSubmitter)
+	}
+	if m.bumpGlobalEncSubmitsThisBlock(goCtx, uint64(ctx.BlockHeight())) > maxEncSubmitsPerBlockGlobal {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"encrypted mempool exceeded the global per-block admission rate (%d ciphertexts this block)", maxEncSubmitsPerBlockGlobal)
 	}
 	// Stamp the ciphertext with the DKG epoch whose active key it was encrypted to,
 	// so decryptMatured decrypts it under the SAME key/members even after a re-key.
@@ -255,7 +282,7 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	// confidentiality; decentralization does. Deterministic (committed round + key).
 	if epoch > 0 && m.Keeper.CommitteeConcentrationBreached(goCtx, epoch) {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
-			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (an operator holds enough decryption power to decrypt alone) - send a normal transaction, or wait for the committee to decentralize")
+			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (a <=2/3-stake coalition holds enough decryption power) - send a normal transaction, or wait for the committee to decentralize")
 	}
 	// CRITICAL A-BINDING (same-A replay): require a Schnorr proof of knowledge of r (A = r*G)
 	// bound to THIS submitter + ciphertext. A decryption share is x_i*A and the AES key is
@@ -282,7 +309,10 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	// A submitter that cannot fund the bond is rejected here with no state change. releaseEncTx
 	// refunds it in full when the ciphertext leaves state.
 	bond, bondDenom := p.EncSubmitBond, p.EncSubmitBondDenom
-	if bond > 0 && m.bankKeeper != nil {
+	if bond > 0 {
+		if m.bankKeeper == nil {
+			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted submit bond is configured but the bank keeper is unavailable")
+		}
 		addr, aerr := sdk.AccAddressFromBech32(msg.Submitter)
 		if aerr != nil {
 			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidAddress, "submitter must be a valid bech32 address to post the submit bond")
@@ -293,7 +323,7 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 		}
 	}
 	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body, epoch)
-	if bond > 0 && m.bankKeeper != nil {
+	if bond > 0 {
 		// round-10 #1: stamp the burn portion (a real, non-refundable per-submit cost) so release
 		// burns exactly this and refunds the rest, immune to a later param change. Computed via big.Int
 		// so a large (18-decimal) bond * bps cannot overflow uint64.

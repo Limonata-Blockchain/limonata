@@ -12,6 +12,9 @@ import (
 // DKG. The in-flight ref-counts are RECOMPUTED from the imported EncTx set (never imported) so
 // they are always consistent with the ciphertexts actually in state.
 func (k Keeper) InitGenesis(ctx context.Context, gs types.GenesisState) error {
+	if err := gs.Validate(); err != nil {
+		return err
+	}
 	if err := k.SetParams(ctx, gs.Params); err != nil {
 		return err
 	}

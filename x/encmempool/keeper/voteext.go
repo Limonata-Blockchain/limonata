@@ -248,7 +248,7 @@ func (k Keeper) TransparentMembers(ctx context.Context, p types.Params) []types.
 	// degenerates and decryption power tracks operator-address order instead of stake
 	// (the reproduced HIGH-3 re-opening). Clamping HERE — while still stake-sorted, so the
 	// lowest-stake candidates are shed — keeps MembersHash, the round machine, and the
-	// stakeThreshold safety/liveness proof consistent (S >= 8n always holds at round-open).
+	// stake-apportionment resolution consistent (S >= 8n always holds at round-open).
 	// Deterministic (pure function of committed state), LOUD, never a halt.
 	if maxByBudget := p.EffectiveShareBudget() / types.MinShareBudgetPerMember; len(cands) > maxByBudget {
 		clamped := len(cands) - maxByBudget
@@ -280,21 +280,14 @@ func memberIndexByOperator(round types.DkgRound, op string) uint64 {
 }
 
 // DecryptingSetMeetsStake reports whether the committee MEMBERS whose indices are in `present`
-// collectively hold a STRICT MAJORITY of the committee's snapshotted stake weight (2*got > total).
+// collectively hold strictly more than 2/3 of the committee's snapshotted stake weight.
 //
 // HIGH-3 (DEMOTED to defense-in-depth): stake is now baked into the CRYPTOGRAPHY via
 // stake-weighted Shamir evaluation points (see AllocateEvalPoints / stakeThreshold), so the
-// real capability check is "does the decrypting set hold >= t = floor(2S/3)-n+1 evaluation
-// points", which the recover path enforces directly (the PROVEN crypto bar is > 1/3 of
-// committee stake in all valid configs, >= 2/3 - 2n/S in general — NOT ">2/3"; see the
-// stakeThreshold comment, cycle-3 M-1). This member-stake-majority test is retained as a
-// redundant guard on the ON-CHAIN combine (recoverSharedSecret maps present eval points to
-// their owning members before calling it). HONESTY: in worst-case rounding a set can hold t
-// points at just under a stake majority, so this gate can bind ABOVE the crypto bar for
-// on-chain decryption; it can never block the guaranteed liveness case (an online >2/3-stake
-// set is also a strict majority), and it does nothing against OFF-chain reconstruction —
-// only the crypto bar does. It reduces to a no-op on the LEGACY/unweighted path (no weights
-// recorded => returns true), preserving existing behavior. It is overflow-safe (sdkmath.Int).
+// real capability check is "does the decrypting set hold >= t = floor(2S/3)+1 evaluation
+// points", which the recover path enforces directly. This stake gate is retained as a
+// redundant ON-CHAIN guard against rounded apportionments where <=2/3 stake would own >2/3
+// points; SubmitEncrypted also fail-closes those epochs before users can enter them.
 func DecryptingSetMeetsStake(members []types.RoundMember, present map[uint64]bool) bool {
 	total := sdkmath.ZeroInt()
 	got := sdkmath.ZeroInt()
@@ -313,7 +306,7 @@ func DecryptingSetMeetsStake(members []types.RoundMember, present map[uint64]boo
 	if !weighted || !total.IsPositive() {
 		return true // legacy / unweighted committee: the count threshold alone governs
 	}
-	return got.Add(got).GT(total) // strict stake majority: 2*got > total
+	return got.MulRaw(3).GT(total.MulRaw(2)) // strict >2/3 stake
 }
 
 // ============================================================================
@@ -442,6 +435,34 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 		}
 	}
 
+	// Phase 5: post-final poison reports from validators that missed the complaint window. These use the
+	// same justified-complaint proof, but target the ACTIVE epoch and trigger the decrypt-health rekey
+	// immediately instead of waiting for user ciphertexts to strand.
+	poisoned := 0
+	if activeEpoch := k.GetActiveEpoch(ctx); activeEpoch > 0 {
+		if activeRound, ok := k.GetDkgRound(ctx, activeEpoch); ok && activeRound.Status == types.DkgStatusActive {
+			maxPerVE := len(activeRound.Members)
+			for _, e := range canon {
+				opVerifies := 0
+				for i := range e.VE.PoisonReports {
+					if i >= maxPerVE || opVerifies >= maxComplaintVerifiesPerAccuser {
+						break
+					}
+					if k.IngestPoisonReportFromVE(ctx, activeRound, e.Operator, e.VE.PoisonReports[i], &opVerifies) {
+						poisoned++
+					}
+				}
+			}
+		}
+	}
+	if poisoned > 0 {
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_ve_poison_reports",
+			sdk.NewAttribute("height", u64str(h)),
+			sdk.NewAttribute("stored", u64str(uint64(poisoned))),
+		))
+	}
+
 	// Phase 3: decryption shares for in-flight ciphertexts, under a HARD, DETERMINISTIC per-block
 	// bound on DLEQ-verification work (cycle-8 bound, cycle-9 granularity). ingestDecryptSharesBounded
 	// composes a bounded oldest-first PROCESSED-ciphertext set (cheap pre-classification of chaff aimed
@@ -455,13 +476,14 @@ func (k Keeper) ConsumeVoteExtensions(ctx sdk.Context, entries []VEEntry) {
 	// preserved (chaff is still DLEQ-rejected; honest defers + heals).
 	shared := k.ingestDecryptSharesBounded(ctx, canon, p)
 
-	if announced+dealt+shared > 0 {
+	if announced+dealt+shared+poisoned > 0 {
 		ctx.EventManager().EmitEvent(sdk.NewEvent(
 			"encmempool_dkg_ve_consumed",
 			sdk.NewAttribute("height", u64str(h)),
 			sdk.NewAttribute("enc_keys", u64str(uint64(announced))),
 			sdk.NewAttribute("dealings", u64str(uint64(dealt))),
 			sdk.NewAttribute("shares", u64str(uint64(shared))),
+			sdk.NewAttribute("poison_reports", u64str(uint64(poisoned))),
 		))
 	}
 }
@@ -584,6 +606,81 @@ func (k Keeper) IngestComplaintFromVE(ctx sdk.Context, round types.DkgRound, ope
 	}
 	_ = k.SetComplaint(ctx, types.DkgComplaintRec{Epoch: round.Epoch, Against: c.Against, AccuserIndex: accuserIdx})
 	return true
+}
+
+// IngestPoisonReportFromVE accepts the same proof shape as an in-window complaint, but after finalize.
+// A valid report proves a QUAL dealer poisoned the reporting member while it was offline for complaints;
+// the dealer cannot be removed from an already-installed key, so the committed effect is to trip the
+// active epoch's decrypt-health rekey immediately.
+func (k Keeper) IngestPoisonReportFromVE(ctx sdk.Context, round types.DkgRound, operator string, c types.VoteExtComplaint, verifies *int) bool {
+	if round.Status != types.DkgStatusActive || c.Epoch != round.Epoch {
+		return false
+	}
+	accuserIdx := memberIndexByOperator(round, operator)
+	if accuserIdx == 0 || c.Against == 0 || c.Against == accuserIdx {
+		return false
+	}
+	if _, ok := memberByIndex(round, c.Against); !ok {
+		return false
+	}
+	accuser, ok := memberByIndex(round, accuserIdx)
+	if !ok || !accuser.OwnsEvalPoint(c.EvalPoint) {
+		return false
+	}
+	ak, ok := k.GetActiveKey(ctx, round.Epoch)
+	if !ok || !uint64In(c.Against, ak.Qual) {
+		return false // only a QUAL dealer can poison the installed aggregate share
+	}
+	if k.GetComplaint(ctx, round.Epoch, c.Against, accuserIdx) {
+		return false
+	}
+	if k.HasComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx, c.EvalPoint) {
+		return false
+	}
+	dealing, ok := k.GetDealing(ctx, round.Epoch, c.Against)
+	if !ok {
+		return false
+	}
+	var enc *types.DkgStoredEncShare
+	for i := range dealing.EncShares {
+		if dealing.EncShares[i].MemberIndex == c.EvalPoint {
+			enc = &dealing.EncShares[i]
+			break
+		}
+	}
+	if enc == nil {
+		_ = k.SetComplaint(ctx, types.DkgComplaintRec{Epoch: round.Epoch, Against: c.Against, AccuserIndex: accuserIdx})
+		k.forceDecryptHealthRekey(ctx, round.Epoch)
+		return true
+	}
+	*verifies++
+	cheated, proofValid := dkg.VerifyJustifiedComplaint(
+		c.EvalPoint, accuser.EncPubKey, dealing.Commitments,
+		enc.A, enc.Nonce, enc.Body, c.SharedPoint, c.DleqProof,
+	)
+	if !proofValid || !cheated {
+		_ = k.SetComplaintRejected(ctx, round.Epoch, c.Against, accuserIdx, c.EvalPoint)
+		return false
+	}
+	_ = k.SetComplaint(ctx, types.DkgComplaintRec{Epoch: round.Epoch, Against: c.Against, AccuserIndex: accuserIdx})
+	k.forceDecryptHealthRekey(ctx, round.Epoch)
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_dkg_poison_detected",
+		sdk.NewAttribute("epoch", u64str(round.Epoch)),
+		sdk.NewAttribute("against", u64str(c.Against)),
+		sdk.NewAttribute("accuser_index", u64str(accuserIdx)),
+		sdk.NewAttribute("eval_point", u64str(c.EvalPoint)),
+	))
+	return true
+}
+
+func uint64In(x uint64, xs []uint64) bool {
+	for _, y := range xs {
+		if x == y {
+			return true
+		}
+	}
+	return false
 }
 
 // validateDealingShape enforces well-formedness of a stake-weighted dealing: exactly

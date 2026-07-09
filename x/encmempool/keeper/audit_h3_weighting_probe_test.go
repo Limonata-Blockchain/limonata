@@ -20,25 +20,15 @@ import (
 )
 
 // ============================================================================
-// CYCLE-3 H-B — FLIPPED into the safety/liveness PROPERTY regression suite.
-//
-// The original probes proved two breaks on 19d5cb6f:
-//   - LIVENESS BAND: t = floor(2S/3)+1 plus Hamilton rounding slop stranded an honest
-//     ONLINE stake-supermajority below t (whale 66.70% owned 170 < t=171 at the live
-//     default S=256), and decryptMatured then SILENTLY dropped the matured ciphertext;
-//   - the load-bearing claim "an honest >2/3 supermajority always holds >= t" was false.
-//
-// The fix sets t = floor(2S/3) - n + 1 under the enforced coupling S >= 8n. These tests
-// now assert BOTH inequalities hold with NO residual band, across the full committee
-// range and adversarial stake shapes (the exact families the auditors swept):
-//   (SAFETY)   any coalition with <= 1/3 of snapshotted stake holds < t points;
-//   (LIVENESS) any online set with > 2/3 of snapshotted stake holds >= t points;
-// and that a share-shortfall at maturity is a BOUNDED, LOUD deferral — never a silent drop.
+// CYCLE-3 H-B / re-audit: the protocol now chooses confidentiality over borderline
+// liveness. The weighted threshold is strict >2/3 of eval points; a near-2/3 online
+// set can be short because of Hamilton rounding, but the decrypt path must defer/drop
+// loudly rather than silently consume user ciphertexts.
 // ============================================================================
 
-// tNew mirrors keeper.stakeThreshold for a WEIGHTED round: t = floor(2S/3) - n + 1.
+// tNew mirrors keeper.stakeThreshold for a WEIGHTED round: t = floor(2S/3)+1.
 func tNew(S, n int) int {
-	t := (2*S)/3 - n + 1
+	t := (2*S)/3 + 1
 	if t > S {
 		t = S
 	}
@@ -85,14 +75,9 @@ func pointsHeld(weights []int64, S int, epoch uint64, inSet func(w int64, i int)
 	return setPts, total, tNew(total, n)
 }
 
-// TestReg_HB_Liveness_NoSupermajorityStranded (flipped
-// TestProbe_H3_Liveness_HonestSupermajorityStranded): re-run the EXACT search family that
-// found the pre-fix counterexample (one honest online whale just above 2/3 + offline dust
-// farming the remainder seats, at the LIVE default S=256) and require that NO
-// counterexample exists any more: every whale holding > 2/3 of committee stake holds
-// >= t points. This test FAILS on 19d5cb6f (the search finds whale 66.70% with 170 < 171).
-func TestReg_HB_Liveness_NoSupermajorityStranded(t *testing.T) {
+func TestReg_HB_StrictThresholdKeepsBorderlineBand(t *testing.T) {
 	const S = 256
+	found := false
 	for dust := 1; dust <= 15; dust++ {
 		for dw := int64(1); dw <= 60; dw++ {
 			for w := int64(300); w <= 900; w++ {
@@ -107,12 +92,16 @@ func TestReg_HB_Liveness_NoSupermajorityStranded(t *testing.T) {
 				}
 				whalePts, _, thr := pointsHeld(weights, S, 1, func(mw int64, _ int) bool { return mw == w })
 				if whalePts < thr {
-					t.Fatalf("H-B REGRESSION (liveness band re-opened): honest ONLINE whale %d/%d = %.4f (>2/3) "+
-						"owns %d < t=%d points at S=%d, n=%d — matured ciphertexts would strand",
-						w, total, float64(w)/float64(total), whalePts, thr, S, dust+1)
+					found = true
+					t.Logf("strict threshold intentionally leaves borderline online whale %d/%d = %.4f with %d < t=%d points",
+						w, total, float64(w)/float64(total), whalePts, thr)
+					return
 				}
 			}
 		}
+	}
+	if !found {
+		t.Fatal("expected at least one borderline >2/3-stake set to be short under strict eval-point threshold")
 	}
 }
 
@@ -123,8 +112,6 @@ func TestReg_HB_Liveness_NoSupermajorityStranded(t *testing.T) {
 // swarms vs whales, near-boundary offline sets), assert BOTH:
 //
 //	SAFETY:   a coalition holding EXACTLY the 1/3 boundary (or less) holds < t points;
-//	LIVENESS: an online set holding one token above 2/3 holds >= t points, with the
-//	          offline remainder just under 1/3 — squarely inside the BFT fault model.
 //
 // Every allocation is also re-run with several epoch seeds: the inequalities are
 // seed-independent (the L-2 tie-break rotation must never affect either bound).
@@ -172,61 +159,12 @@ func TestReg_HB_BothInequalities_PropertySweep(t *testing.T) {
 					}
 				}
 
-				// --- LIVENESS, whale one token above 2/3 online, all dust offline (the
-				// offline set holds just under 1/3 — the chain itself is still live):
-				// dust n-1 members of stake 3 each (total D), whale 2D+1.
-				D := 3 * int64(n-1)
-				weights = make([]int64, n)
-				for i := 0; i < n-1; i++ {
-					weights[i] = 3
-				}
-				weights[n-1] = 2*D + 1
-				whalePts, _, thr := pointsHeld(weights, S, seed, func(w int64, _ int) bool { return w == 2*D+1 })
-				if whalePts < thr {
-					t.Fatalf("LIVENESS broken: n=%d S=%d seed=%d: online whale at 2/3+1token holds %d < t=%d",
-						n, S, seed, whalePts, thr)
-				}
-
-				// --- LIVENESS, spread online set one token above 2/3 (k = ceil(n/2) online
-				// members), offline remainder just under 1/3.
-				k := (n + 1) / 2
-				off := n - k
-				if off >= 1 {
-					offEach := int64(3 * k)
-					offTotal := offEach * int64(off)
-					// online total = 2*offTotal + 1, spread as evenly as integers allow.
-					onTotal := 2*offTotal + 1
-					weights = make([]int64, n)
-					for i := 0; i < off; i++ {
-						weights[i] = offEach
-					}
-					base := onTotal / int64(k)
-					rem := onTotal % int64(k)
-					for i := 0; i < k; i++ {
-						weights[off+i] = base
-						if int64(i) < rem {
-							weights[off+i]++
-						}
-					}
-					onPts, _, thr := pointsHeld(weights, S, seed, func(_ int64, i int) bool { return i >= off })
-					if onPts < thr {
-						t.Fatalf("LIVENESS broken: n=%d S=%d seed=%d: online %d-member set at 2/3+1token holds %d < t=%d",
-							n, S, seed, k, onPts, thr)
-					}
-				}
 			}
 		}
 	}
 }
 
-// TestReg_M1_RealDecryptBar documents + enforces the HONEST decrypt bar (cycle-3 M-1):
-// the advertised ">2/3 stake to decrypt" is NOT deliverable together with guaranteed
-// >2/3-liveness (rounding slop is +-n points), and the code no longer claims it. The
-// PROVEN bar is: any coalition reaching t holds f >= (t-n+1)/S > 2/3 - 2n/S, which is
-// ALWAYS > 1/3 under the enforced coupling (>= 5/12 at S=8n; ~54.7% at the live default).
-// This sweep hunts for the lowest-stake reconstructing coalition across the audit's
-// families and asserts it never dips to the 1/3 Byzantine bound.
-func TestReg_M1_RealDecryptBar(t *testing.T) {
+func TestReg_M1_NoOneThirdCoalitionReconstructs(t *testing.T) {
 	worstFrac := 1.0
 	worstDesc := ""
 	consider := func(desc string, weights []int64, S int, inSet func(w int64, i int) bool) {
@@ -275,21 +213,12 @@ func TestReg_M1_RealDecryptBar(t *testing.T) {
 				func(_ int64, i int) bool { return i < swarm })
 		}
 	}
-	if worstDesc != "" {
-		t.Logf("lowest-stake reconstructing coalition found: %.4f — %s", worstFrac, worstDesc)
-	}
 	if worstFrac <= 1.0/3.0 {
 		t.Fatalf("M-1/SAFETY broken: a %.4f-stake coalition (<= 1/3) reconstructs: %s", worstFrac, worstDesc)
 	}
 }
 
-// TestReg_HB_Liveness_E2E_HonestSupermajorityDecrypts (flipped
-// TestProbe_H3_Liveness_E2E_HonestSupermajorityCannotDecrypt): the exact committee that
-// stranded the honest supermajority pre-fix — whale 21 (online, honest, 67.74%) + dust 10
-// (offline), S=24 — now RECONSTRUCTS: the whale's stake share of the domain
-// (floor(21*24/31)=16) meets t = floor(2*24/3) - 2 + 1 = 15. Drives the FULL stake-weighted
-// DKG and the REAL off-chain recovery path. FAILS on 19d5cb6f (t was 17 > 16).
-func TestReg_HB_Liveness_E2E_HonestSupermajorityDecrypts(t *testing.T) {
+func TestReg_HB_StrictThreshold_E2E_BorderlineSupermajorityCannotDecrypt(t *testing.T) {
 	stakes := map[string]int64{"honest_whale": 21, "offline_dust": 10}
 	c := runTransparentDKG(t, stakes, 24) // n=2: 24 >= 8*2 honors the coupling
 
@@ -300,7 +229,7 @@ func TestReg_HB_Liveness_E2E_HonestSupermajorityDecrypts(t *testing.T) {
 		t.Fatalf("precondition: honest online set must be a stake supermajority (%d/%d)", whaleStake, total)
 	}
 
-	plain := []byte("honest supermajority MUST be able to decrypt at maturity")
+	plain := []byte("borderline supermajority is intentionally below strict threshold")
 	ct, err := threshold.Encrypt(c.ak.Pub, plain)
 	if err != nil {
 		t.Fatal(err)
@@ -308,11 +237,8 @@ func TestReg_HB_Liveness_E2E_HonestSupermajorityDecrypts(t *testing.T) {
 	pts, recovered := c.coalitionReconstructs(t, honest, ct, plain)
 	t.Logf("honest ONLINE supermajority stake=%d/%d = %.4f (> 2/3); owns %d eval points; t=%d; recovered=%v",
 		whaleStake, total, float64(whaleStake)/float64(total), pts, c.ak.Threshold, recovered)
-	if pts < int(c.ak.Threshold) {
-		t.Fatalf("H-B REGRESSION: honest supermajority stranded below t (%d < %d)", pts, c.ak.Threshold)
-	}
-	if !recovered {
-		t.Fatalf("H-B REGRESSION: honest supermajority held %d >= t=%d points but failed to reconstruct", pts, c.ak.Threshold)
+	if pts >= int(c.ak.Threshold) || recovered {
+		t.Fatalf("strict threshold broken: borderline supermajority got pts=%d t=%d recovered=%v", pts, c.ak.Threshold, recovered)
 	}
 }
 

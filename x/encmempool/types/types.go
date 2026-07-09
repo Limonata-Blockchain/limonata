@@ -7,6 +7,8 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	"github.com/cosmos/evm/x/encmempool/threshold"
+
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
@@ -39,20 +41,20 @@ type Params struct {
 	MaxInFlightEncTx        uint64 `json:"max_in_flight_enc_tx"`        // global ceiling on un-matured EncTx (0 = disabled)
 	MaxInFlightPerSubmitter uint64 `json:"max_in_flight_per_submitter"` // per-submitter ceiling on un-matured EncTx (0 = disabled)
 
-	// --- REFUNDABLE anti-sybil submit bond (round-9 #1). SubmitEncrypted escrows EncSubmitBond of
-	// EncSubmitBondDenom from the submitter into the module account; it is refunded IN FULL when the
-	// ciphertext is released (matured OR dropped). The per-submitter rate limit stays per-address (a
-	// global cap would re-introduce one-address censorship), so this bond is the COST dimension: a
-	// flooder must lock capital proportional to its in-flight flood, while a legitimate user pays only
-	// the opportunity cost of a briefly-locked deposit. 0 = disabled (the default; the amount actually
-	// escrowed is stamped onto each EncTx so a later param change never mis-refunds an in-flight one). ---
+	// --- Anti-sybil submit bond (round-9 #1 / round-10 #1). SubmitEncrypted escrows EncSubmitBond of
+	// EncSubmitBondDenom from the submitter into the module account; on release it burns the configured
+	// fraction and refunds the rest. The per-submitter rate limit stays per-address, so this bond is the
+	// COST dimension: a flooder must lock capital and pay the burned fraction proportional to its flood.
+	// 0 = disabled while the path is dormant; live encrypted execution validation requires a positive
+	// bond and a positive burned fraction. The escrowed/burned amounts are stamped onto each EncTx so a
+	// later param change never mis-refunds or mis-burns an in-flight ciphertext. ---
 	EncSubmitBond      uint64 `json:"enc_submit_bond,omitempty"`       // bond amount per submit (0 = no bond)
 	EncSubmitBondDenom string `json:"enc_submit_bond_denom,omitempty"` // denom of the bond (required when bond > 0)
 	// EncSubmitBondBurnBps is the fraction (basis points, 0..10000) of the bond that is BURNED on
 	// release rather than refunded (round-10 #1). A fully-refundable bond is only a capital-lockup
 	// bar; a burned fraction is a REAL per-submit cost that a funded sybil swarm cannot avoid. 0 =
-	// fully refundable (default). The burned amount is stamped on each EncTx so a param change never
-	// mis-burns an in-flight one.
+	// fully refundable. The burned amount is stamped on each EncTx so a param change never mis-burns an
+	// in-flight one.
 	EncSubmitBondBurnBps uint32 `json:"enc_submit_bond_burn_bps,omitempty"`
 
 	// MaxVerifyOpsPerBlock is the per-block budget on first-time decryption-share DLEQ verifications
@@ -114,10 +116,8 @@ type Params struct {
 	// DkgShareBudget is the FIXED total number of Shamir evaluation points S the transparent
 	// committee's stake is apportioned across (HIGH-3 stake-weighted secret sharing). Each
 	// member gets ~round(stake_fraction * S) distinct points, and the reconstruction
-	// threshold is t = floor(2S/3) - n + 1 of them (n = committee size; see
-	// keeper.stakeThreshold for the full worst-case rounding proof), so gathering t points
-	// requires strictly more than the 1/3 Byzantine stake bound while any online honest
-	// set holding > 2/3 of the snapshotted committee stake always holds >= t. It is a FIXED
+	// threshold is t = floor(2S/3)+1 of them. SubmitEncrypted refuses an active epoch if
+	// apportionment gives any <=2/3-stake coalition enough points to reconstruct. It is a FIXED
 	// cap (0 => DefaultDkgShareBudget=256) so the per-dealing / vote-extension size stays
 	// O(S) regardless of raw stake magnitude. Only meaningful on the transparent path.
 	//
@@ -193,12 +193,8 @@ type RoundMember struct {
 	// round, allocated PROPORTIONAL to its stake Weight within a bounded total budget S
 	// (HIGH-3). A member with stake fraction w owns ~round(w*S) distinct points; the whole
 	// committee's points are the contiguous domain 1..S. Because the reconstruction
-	// threshold is t = floor(2S/3)-n+1 under the enforced S >= 8n coupling (see
-	// keeper.stakeThreshold for the proof), assembling t points provably requires > 1/3 of
-	// committee stake (>= 2/3 - 2n/S in general) — so a within-BFT stake-MINORITY
-	// seat-MAJORITY holds < t points and CANNOT reconstruct the secret even off-chain,
-	// while an online set holding > 2/3 of the snapshotted stake always holds >= t
-	// (liveness). It is a deterministic pure function of the snapshotted Weight and the
+	// threshold is t = floor(2S/3)+1. Admission fail-closes any rounded apportionment where
+	// <=2/3 stake can still own t points. It is a deterministic pure function of the snapshotted Weight and the
 	// round's epoch (see keeper.AllocateEvalPoints) so every node allocates identically.
 	//
 	// EMPTY on the legacy/declared path (and on hand-built rounds): the member then owns the
@@ -466,6 +462,9 @@ func DefaultParams() Params {
 		// Governance-tunable per deployment; the keeper's absolute constant ceiling is the
 		// always-on backstop below these.
 		MaxInFlightEncTx: 32768, MaxInFlightPerSubmitter: 2048,
+		// Price encrypted submissions by default once the path is activated. The module is
+		// dormant by default, so the denom is only live after governance enables EncExec.
+		EncSubmitBond: 1_000_000, EncSubmitBondDenom: "stake", EncSubmitBondBurnBps: 10000,
 		// DKG is OFF by default. When enabled, these windows are sized for a REAL
 		// multi-node network (independent validators over p2p + a daemon that must
 		// observe the open, build a dealing, and land the tx) rather than the tiny
@@ -500,6 +499,10 @@ func (gs GenesisState) Validate() error {
 	if err := gs.Params.Validate(); err != nil {
 		return err
 	}
+	rounds, activeKeys, err := gs.validateDkgImportState()
+	if err != nil {
+		return err
+	}
 	// round-11 #5: the DKG state carried across a genesis migration is a trusted input, but validate
 	// its safety-critical invariants at ingress rather than importing garbage that only strands later.
 	for i, s := range gs.EncShares {
@@ -509,8 +512,14 @@ func (gs GenesisState) Validate() error {
 		if s.Verified {
 			return fmt.Errorf("enc_shares[%d]: verified must be false in genesis (a share is only trusted after an on-chain DLEQ check, never by import)", i)
 		}
-		if len(s.D) == 0 {
-			return fmt.Errorf("enc_shares[%d]: empty decryption-share point D", i)
+		if s.Keyper == "" {
+			return fmt.Errorf("enc_shares[%d]: keyper is required", i)
+		}
+		if s.Index == 0 {
+			return fmt.Errorf("enc_shares[%d]: index must be non-zero", i)
+		}
+		if !ValidCompressedPointBytes(s.D) {
+			return fmt.Errorf("enc_shares[%d]: D is not a valid compressed secp256k1 point", i)
 		}
 	}
 	for i, e := range gs.EncTxs {
@@ -518,11 +527,310 @@ func (gs GenesisState) Validate() error {
 		if !ValidCompressedPointBytes(e.A) {
 			return fmt.Errorf("enc_txs[%d]: A is not a valid compressed secp256k1 point", i)
 		}
+		if len(e.Nonce) != threshold.NonceSize {
+			return fmt.Errorf("enc_txs[%d]: nonce length %d, want %d", i, len(e.Nonce), threshold.NonceSize)
+		}
 		if len(e.Body) == 0 {
 			return fmt.Errorf("enc_txs[%d]: empty ciphertext body", i)
 		}
 		if e.Bond > 0 && e.BondBurn > e.Bond {
 			return fmt.Errorf("enc_txs[%d]: bond_burn (%d) exceeds bond (%d)", i, e.BondBurn, e.Bond)
+		}
+		if e.Epoch > 0 {
+			if _, ok := rounds[e.Epoch]; !ok {
+				return fmt.Errorf("enc_txs[%d]: epoch %d has no imported DKG round", i, e.Epoch)
+			}
+			if _, ok := activeKeys[e.Epoch]; !ok {
+				return fmt.Errorf("enc_txs[%d]: epoch %d has no imported active threshold key", i, e.Epoch)
+			}
+		}
+	}
+	return nil
+}
+
+func (gs GenesisState) validateDkgImportState() (map[uint64]DkgRound, map[uint64]ActiveThresholdKey, error) {
+	rounds := make(map[uint64]DkgRound, len(gs.DkgRounds))
+	activeKeys := make(map[uint64]ActiveThresholdKey, len(gs.ActiveKeys))
+	for i, r := range gs.DkgRounds {
+		if r.Epoch == 0 {
+			return nil, nil, fmt.Errorf("dkg_rounds[%d]: epoch must be non-zero", i)
+		}
+		if _, dup := rounds[r.Epoch]; dup {
+			return nil, nil, fmt.Errorf("dkg_rounds[%d]: duplicate epoch %d", i, r.Epoch)
+		}
+		if err := validateImportedRound(r); err != nil {
+			return nil, nil, fmt.Errorf("dkg_rounds[%d]: %w", i, err)
+		}
+		rounds[r.Epoch] = r
+	}
+	for i, ak := range gs.ActiveKeys {
+		if ak.Epoch == 0 {
+			return nil, nil, fmt.Errorf("active_keys[%d]: epoch must be non-zero", i)
+		}
+		if _, dup := activeKeys[ak.Epoch]; dup {
+			return nil, nil, fmt.Errorf("active_keys[%d]: duplicate epoch %d", i, ak.Epoch)
+		}
+		round, ok := rounds[ak.Epoch]
+		if !ok {
+			return nil, nil, fmt.Errorf("active_keys[%d]: no DKG round for epoch %d", i, ak.Epoch)
+		}
+		if err := validateImportedActiveKey(ak, round); err != nil {
+			return nil, nil, fmt.Errorf("active_keys[%d]: %w", i, err)
+		}
+		activeKeys[ak.Epoch] = ak
+	}
+	if gs.CurrentEpoch > 0 {
+		if _, ok := rounds[gs.CurrentEpoch]; !ok {
+			return nil, nil, fmt.Errorf("current_epoch %d has no imported DKG round", gs.CurrentEpoch)
+		}
+	}
+	if gs.ActiveEpoch > 0 {
+		r, rok := rounds[gs.ActiveEpoch]
+		if !rok {
+			return nil, nil, fmt.Errorf("active_epoch %d has no imported DKG round", gs.ActiveEpoch)
+		}
+		if r.Status != DkgStatusActive {
+			return nil, nil, fmt.Errorf("active_epoch %d round status is %q, want %q", gs.ActiveEpoch, r.Status, DkgStatusActive)
+		}
+		if _, ok := activeKeys[gs.ActiveEpoch]; !ok {
+			return nil, nil, fmt.Errorf("active_epoch %d has no imported active threshold key", gs.ActiveEpoch)
+		}
+	}
+	for i, d := range gs.Dealings {
+		round, ok := rounds[d.Epoch]
+		if !ok {
+			return nil, nil, fmt.Errorf("dealings[%d]: no DKG round for epoch %d", i, d.Epoch)
+		}
+		if err := validateImportedDealing(d, round); err != nil {
+			return nil, nil, fmt.Errorf("dealings[%d]: %w", i, err)
+		}
+	}
+	seqSeen := map[[2]uint64]bool{}
+	var maxSeq uint64
+	for i, e := range gs.EncTxs {
+		key := [2]uint64{e.DecryptHeight, e.Seq}
+		if seqSeen[key] {
+			return nil, nil, fmt.Errorf("enc_txs[%d]: duplicate decrypt_height/seq (%d,%d)", i, e.DecryptHeight, e.Seq)
+		}
+		seqSeen[key] = true
+		if e.Seq > maxSeq {
+			maxSeq = e.Seq
+		}
+	}
+	if len(gs.EncTxs) > 0 && gs.EncSeq <= maxSeq {
+		return nil, nil, fmt.Errorf("enc_seq (%d) must be greater than imported max enc tx seq (%d)", gs.EncSeq, maxSeq)
+	}
+	shareSeen := map[[3]uint64]bool{}
+	for i, s := range gs.EncShares {
+		key := [3]uint64{s.DecryptHeight, s.Seq, s.Index}
+		if shareSeen[key] {
+			return nil, nil, fmt.Errorf("enc_shares[%d]: duplicate decrypt_height/seq/index (%d,%d,%d)", i, s.DecryptHeight, s.Seq, s.Index)
+		}
+		shareSeen[key] = true
+		if !seqSeen[[2]uint64{s.DecryptHeight, s.Seq}] {
+			return nil, nil, fmt.Errorf("enc_shares[%d]: no imported enc tx for decrypt_height/seq (%d,%d)", i, s.DecryptHeight, s.Seq)
+		}
+	}
+	encKeyOps := map[string]bool{}
+	encKeyMaterial := map[string]bool{}
+	for i, kr := range gs.EncKeys {
+		if kr.Operator == "" {
+			return nil, nil, fmt.Errorf("enc_keys[%d]: operator is required", i)
+		}
+		if encKeyOps[kr.Operator] {
+			return nil, nil, fmt.Errorf("enc_keys[%d]: duplicate operator %q", i, kr.Operator)
+		}
+		encKeyOps[kr.Operator] = true
+		if !ValidCompressedPointBytes(kr.Key) {
+			return nil, nil, fmt.Errorf("enc_keys[%d]: key is not a valid compressed secp256k1 point", i)
+		}
+		key := string(kr.Key)
+		if encKeyMaterial[key] {
+			return nil, nil, fmt.Errorf("enc_keys[%d]: duplicate encryption key", i)
+		}
+		encKeyMaterial[key] = true
+	}
+	return rounds, activeKeys, nil
+}
+
+func validateImportedRound(r DkgRound) error {
+	switch r.Status {
+	case DkgStatusOpen, DkgStatusActive, DkgStatusFailed:
+	default:
+		return fmt.Errorf("invalid status %q", r.Status)
+	}
+	if r.OpenHeight > r.DealDeadline || r.DealDeadline > r.ComplaintDeadline {
+		return fmt.Errorf("invalid deadlines: open=%d deal=%d complaint=%d", r.OpenHeight, r.DealDeadline, r.ComplaintDeadline)
+	}
+	if len(r.Members) == 0 {
+		return fmt.Errorf("members must be non-empty")
+	}
+	if r.Threshold == 0 {
+		return fmt.Errorf("threshold must be non-zero")
+	}
+	if int(r.Threshold) > TotalEvalPoints(r.Members) {
+		return fmt.Errorf("threshold %d exceeds total eval points %d", r.Threshold, TotalEvalPoints(r.Members))
+	}
+	seenIdx := map[uint64]bool{}
+	seenOp := map[string]bool{}
+	weighted := false
+	for i, m := range r.Members {
+		if m.Index == 0 {
+			return fmt.Errorf("members[%d]: index must be non-zero", i)
+		}
+		if seenIdx[m.Index] {
+			return fmt.Errorf("members[%d]: duplicate index %d", i, m.Index)
+		}
+		seenIdx[m.Index] = true
+		if m.OperatorAddr == "" {
+			return fmt.Errorf("members[%d]: operator_addr is required", i)
+		}
+		if seenOp[m.OperatorAddr] {
+			return fmt.Errorf("members[%d]: duplicate operator_addr %q", i, m.OperatorAddr)
+		}
+		seenOp[m.OperatorAddr] = true
+		if len(m.EncPubKey) > 0 && !ValidCompressedPointBytes(m.EncPubKey) {
+			return fmt.Errorf("members[%d]: enc_pubkey is not a valid compressed secp256k1 point", i)
+		}
+		if m.Weighted {
+			weighted = true
+		}
+	}
+	if weighted {
+		seenPoint := map[uint64]bool{}
+		totalWeight := sdkmath.ZeroInt()
+		for i, m := range r.Members {
+			if !m.Weighted {
+				return fmt.Errorf("members[%d]: mixed weighted/unweighted round", i)
+			}
+			if !m.Weight.IsNil() && m.Weight.IsNegative() {
+				return fmt.Errorf("members[%d]: negative weight", i)
+			}
+			if !m.Weight.IsNil() {
+				totalWeight = totalWeight.Add(m.Weight)
+			}
+			if len(m.EvalPoints) > 0 && (m.Weight.IsNil() || !m.Weight.IsPositive()) {
+				return fmt.Errorf("members[%d]: weighted member owns eval points with non-positive weight", i)
+			}
+			for _, p := range m.EvalPoints {
+				if p == 0 {
+					return fmt.Errorf("members[%d]: eval point 0 is invalid", i)
+				}
+				if seenPoint[p] {
+					return fmt.Errorf("members[%d]: duplicate eval point %d", i, p)
+				}
+				seenPoint[p] = true
+			}
+		}
+		for p := uint64(1); p <= uint64(len(seenPoint)); p++ {
+			if !seenPoint[p] {
+				return fmt.Errorf("weighted eval points must be contiguous 1..%d, missing %d", len(seenPoint), p)
+			}
+		}
+		if !totalWeight.IsPositive() {
+			return fmt.Errorf("weighted round total weight must be positive")
+		}
+		want := uint32((2*len(seenPoint))/3 + 1)
+		if int(want) > len(seenPoint) {
+			want = uint32(len(seenPoint))
+		}
+		if r.Threshold != want {
+			return fmt.Errorf("weighted threshold %d, want strict >2/3 threshold %d for %d eval points", r.Threshold, want, len(seenPoint))
+		}
+	}
+	return nil
+}
+
+func validateImportedActiveKey(ak ActiveThresholdKey, round DkgRound) error {
+	if ak.Threshold == 0 {
+		return fmt.Errorf("threshold must be non-zero")
+	}
+	if ak.Threshold != round.Threshold {
+		return fmt.Errorf("threshold %d does not match round threshold %d", ak.Threshold, round.Threshold)
+	}
+	if !ValidCompressedPointBytes(ak.Pub) {
+		return fmt.Errorf("pub is not a valid compressed secp256k1 point")
+	}
+	if len(ak.PublicCommitments) != int(ak.Threshold) {
+		return fmt.Errorf("expected %d public commitments, got %d", ak.Threshold, len(ak.PublicCommitments))
+	}
+	for i, c := range ak.PublicCommitments {
+		if !ValidCompressedPointBytes(c) {
+			return fmt.Errorf("public_commitments[%d] is not a valid compressed secp256k1 point", i)
+		}
+	}
+	memberWeight := map[uint64]int{}
+	for _, m := range round.Members {
+		memberWeight[m.Index] = len(m.OwnedEvalPoints())
+	}
+	if len(ak.Qual) == 0 {
+		return fmt.Errorf("qual must be non-empty")
+	}
+	seenQual := map[uint64]bool{}
+	qualWeight := 0
+	for i, q := range ak.Qual {
+		w, ok := memberWeight[q]
+		if !ok {
+			return fmt.Errorf("qual[%d]=%d is not a round member", i, q)
+		}
+		if seenQual[q] {
+			return fmt.Errorf("qual[%d]=%d is duplicated", i, q)
+		}
+		seenQual[q] = true
+		qualWeight += w
+	}
+	if qualWeight < int(ak.Threshold) {
+		return fmt.Errorf("qual owns %d eval points, below threshold %d", qualWeight, ak.Threshold)
+	}
+	return nil
+}
+
+func validateImportedDealing(d Dealing, round DkgRound) error {
+	if d.Epoch != round.Epoch {
+		return fmt.Errorf("epoch %d does not match round epoch %d", d.Epoch, round.Epoch)
+	}
+	if d.DealerIndex == 0 {
+		return fmt.Errorf("dealer_index must be non-zero")
+	}
+	memberExists := false
+	for _, m := range round.Members {
+		if m.Index == d.DealerIndex {
+			memberExists = true
+			break
+		}
+	}
+	if !memberExists {
+		return fmt.Errorf("dealer_index %d is not a round member", d.DealerIndex)
+	}
+	if len(d.Commitments) != int(round.Threshold) {
+		return fmt.Errorf("expected %d commitments, got %d", round.Threshold, len(d.Commitments))
+	}
+	for i, c := range d.Commitments {
+		if !ValidCompressedPointBytes(c) {
+			return fmt.Errorf("commitments[%d] is not a valid compressed secp256k1 point", i)
+		}
+	}
+	want := TotalEvalPoints(round.Members)
+	if len(d.EncShares) != want {
+		return fmt.Errorf("expected %d encrypted shares, got %d", want, len(d.EncShares))
+	}
+	seen := map[uint64]bool{}
+	for i, s := range d.EncShares {
+		if EvalPointOwner(round.Members, s.MemberIndex) == 0 {
+			return fmt.Errorf("enc_shares[%d]: eval point %d is not owned by any member", i, s.MemberIndex)
+		}
+		if seen[s.MemberIndex] {
+			return fmt.Errorf("enc_shares[%d]: duplicate eval point %d", i, s.MemberIndex)
+		}
+		seen[s.MemberIndex] = true
+		if !ValidCompressedPointBytes(s.A) {
+			return fmt.Errorf("enc_shares[%d]: A is not a valid compressed secp256k1 point", i)
+		}
+		if len(s.Nonce) != threshold.NonceSize {
+			return fmt.Errorf("enc_shares[%d]: nonce length %d, want %d", i, len(s.Nonce), threshold.NonceSize)
+		}
+		if len(s.Body) == 0 {
+			return fmt.Errorf("enc_shares[%d]: body is empty", i)
 		}
 	}
 	return nil
@@ -549,8 +857,14 @@ func (p Params) Validate() error {
 	if p.RevealDelay == 0 {
 		return fmt.Errorf("reveal_delay must be >= 1")
 	}
+	if p.RevealDelay > maxCommitRevealWindow {
+		return fmt.Errorf("reveal_delay (%d) must be <= %d", p.RevealDelay, maxCommitRevealWindow)
+	}
 	if p.MaxRevealWindow < p.RevealDelay {
 		return fmt.Errorf("max_reveal_window (%d) must be >= reveal_delay (%d)", p.MaxRevealWindow, p.RevealDelay)
+	}
+	if p.MaxRevealWindow > maxCommitRevealWindow {
+		return fmt.Errorf("max_reveal_window (%d) must be <= %d", p.MaxRevealWindow, maxCommitRevealWindow)
 	}
 	// MEDIUM FIX: bound DecryptDelay. It is the submit->decrypt gap and therefore the window
 	// a ciphertext (and, on the DKG path, its stamped epoch's DkgRound + ActiveThresholdKey)
@@ -647,6 +961,14 @@ func (p Params) Validate() error {
 	if p.EncSubmitBondBurnBps > 0 && p.EncSubmitBond == 0 {
 		return fmt.Errorf("enc_submit_bond_burn_bps requires a positive enc_submit_bond")
 	}
+	if p.EncExecEnabled {
+		if p.EncSubmitBond == 0 {
+			return fmt.Errorf("enc_submit_bond must be positive when enc_exec_enabled (encrypted submissions need a real anti-sybil price)")
+		}
+		if p.EncSubmitBondBurnBps == 0 {
+			return fmt.Errorf("enc_submit_bond_burn_bps must be positive when enc_exec_enabled (a fully-refundable bond is not a sybil price)")
+		}
+	}
 	// When the DKG supplies the active key, the trusted-setup params.ThresholdPub/Threshold/
 	// Keypers are the epoch-0 fallback and need not be populated; the DKG member set was
 	// already validated above.
@@ -695,19 +1017,19 @@ func (p Params) Validate() error {
 // up-front validation so a bad param is rejected at ingress instead of silently
 // clamped. DkgMaxAttempts=0 is intentionally allowed (it means "never alert").
 const (
-	minDkgWindowBlocks uint64 = 1
-	maxDkgWindowBlocks uint64 = 10_000_000
+	minDkgWindowBlocks    uint64 = 1
+	maxDkgWindowBlocks    uint64 = 10_000_000
+	maxCommitRevealWindow uint64 = 10_000_000
 	// maxDkgPhaseWindow is the OPERATIONAL upper bound (well below the 10M overflow guard) on the
 	// per-round phase windows and the decrypt delay. AUDIT FIX (GOV-1/GOV-5): a governance value near
 	// maxDkgWindowBlocks would open a round EndBlockDKG can never close (a years-away deadline) or pin
 	// an epoch's key/state for effectively ever.
 	//
-	// round-12 #3: LOWERED 100_000 -> 10_000. While a round is Open and before its deadline,
+	// round-12 #3 / re-audit: keep this at minutes, not hours. While a round is Open and before its deadline,
 	// EndBlockDKG does not retry/rekey, so a stuck round (proposer censorship, VE that do not fit the
-	// block, no dealings) freezes DKG recovery for the whole window. A ~55h cap made that "days"; ~5.5h
-	// (10k blocks at ~2s) bounds it to hours while staying far above any real deal+complaint phase
-	// (defaults 20/10 blocks). A tighter mid-window liveness force-advance remains a design item.
-	maxDkgPhaseWindow uint64 = 10_000
+	// block, no dealings) freezes DKG recovery for the whole window. 600 blocks is ~20 minutes at 2s
+	// blocks while staying far above the default 20/10-block deal/complaint phases.
+	maxDkgPhaseWindow uint64 = 600
 	// maxInFlightCeiling bounds the admission ceilings so a governance-set value cannot
 	// approach a uint64 overflow in the keeper's ref-count arithmetic.
 	maxInFlightCeiling uint64 = 1 << 40
@@ -731,22 +1053,14 @@ const (
 	// DefaultDkgShareBudget is the fixed stake-apportionment budget S used when
 	// DkgShareBudget==0. 256 gives ~0.4%/point stake resolution and satisfies the enforced
 	// coupling S >= MinShareBudgetPerMember * committee cap for the default cap (8*16=128),
-	// which is what keeps the worst-case largest-remainder rounding slop (< n points per
-	// coalition) strictly inside the gap between a 1/3-stake adversary's points and the
-	// t = floor(2S/3) - n + 1 threshold. See keeper.stakeThreshold for the proof.
+	// which gives the default committee useful stake resolution without bloating vote extensions.
 	DefaultDkgShareBudget uint32 = 256
 
 	// MinShareBudgetPerMember is the enforced eval-point budget floor PER COMMITTEE SEAT
 	// (cycle-3 H-A): validation requires S >= MinShareBudgetPerMember * effective committee
 	// cap, and the keeper clamps a transparent committee to floor(S/MinShareBudgetPerMember)
-	// seats as runtime defense-in-depth. WHY 8 (the coupling multiple k): the Hamilton
-	// apportionment worst case lets any coalition of c members deviate from exact stake
-	// proportionality by strictly less than c points down and at most min(c, n-1) points up.
-	// With t = floor(2S/3) - n + 1 the two required inequalities are
-	//   (SAFETY)   f <= 1/3 stake  =>  points <= floor(S/3) + n - 1 < t, needs S >= 6n - 1;
-	//   (LIVENESS) f >  2/3 stake  =>  points >  2S/3 - n, i.e. >= t, holds for ALL S,n.
-	// k=8 therefore guarantees safety with a margin of ~2n/3 points (>= (2n+1)/3) over the
-	// bare S >= 6n-1 requirement while keeping the max committee (128) configurable within
+	// seats as runtime defense-in-depth. WHY 8 (the coupling multiple k): it keeps the max
+	// committee (128) configurable within
 	// maxDkgShareBudget (8*128 = 1024 == the ceiling), and gives every seat >= 8 points of stake
 	// resolution so apportionment can never degenerate to operator-address order.
 	MinShareBudgetPerMember = 8
@@ -865,22 +1179,43 @@ func (p Params) ValidateDkgWindows() error {
 				"dkg_share_budget (%d) must be >= %d * the effective committee cap (%d*%d=%d): a smaller budget degenerates stake apportionment (decryption power would track operator-address order, not stake)",
 				s, MinShareBudgetPerMember, MinShareBudgetPerMember, m, MinShareBudgetPerMember*m)
 		}
-		// round-8 #3: bound the worst-case >2/3-power INJECTED-COMMIT aggregate to a conservative
-		// MaxTxBytes. Per-extension size is O(S); a valid-but-large (committee, S) could make even a
-		// 2/3 subset exceed the proposal's MaxTxBytes, so PrepareProposal's boundedInjectedCommit would
-		// fall back to NO injection every block -> the DKG never consumes and STALLS. This couples the
-		// two so a config that cannot possibly fit is rejected up front. ASSUMPTION: the chain's
-		// consensus MaxTxBytes >= conservativeInjectMaxTxBytes; an operator on a smaller MaxTxBytes must
-		// lower dkg_max_members / dkg_share_budget (the runtime fallback stays SAFE - it just makes no
-		// DKG progress until the config fits, which this check turns into an up-front rejection).
-		twoThirds := (2*m + 2) / 3 // ceil(2m/3)
-		if aggr := twoThirds * (s * perPointWireBytes); aggr > conservativeInjectMaxTxBytes {
+		// round-8 #3 / re-audit: bound the worst-case >2/3-power INJECTED-COMMIT aggregate to the
+		// SAME effective budget the proposer uses when it trims (MaxTxBytes - MaxTxBytes/8). A
+		// config that fits the raw MaxTxBytes but not the trim budget can still make every required
+		// injection fall back to "no injection", and ProcessProposal will reject no-injection blocks
+		// while DKG is open. Reject it up front.
+		if !p.DkgInjectedCommitFitsMaxTxBytes(conservativeInjectMaxTxBytes) {
 			return fmt.Errorf(
-				"dkg_max_members (%d) x dkg_share_budget (%d): a >2/3-power injected commit is ~%d bytes, exceeding the assumed MaxTxBytes floor %d - lower dkg_max_members or dkg_share_budget (or raise the chain MaxTxBytes)",
-				m, s, aggr, conservativeInjectMaxTxBytes)
+				"dkg_max_members (%d) x dkg_share_budget (%d): a >2/3-power injected commit is ~%d bytes, exceeding the assumed proposer injection budget %d under MaxTxBytes floor %d - lower dkg_max_members or dkg_share_budget (or raise the chain MaxTxBytes)",
+				m, s, p.DkgInjectedCommitBytesUpperBound(), DkgInjectedCommitPayloadBudget(conservativeInjectMaxTxBytes), conservativeInjectMaxTxBytes)
 		}
 	}
 	return nil
+}
+
+// DkgInjectedCommitBytesUpperBound estimates the injected ExtendedCommitInfo size needed to carry a
+// >2/3-power transparent-DKG vote-extension subset under the configured committee/share budget.
+func (p Params) DkgInjectedCommitBytesUpperBound() int64 {
+	m, s := p.EffectiveMaxMembers(), p.EffectiveShareBudget()
+	twoThirds := (2*m)/3 + 1 // strict >2/3, matching ValidateVoteExtensions power semantics
+	return int64(twoThirds * (s * perPointWireBytes))
+}
+
+// DkgInjectedCommitPayloadBudget is the effective byte budget PrepareProposal uses for a trimmed
+// injected vote-extension commit. It mirrors boundedInjectedCommit's 1/8 normal-tx reserve.
+func DkgInjectedCommitPayloadBudget(maxTxBytes int64) int64 {
+	if maxTxBytes <= 0 {
+		return 0
+	}
+	return maxTxBytes - maxTxBytes/8
+}
+
+func (p Params) DkgInjectedCommitFitsMaxTxBytes(maxTxBytes int64) bool {
+	budget := DkgInjectedCommitPayloadBudget(maxTxBytes)
+	if budget <= 0 {
+		return false
+	}
+	return p.DkgInjectedCommitBytesUpperBound() < budget
 }
 
 // EffectiveShareBudget returns the stake-apportionment budget S actually applied:

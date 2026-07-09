@@ -287,7 +287,7 @@ func TestC8_BoundPreservesCycle7Fix_NoHonestStarve(t *testing.T) {
 		t.Fatalf("expected 24 verifications (16 honest stored + 8 chaff rejected), got %d", v)
 	}
 
-	// The short (16 < t=18) ciphertext must DEFER, never hard-drop.
+	// The short (16 < t=22) ciphertext must DEFER, never hard-drop.
 	b12 := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b12); err != nil {
 		t.Fatal(err)

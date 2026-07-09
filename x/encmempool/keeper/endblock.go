@@ -122,6 +122,14 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		if cp.Abci == nil || cp.Abci.VoteExtensionsEnableHeight == 0 || ctx.BlockHeight() < cp.Abci.VoteExtensionsEnableHeight {
 			return
 		}
+		if cp.Block != nil && cp.Block.MaxBytes > 0 && !p.DkgInjectedCommitFitsMaxTxBytes(cp.Block.MaxBytes) {
+			ctx.EventManager().EmitEvent(sdk.NewEvent(
+				"encmempool_dkg_injection_oversize",
+				sdk.NewAttribute("estimated_bytes", u64str(uint64(p.DkgInjectedCommitBytesUpperBound()))),
+				sdk.NewAttribute("max_tx_bytes", u64str(uint64(cp.Block.MaxBytes))),
+			))
+			return
+		}
 	}
 	h := uint64(ctx.BlockHeight())
 	if h < p.DkgStartHeight {
@@ -152,6 +160,16 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 	if haveLast && lastRound.Status == types.DkgStatusOpen && h >= lastRound.ComplaintDeadline {
 		k.finalizeRound(ctx, lastRound)
 		lastRound, haveLast = k.GetDkgRound(ctx, cur) // reload the post-finalize status
+	}
+	if haveLast && lastRound.Status == types.DkgStatusOpen && h > lastRound.DealDeadline && h < lastRound.ComplaintDeadline &&
+		k.dealingWeightUpperBound(ctx, lastRound) < int(lastRound.Threshold) {
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_failed_early",
+			sdk.NewAttribute("epoch", u64str(lastRound.Epoch)),
+			sdk.NewAttribute("reason", "insufficient_dealings_after_deal_window"),
+		))
+		k.finalizeRound(ctx, lastRound)
+		lastRound, haveLast = k.GetDkgRound(ctx, cur)
 	}
 
 	// Never disturb a round that is still genuinely in-flight (open, pre-deadline).
@@ -297,28 +315,14 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 	// HIGH-3: on the STAKE-WEIGHTED transparent path each member is allocated Shamir
 	// evaluation points proportional to its snapshotted stake within the budget S, HERE (at
 	// round-open) so the allocation is seeded with the round's EPOCH — the epoch-rotating
-	// remainder-seat tie-break (cycle-3 L-2). The threshold is t = floor(2S/3) - n + 1 (see
-	// stakeThreshold for the safety/liveness proof and the honest decrypt bar). MembersHash
+	// remainder-seat tie-break (cycle-3 L-2). The threshold is t = floor(2S/3)+1. MembersHash
 	// covers only the operator set, so allocating after hashing cannot flap membership.
 	// On the legacy/declared path (unweighted, one point per member) the member COUNT
 	// threshold stays byte-identical.
 	var t uint32
 	if p.DkgTransparent {
 		members = AllocateEvalPoints(members, p.EffectiveShareBudget(), epoch)
-		var degraded bool
-		t, degraded = stakeThreshold(members)
-		if degraded {
-			// Defense-in-depth: unreachable via validated params + the TransparentMembers
-			// committee clamp. Deterministic (pure function of committed state) and LOUD;
-			// the round still opens with the safety-floor threshold — never a halt/fork.
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
-				"encmempool_dkg_threshold_degraded",
-				sdk.NewAttribute("epoch", u64str(epoch)),
-				sdk.NewAttribute("budget", u64str(uint64(types.TotalEvalPoints(members)))),
-				sdk.NewAttribute("members", u64str(uint64(len(members)))),
-				sdk.NewAttribute("reason", "share budget below 6n-1: safety floor applied, liveness not guaranteed"),
-			))
-		}
+		t, _ = stakeThreshold(members)
 	} else {
 		t = roundThreshold(p, len(members))
 	}
@@ -383,13 +387,6 @@ func (k Keeper) stakeDriftRekeyDue(ctx sdk.Context, round types.DkgRound, live [
 	if !p.DkgTransparent {
 		return false // stake weighting (and thus drift) only exists on the transparent path
 	}
-	// Respect the flap-dampener: never rekey more than once per DkgMinRekeyGap. This bounds the
-	// rekey rate (no storm) and shares the exact guard the member-change path uses. Applies to EVERY
-	// trigger below.
-	last := k.GetLastRekeyHeight(ctx)
-	if p.DkgMinRekeyGap > 0 && last != 0 && h < addSat(last, p.DkgMinRekeyGap) {
-		return false
-	}
 	// (c) DECRYPT HEALTH (MED-2, always-on recovery backstop): a sustained streak of stranded decrypt
 	// maturities with NO successful decrypt in between means the active key cannot decrypt — e.g. a
 	// poison-and-hide dealer that slipped a bad share past the complaint round into QUAL (HIGH-1). Force
@@ -401,6 +398,13 @@ func (k Keeper) stakeDriftRekeyDue(ctx sdk.Context, round types.DkgRound, live [
 	// fires (and at prune).
 	if k.GetDecryptStrandStreak(ctx, round.Epoch) >= decryptHealthStrandThreshold {
 		return true
+	}
+	// Respect the flap-dampener for scheduled/cadence/stake-drift rekeys. A proven decrypt-health
+	// failure bypasses it above: the active key is already known bad, so waiting for the flap gap only
+	// strands users longer.
+	last := k.GetLastRekeyHeight(ctx)
+	if p.DkgMinRekeyGap > 0 && last != 0 && h < addSat(last, p.DkgMinRekeyGap) {
+		return false
 	}
 	// (a)/(b) cadence + stake-drift triggers are opt-in (0 = disabled). When the feature is dormant
 	// (EncEnabled off) no ciphertext ever strands, so every epoch's streak stays 0 and this function

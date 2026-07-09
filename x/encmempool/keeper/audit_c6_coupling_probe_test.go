@@ -7,11 +7,17 @@ package keeper_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
 	"github.com/cosmos/evm/x/encmempool/keeper"
+	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
@@ -49,9 +55,8 @@ func TestC6_Coupling_GovValidationBoundary(t *testing.T) {
 			t.Fatalf("sub-min committee ACCEPTED: maxMembers=%d must be rejected (< minDkgCommittee)", mm)
 		}
 	}
-	// Sweep committees whose 8*mm budget also fits the round-8 #3 MaxTxBytes aggregate coupling
-	// (mm <= 64; a >2/3 aggregate at 64x512 ~19.8MB is just under the 20MB floor).
-	for _, mm := range []uint32{4, 8, 16, 32, 64} {
+	// Sweep committees whose 8*mm budget also fits the proposer injection trim budget.
+	for _, mm := range []uint32{4, 8, 16, 32} {
 		need := uint32(types.MinShareBudgetPerMember) * mm // = 8*mm
 		// exactly at the coupling: MUST validate.
 		if err := base(mm, need).Validate(); err != nil {
@@ -69,15 +74,142 @@ func TestC6_Coupling_GovValidationBoundary(t *testing.T) {
 	if err := base(128, 256).Validate(); err == nil {
 		t.Fatal("config maxMembers=128 S=256 must be rejected (256 < 8*128=1024)")
 	}
+	// Re-audit: 64x512 fits the raw 20MB MaxTxBytes estimate (~19.8MB) but exceeds the proposer's
+	// actual 7/8 trim budget (17.5MB), so it must be rejected too.
+	if err := base(64, 512).Validate(); err == nil {
+		t.Fatal("maxMembers=64 S=512 must be rejected (2/3 injected-commit aggregate exceeds proposer trim budget)")
+	}
 	// round-8 #3: the absolute committee cap (128) at its min budget (1024) is now REJECTED by the
 	// MaxTxBytes aggregate coupling - a >2/3 injected commit (~79MB) cannot fit the 20MB floor, so it
-	// would stall DKG injection. ~64 is the largest committee that actually fits.
+	// would stall DKG injection.
 	if err := base(128, 1024).Validate(); err == nil {
 		t.Fatal("maxMembers=128 S=1024 must now be rejected (2/3 injected-commit aggregate exceeds MaxTxBytes)")
 	}
 	// One above the ceiling is rejected.
 	if err := base(128, 1025).Validate(); err == nil {
 		t.Fatal("S=1025 > maxDkgShareBudget=1024 must be rejected")
+	}
+}
+
+func TestSubmitEncryptedRejectsWhenTransparentInjectionOversize(t *testing.T) {
+	k, ctx := newKeeperSK(t, 10, &mockStaking{})
+	p := transparentParams(2, 16)
+	if err := k.SetParams(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	ctx = ctx.WithConsensusParams(cmtproto.ConsensusParams{
+		Abci:  &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 1},
+		Block: &cmtproto.BlockParams{MaxBytes: 100_000},
+	})
+	a := secp256k1.PrivKeyFromBytes([]byte{1}).PubKey().SerializeCompressed()
+	_, err := keeper.NewMsgServerImpl(k).SubmitEncrypted(ctx, &types.MsgSubmitEncrypted{
+		Submitter: "not-a-bech32-submit-address",
+		A:         a,
+		Nonce:     make([]byte, threshold.NonceSize),
+		Body:      []byte("ciphertext"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "max_tx_bytes") {
+		t.Fatalf("expected transparent injection-size rejection before PoK/bond work, got %v", err)
+	}
+}
+
+func TestSubmitEncryptedRejectsWhenTransparentVoteExtensionsInactive(t *testing.T) {
+	k, ctx := newKeeperSK(t, 10, &mockStaking{})
+	p := transparentParams(2, 16)
+	if err := k.SetParams(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	ctx = ctx.WithConsensusParams(cmtproto.ConsensusParams{
+		Abci:  &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 100},
+		Block: &cmtproto.BlockParams{MaxBytes: 20_000_000},
+	})
+	a := secp256k1.PrivKeyFromBytes([]byte{1}).PubKey().SerializeCompressed()
+	_, err := keeper.NewMsgServerImpl(k).SubmitEncrypted(ctx, &types.MsgSubmitEncrypted{
+		Submitter: "not-a-bech32-submit-address",
+		A:         a,
+		Nonce:     make([]byte, threshold.NonceSize),
+		Body:      []byte("ciphertext"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "vote extensions are not active") {
+		t.Fatalf("expected transparent vote-extension-active rejection before PoK/bond work, got %v", err)
+	}
+}
+
+func TestBeginBlockPreservesInFlightWhenTransparentVoteExtensionsInactive(t *testing.T) {
+	k, ctx := newKeeperSK(t, 10, &mockStaking{})
+	p := transparentParams(2, 16)
+	if err := k.SetParams(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	ctx = ctx.WithConsensusParams(cmtproto.ConsensusParams{
+		Abci:  &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 100},
+		Block: &cmtproto.BlockParams{MaxBytes: 20_000_000},
+	}).WithEventManager(sdk.NewEventManager())
+	a := secp256k1.PrivKeyFromBytes([]byte{2}).PubKey().SerializeCompressed()
+	e := k.SubmitEncTx(ctx, "user", 10, 100, a, make([]byte, threshold.NonceSize), []byte("ciphertext"), 1)
+	if k.GetGlobalEncCount(ctx) != 1 || k.GetEpochEncCount(ctx, 1) != 1 {
+		t.Fatalf("setup failed: global=%d epoch=%d", k.GetGlobalEncCount(ctx), k.GetEpochEncCount(ctx, 1))
+	}
+	if err := k.BeginBlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.GetEncTx(ctx, e.DecryptHeight, e.Seq); !ok {
+		t.Fatal("transparent-runtime-unavailable must not immediately drop an in-flight DKG ciphertext")
+	}
+	if k.GetGlobalEncCount(ctx) != 1 || k.GetEpochEncCount(ctx, 1) != 1 {
+		t.Fatalf("in-flight ref-counts must be preserved: global=%d epoch=%d", k.GetGlobalEncCount(ctx), k.GetEpochEncCount(ctx, 1))
+	}
+}
+
+func TestBeginBlockPreservesInFlightWhenTransparentInjectionOversize(t *testing.T) {
+	k, ctx := newKeeperSK(t, 10, &mockStaking{})
+	p := transparentParams(2, 16)
+	if err := k.SetParams(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	ctx = ctx.WithConsensusParams(cmtproto.ConsensusParams{
+		Abci:  &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 1},
+		Block: &cmtproto.BlockParams{MaxBytes: 100_000},
+	}).WithEventManager(sdk.NewEventManager())
+	a := secp256k1.PrivKeyFromBytes([]byte{3}).PubKey().SerializeCompressed()
+	e := k.SubmitEncTx(ctx, "user", 10, 100, a, make([]byte, threshold.NonceSize), []byte("ciphertext"), 1)
+	if k.GetGlobalEncCount(ctx) != 1 || k.GetEpochEncCount(ctx, 1) != 1 {
+		t.Fatalf("setup failed: global=%d epoch=%d", k.GetGlobalEncCount(ctx), k.GetEpochEncCount(ctx, 1))
+	}
+	if err := k.BeginBlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.GetEncTx(ctx, e.DecryptHeight, e.Seq); !ok {
+		t.Fatal("oversize transparent-injection runtime must not immediately drop the stored ciphertext")
+	}
+	if k.GetGlobalEncCount(ctx) != 1 || k.GetEpochEncCount(ctx, 1) != 1 {
+		t.Fatalf("in-flight ref-counts must be preserved: global=%d epoch=%d", k.GetGlobalEncCount(ctx), k.GetEpochEncCount(ctx, 1))
+	}
+}
+
+func TestBeginBlockPreservesLegacyEpoch0WhenTransparentRuntimeUnavailable(t *testing.T) {
+	k, ctx := newKeeperSK(t, 10, &mockStaking{})
+	p := transparentParams(2, 16)
+	if err := k.SetParams(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	ctx = ctx.WithConsensusParams(cmtproto.ConsensusParams{
+		Abci:  &cmtproto.ABCIParams{VoteExtensionsEnableHeight: 100},
+		Block: &cmtproto.BlockParams{MaxBytes: 20_000_000},
+	}).WithEventManager(sdk.NewEventManager())
+	a := secp256k1.PrivKeyFromBytes([]byte{4}).PubKey().SerializeCompressed()
+	e := k.SubmitEncTx(ctx, "legacy-user", 10, 100, a, make([]byte, threshold.NonceSize), []byte("ciphertext"), 0)
+	if k.GetGlobalEncCount(ctx) != 1 {
+		t.Fatalf("setup failed: global=%d", k.GetGlobalEncCount(ctx))
+	}
+	if err := k.BeginBlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.GetEncTx(ctx, e.DecryptHeight, e.Seq); !ok {
+		t.Fatal("transparent-runtime-unavailable must not drop legacy epoch-0 ciphertexts")
+	}
+	if k.GetGlobalEncCount(ctx) != 1 || k.GetEpochEncCount(ctx, 1) != 0 {
+		t.Fatalf("legacy ref-counts must be preserved without an epoch ref-count: global=%d epoch1=%d", k.GetGlobalEncCount(ctx), k.GetEpochEncCount(ctx, 1))
 	}
 }
 

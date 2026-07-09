@@ -20,9 +20,8 @@ import (
 
 func jm(v any) string { b, _ := json.Marshal(v); return string(b) }
 
-// PROBE 4 — after two byzantine dealers force an infinity/garbage active key, is the
-// feature stuck forever? The EndBlocker only re-runs on member-change or a FAILED
-// round; an Active-but-unusable key is steady state.
+// PROBE 4 — two byzantine dealers can make their public commitments cancel to the
+// point-at-infinity. Finalize must fail the round instead of installing an Active-but-unusable key.
 func TestProbe_InfinityKey_StuckAndDownstreamSafe(t *testing.T) {
 	const thr = 2
 	members := []member{newMember("op1", "acc1"), newMember("op2", "acc2")}
@@ -44,26 +43,20 @@ func TestProbe_InfinityKey_StuckAndDownstreamSafe(t *testing.T) {
 	deal(members[1].acc, baseMul(negS))
 	k.EndBlockDKG(ctx.WithBlockHeight(5).WithEventManager(sdk.NewEventManager()))
 
-	ak, ok := k.GetActiveKey(ctx, 1)
-	if !ok {
-		t.Fatal("expected an (invalid) active key to be installed")
+	if _, ok := k.GetActiveKey(ctx, 1); ok {
+		t.Fatal("aggregate point-at-infinity must not install an active key")
 	}
-	if _, err := secp256k1.ParsePubKey(ak.Pub); err == nil {
-		t.Fatalf("expected Pub to be an INVALID point; got a parseable key %x", ak.Pub)
-	}
-	t.Logf("installed INVALID active key Pub=%x, activeEpoch=%d", ak.Pub, k.GetActiveEpoch(ctx))
-
-	for h := int64(6); h <= 46; h++ {
-		k.EndBlockDKG(ctx.WithBlockHeight(h).WithEventManager(sdk.NewEventManager()))
-	}
-	if ce := k.GetCurrentEpoch(ctx); ce != 1 {
-		t.Fatalf("unexpected re-run: current epoch advanced to %d", ce)
+	if active := k.GetActiveEpoch(ctx); active != 0 {
+		t.Fatalf("failed infinity aggregate must not advance active epoch, got %d", active)
 	}
 	r, _ := k.GetDkgRound(ctx, 1)
-	if r.Status != types.DkgStatusActive {
-		t.Fatalf("round stuck-active expected; got %q", r.Status)
+	if r.Status != types.DkgStatusFailed {
+		t.Fatalf("infinity aggregate must fail the round; got %q", r.Status)
 	}
-	t.Log("CONFIRMED: garbage active key is permanent (no auto re-run); anti-MEV feature bricked for the epoch")
+	k.EndBlockDKG(ctx.WithBlockHeight(7).WithEventManager(sdk.NewEventManager()))
+	if ce := k.GetCurrentEpoch(ctx); ce != 2 {
+		t.Fatalf("failed infinity aggregate should auto-retry at epoch 2 after backoff, got %d", ce)
+	}
 }
 
 func roundFingerprint(t *testing.T, k keeper.Keeper, ctx sdk.Context, epoch uint64) string {

@@ -112,12 +112,12 @@ func TestProbe_StakeGate_Determinism(t *testing.T) {
 		{Index: 2, Weight: big2},
 		{Index: 3, Weight: big2},
 	}
-	// present {1} => 2^128 vs total (2^128 + 2^128) => exactly half => NOT strict majority.
+	// present {1} => 2^128 vs total (2^128 + 2^128) => exactly half => NOT >2/3.
 	if keeper.DecryptingSetMeetsStake(members, map[uint64]bool{1: true}) {
-		t.Fatal("exactly-half stake must NOT be a strict majority")
+		t.Fatal("exactly-half stake must NOT pass the >2/3 stake gate")
 	}
-	// present {1,2} => 2^128 + 2^127 > half => majority.
+	// present {1,2} => 2^128 + 2^127 = 3/4 of total => passes.
 	if !keeper.DecryptingSetMeetsStake(members, map[uint64]bool{1: true, 2: true}) {
-		t.Fatal("above-half stake must be a majority")
+		t.Fatal(">2/3 stake must pass the stake gate")
 	}
 }

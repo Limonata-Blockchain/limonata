@@ -97,7 +97,7 @@ func TestReg_H4_SelfIdentifyByOperator(t *testing.T) {
 
 // HIGH-3 — the committee is STAKE-ranked, and stake is now baked into the CRYPTOGRAPHY:
 // each member is allocated Shamir evaluation points PROPORTIONAL to its stake within budget S,
-// and the reconstruction threshold is t = floor(2S/3)-n+1 of them (see keeper.stakeThreshold).
+// and the reconstruction threshold is t = floor(2S/3)+1 of them.
 // So a stake-minority seat-majority holds < t points and cannot reconstruct (on OR off chain),
 // while the full committee holds all S >= t. This asserts the committee-level allocation
 // property; the off-chain reconstruction itself is exercised in the H3 regression tests.
@@ -136,7 +136,7 @@ func TestReg_H3_StakeMinoritySeatMajorityCannotDecrypt(t *testing.T) {
 	// Allocation happens at round-open; run it explicitly over the selected committee.
 	committee := keeper.AllocateEvalPoints(k.ActiveMembers(ctx, p), p.EffectiveShareBudget(), 1)
 	n := len(committee)
-	tThreshold := 2*types.TotalEvalPoints(committee)/3 - n + 1 // t = floor(2S/3) - n + 1
+	tThreshold := 2*types.TotalEvalPoints(committee)/3 + 1 // t = floor(2S/3) + 1
 
 	attacker := map[uint64]bool{}
 	attackerSeats, attackerPoints, totalPoints := 0, 0, 0
@@ -176,7 +176,7 @@ func TestReg_H3_StakeMinoritySeatMajorityCannotDecrypt(t *testing.T) {
 		full[cm.Index] = true
 	}
 	if !keeper.DecryptingSetMeetsStake(committee, full) {
-		t.Fatal("the full committee (stake majority) must pass the on-chain stake gate")
+		t.Fatal("the full committee must pass the on-chain stake gate")
 	}
 	t.Logf("attacker seat-majority (%d/%d) holds %d < t=%d eval points; full committee owns %d",
 		attackerSeats, n, attackerPoints, tThreshold, totalPoints)

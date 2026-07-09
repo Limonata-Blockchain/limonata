@@ -17,11 +17,10 @@ import (
 // and RANDOM coalitions across n up to the committee cap (128) and the full
 // validated share-budget range [8n, 2048].
 //
-// It locks in the two inequalities keeper.stakeThreshold's whole proof rests on,
-// as a machine-checked property over arbitrary (not just hand-constructed) shapes:
+// It locks in the low-stake safety inequality as a machine-checked property over
+// arbitrary (not just hand-constructed) shapes:
 //
-//	SAFETY   any coalition holding <= 1/3 of committee stake holds < t points;
-//	LIVENESS any set holding  > 2/3 of committee stake holds >= t points.
+//	SAFETY   any coalition holding <= 1/3 of committee stake holds < t points.
 //
 // The deterministic constructed-boundary sweep (TestReg_HB_BothInequalities_
 // PropertySweep) already covers whale+dust, exact-1/3, and offline-just-under-1/3
@@ -104,21 +103,14 @@ func FuzzCycle6_StakeAllocationSafetyLiveness(f *testing.F) {
 			setPts, totalPts, thr := pointsHeld(weights, S, epoch, func(_ int64, i int) bool { return inSetIdx(i) })
 
 			// Sanity: largest-remainder assigns the WHOLE budget (S' == S). thr is the exact
-			// t = floor(2S/3)-n+1 the keeper's stakeThreshold uses on the weighted path (mirrored
-			// by tNew, cross-checked against live rounds in the TestReg_HB_* / transparent tests).
+			// t = floor(2S/3)+1 the keeper's stakeThreshold uses on the weighted path.
 			if totalPts != S {
 				t.Fatalf("allocation lost points: totalPts=%d != S=%d (n=%d)", totalPts, S, n)
 			}
 
-			switch {
-			case 3*cstake <= total: // stake fraction <= 1/3
+			if 3*cstake <= total { // stake fraction <= 1/3
 				if setPts >= thr {
 					t.Fatalf("SAFETY broken: n=%d S=%d epoch=%d coalition stake %d/%d (<=1/3) holds %d >= t=%d points",
-						n, S, epoch, cstake, total, setPts, thr)
-				}
-			case 3*cstake > 2*total: // stake fraction > 2/3
-				if setPts < thr {
-					t.Fatalf("LIVENESS broken: n=%d S=%d epoch=%d online stake %d/%d (>2/3) holds %d < t=%d points",
 						n, S, epoch, cstake, total, setPts, thr)
 				}
 			}

@@ -122,4 +122,9 @@ var (
 	// old commit/reveal path had NO admission cap. Maintained O(1) (inc in SetCommit, dec in DeleteCommit).
 	GlobalCommitCountKey       = []byte{0x23} // -> uint64 (be): # of in-flight commits across all senders
 	SubmitterCommitCountPrefix = []byte{0x24} // 0x24 | sender -> uint64 (be): # of in-flight commits for that sender
+
+	// EncSubmitGlobalRatePrefix is the GLOBAL per-block encrypted-submit rate counter. It complements the
+	// per-submitter counter: per-address limits are sybilable, so this bounds total admitted ciphertext
+	// arrival per block before it can force downstream DKG share/decrypt work.
+	EncSubmitGlobalRatePrefix = []byte{0x25} // 0x25 | be(height) -> be(count) (8 bytes); GC'd past current height
 )

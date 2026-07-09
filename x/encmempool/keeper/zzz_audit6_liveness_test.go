@@ -8,22 +8,17 @@ package keeper_test
 import (
 	"testing"
 
-	sdkmath "cosmossdk.io/math"
-
 	"github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
-// PROBE 4 — HONEST >2/3 (snapshot) ONLINE SET NEVER STRANDED, through the REAL decrypt
-// gate. The committed fuzz proves the POINT-COUNT inequality (online >2/3 => >= t points).
-// This probe additionally drives the SECOND clamp that recoverSharedSecret applies on the
-// on-chain combine — DecryptingSetMeetsStake (strict stake majority) — to confirm the
-// redundant gate can never strand the guaranteed-liveness set, across extreme stake shapes
-// and committees up to the cap. It builds the REAL allocated round members via
-// keeper.AllocateEvalPoints, forms the online set = smallest-by-count set of top-stake
-// members exceeding 2/3 snapshot stake, marks exactly their owned eval points present, and
-// requires: (a) present-point count >= t AND (b) the stake gate passes.
-func TestProbe_HonestSupermajorityNeverStrandedThroughGate(t *testing.T) {
+// PROBE 4 — HONEST >2/3 (snapshot) ONLINE SET PASSES THE REAL STAKE GATE.
+// The strict confidentiality threshold is floor(2S/3)+1, so a minimally-over-2/3 online
+// stake set can intentionally hold fewer than t evaluation points after Hamilton rounding.
+// That is the price paid to remove the old <=2/3-stake reconstruction band. This probe drives
+// the real on-chain combine gate and records, but no longer rejects, those narrow strict-threshold
+// shortfalls.
+func TestProbe_HonestSupermajorityPassesStakeGate(t *testing.T) {
 	splitmix := func(x *uint64) uint64 {
 		*x += 0x9E3779B97F4A7C15
 		z := *x
@@ -33,6 +28,7 @@ func TestProbe_HonestSupermajorityNeverStrandedThroughGate(t *testing.T) {
 	}
 	seed := uint64(0xC0FFEE)
 	cases := 0
+	shortStrict := 0
 	for iter := 0; iter < 6000; iter++ {
 		n := int(splitmix(&seed)%127) + 2 // [2,128]
 		sMin := types.MinShareBudgetPerMember * n
@@ -100,33 +96,27 @@ func TestProbe_HonestSupermajorityNeverStrandedThroughGate(t *testing.T) {
 		}
 		cases++
 
-		// (a) point-count liveness: the online >2/3 set holds >= t points.
-		if onlinePts < tThr {
-			t.Fatalf("LIVENESS(points): n=%d S=%d epoch=%d online stake %d/%d (>2/3) holds %d < t=%d",
-				n, S, epoch, onlineStake, total, onlinePts, tThr)
-		}
-		// (b) the REAL redundant gate must ALSO pass for the guaranteed-liveness set.
+		// The REAL redundant gate must pass for any >2/3 online stake set.
 		if !keeper.DecryptingSetMeetsStake(members, present) {
 			t.Fatalf("LIVENESS(gate): n=%d S=%d epoch=%d online stake %d/%d (>2/3) FAILS DecryptingSetMeetsStake",
 				n, S, epoch, onlineStake, total)
 		}
+		if onlinePts < tThr {
+			shortStrict++
+		}
 	}
-	t.Logf("checked %d honest-supermajority cases through BOTH the point-count threshold and the stake gate; none stranded", cases)
+	t.Logf("checked %d honest-supermajority cases through the stake gate; %d were intentionally below strict point threshold", cases, shortStrict)
 }
 
-// PROBE 5 — the redundant stake gate must never bind ABOVE the guaranteed-liveness set, but it
-// is DOCUMENTED to possibly bind above the crypto bar for sets in (bar, 1/2]. This probe just
-// records, informationally, how often a set that HOLDS >= t points is nonetheless denied by the
-// strict-majority gate (a bounded deferral, not a strand) — to confirm it only ever affects sets
-// BELOW a stake majority (never the >2/3 liveness set, which PROBE 4 covers).
-func TestProbe_StakeGateBindsOnlyBelowMajority(t *testing.T) {
-	// A crafted whale-just-under-half + others: a set holding >= t points but < 1/2 stake.
+// PROBE 5 — the redundant stake gate must deny sets at or below 2/3 stake even when they hold
+// enough points, and pass only above the two-thirds stake boundary.
+func TestProbe_StakeGateRequiresMoreThanTwoThirds(t *testing.T) {
+	// A crafted whale-just-under-half + others: a set holding many points but < 2/3 stake.
 	// weights: 3 members [49, 26, 25] * scale, S large.
 	weights := []int64{49, 26, 25}
 	S := 8 * len(weights) * 32 // comfortably >= 8n
 	members := keeper.AllocateEvalPoints(mkMembers(weights), S, 1)
-	// Present = the two smaller members (26+25=51 > 49? yes 51>49 => that's a majority). Use
-	// the whale alone (49) which is < 1/2 of 100 => gate must DENY even if it holds >= t points.
+	// Use the whale alone (49/100): the gate must DENY even if it holds many points.
 	var whaleIdx uint64
 	for _, m := range members {
 		if m.Weight.Int64() == 49 {
@@ -141,22 +131,35 @@ func TestProbe_StakeGateBindsOnlyBelowMajority(t *testing.T) {
 		}
 	}
 	gate := keeper.DecryptingSetMeetsStake(members, present)
-	t.Logf("whale 49/100 (< 1/2) holds %d/%d points, t=%d, gate_passes=%v (must be false: <1/2 stake)",
+	t.Logf("whale 49/100 (< 2/3) holds %d/%d points, t=%d, gate_passes=%v (must be false: <=2/3 stake)",
 		whalePts, S, tNew(S, len(members)), gate)
 	if gate {
-		t.Fatalf("stake gate passed for a <1/2-stake set — the redundant guard is not binding")
+		t.Fatalf("stake gate passed for a <=2/3-stake set")
 	}
-	// And a strict majority (whale+one) must pass.
-	var anyOther uint64
+	// Whale + any other is 75/100 or 74/100 and must pass.
 	for _, m := range members {
 		if m.Index != whaleIdx {
-			anyOther = m.Index
+			present[m.Index] = true
 			break
 		}
 	}
-	present[anyOther] = true
 	if !keeper.DecryptingSetMeetsStake(members, present) {
-		t.Fatalf("stake gate denied a strict-majority set")
+		t.Fatalf("stake gate denied a >2/3-stake set")
 	}
-	_ = sdkmath.NewInt(0)
+
+	// Exactly 2/3 stake must still be denied.
+	equalMembers := keeper.AllocateEvalPoints(mkMembers([]int64{33, 33, 33}), S, 2)
+	exactTwoThirds := map[uint64]bool{
+		equalMembers[0].Index: true,
+		equalMembers[1].Index: true,
+	}
+	if keeper.DecryptingSetMeetsStake(equalMembers, exactTwoThirds) {
+		t.Fatalf("stake gate passed for exactly 2/3 stake")
+	}
+	for _, m := range members {
+		present[m.Index] = true
+	}
+	if !keeper.DecryptingSetMeetsStake(members, present) {
+		t.Fatalf("stake gate denied the full committee")
+	}
 }

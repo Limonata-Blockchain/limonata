@@ -93,7 +93,7 @@ func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 // "defers + heals" guarantee is intact, all-honest, no attacker. Cycle-8 hard-STRANDED the tail here.
 func TestC9_BurstOfManyCiphertexts_NoTailStrand(t *testing.T) {
 	c := c7Committee(t)
-	servers := []string{"honest_A", "honest_B", "honest_C"} // 24 pts >= t=18: enough to decrypt any ct
+	servers := []string{"honest_A", "honest_B", "honest_C"} // 24 pts >= t=22: enough to decrypt any ct
 	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap()      // 256
 	const K = 40                                            // > grace(32): cycle-8 forced a tail strand here
 

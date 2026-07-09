@@ -21,10 +21,8 @@ import (
 //
 // Post-fix the search is constrained to configs that can actually EXIST (Params.Validate +
 // the runtime committee clamp enforce S >= MinShareBudgetPerMember*n at every round-open)
-// and asserts the PROVEN bar: every reconstructing coalition holds STRICTLY more than the
-// 1/3 Byzantine stake bound (the honest claim that replaced ">2/3": f >= (t-n+1)/S
-// > 2/3 - 2n/S >= 5/12 at the enforced coupling — see keeper.stakeThreshold). The observed
-// minimum is logged so the documented bar stays measurable.
+// and asserts every reconstructing coalition holds STRICTLY more than the 1/3 Byzantine
+// stake bound. The observed minimum is logged so the documented bar stays measurable.
 func TestReg_M1_MinStakeToReachThreshold_AboveByzantineBound(t *testing.T) {
 	type worst struct {
 		desc              string
@@ -49,7 +47,7 @@ func TestReg_M1_MinStakeToReachThreshold_AboveByzantineBound(t *testing.T) {
 				pts += np
 			}
 		}
-		thr := (2*tot)/3 - n + 1 // mirrors keeper.stakeThreshold (weighted)
+		thr := tNew(tot, n)
 		if pts < thr {
 			return
 		}

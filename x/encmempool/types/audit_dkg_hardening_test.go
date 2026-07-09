@@ -2,8 +2,13 @@ package types
 
 import (
 	"bytes"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"testing"
+
+	sdkmath "cosmossdk.io/math"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+
+	"github.com/cosmos/evm/x/encmempool/threshold"
 )
 
 // Finding 2: the stake-drift / epoch-cadence rekey triggers must ship ON by default so
@@ -92,10 +97,118 @@ func TestCommitteeShareBudgetCoupledToMaxTxBytes(t *testing.T) {
 	}
 	// max committee (128) + max S (1024): a >2/3 aggregate ~79 MB >> 20 MB floor -> rejected.
 	p = base()
+	p.DkgMaxMembers = 64
+	p.DkgShareBudget = 512
+	if err := p.Validate(); err == nil {
+		t.Fatal("a committee*share-budget that fits raw MaxTxBytes but exceeds the proposer trim budget must be rejected")
+	}
+	// max committee (128) + max S (1024): a >2/3 aggregate ~79 MB >> 20 MB floor -> rejected.
+	p = base()
 	p.DkgMaxMembers = 128
 	p.DkgShareBudget = 1024
 	if err := p.Validate(); err == nil {
 		t.Fatal("a committee*share-budget whose 2/3 aggregate exceeds MaxTxBytes must be rejected")
+	}
+}
+
+func TestGenesisValidatesImportedDKGState(t *testing.T) {
+	pt := func(x byte) []byte {
+		return secp256k1.PrivKeyFromBytes([]byte{x}).PubKey().SerializeCompressed()
+	}
+	valid := func() GenesisState {
+		nonce := make([]byte, threshold.NonceSize)
+		round := DkgRound{
+			Epoch: 1, OpenHeight: 10, DealDeadline: 12, ComplaintDeadline: 14,
+			Threshold: 3, Status: DkgStatusActive, Attempt: 1,
+			Members: []RoundMember{
+				{Index: 1, OperatorAddr: "op1", EncPubKey: pt(1), Weight: sdkmath.NewInt(2), Weighted: true, EvalPoints: []uint64{1, 2}},
+				{Index: 2, OperatorAddr: "op2", EncPubKey: pt(2), Weight: sdkmath.NewInt(2), Weighted: true, EvalPoints: []uint64{3, 4}},
+			},
+		}
+		return GenesisState{
+			Params:       DefaultParams(),
+			DkgRounds:    []DkgRound{round},
+			ActiveKeys:   []ActiveThresholdKey{{Epoch: 1, Pub: pt(3), PublicCommitments: [][]byte{pt(4), pt(5), pt(6)}, Threshold: 3, Qual: []uint64{1, 2}}},
+			CurrentEpoch: 1,
+			ActiveEpoch:  1,
+			Dealings: []Dealing{{
+				Epoch: 1, DealerIndex: 1, Dealer: "op1",
+				Commitments: [][]byte{pt(7), pt(8), pt(9)},
+				EncShares: []DkgStoredEncShare{
+					{MemberIndex: 1, A: pt(10), Nonce: nonce, Body: []byte{1}},
+					{MemberIndex: 2, A: pt(11), Nonce: nonce, Body: []byte{1}},
+					{MemberIndex: 3, A: pt(12), Nonce: nonce, Body: []byte{1}},
+					{MemberIndex: 4, A: pt(13), Nonce: nonce, Body: []byte{1}},
+				},
+			}},
+			EncKeys: []EncKeyReg{{Operator: "op1", Key: pt(1)}, {Operator: "op2", Key: pt(2)}},
+		}
+	}
+
+	if err := valid().Validate(); err != nil {
+		t.Fatalf("coherent imported DKG state must validate: %v", err)
+	}
+
+	gs := valid()
+	gs.DkgRounds[0].Members[1].EvalPoints = []uint64{2, 4}
+	if err := gs.Validate(); err == nil {
+		t.Fatal("duplicate imported eval points must be rejected")
+	}
+
+	gs = valid()
+	gs.Dealings[0].EncShares = gs.Dealings[0].EncShares[:3]
+	if err := gs.Validate(); err == nil {
+		t.Fatal("dealing missing an eval-point share must be rejected")
+	}
+
+	gs = valid()
+	gs.ActiveKeys[0].Pub = []byte("not-a-point")
+	if err := gs.Validate(); err == nil {
+		t.Fatal("active key with malformed pubkey must be rejected")
+	}
+
+	gs = valid()
+	gs.ActiveEpoch = 2
+	if err := gs.Validate(); err == nil {
+		t.Fatal("active_epoch without a matching round/key must be rejected")
+	}
+
+	gs = valid()
+	gs.DkgRounds[0].Threshold = 2
+	gs.ActiveKeys[0].Threshold = 2
+	gs.ActiveKeys[0].PublicCommitments = [][]byte{pt(4), pt(5)}
+	if err := gs.Validate(); err == nil {
+		t.Fatal("weighted imported round with threshold below strict >2/3 must be rejected")
+	}
+
+	gs = valid()
+	gs.DkgRounds[0].Members[0].Weight = sdkmath.ZeroInt()
+	if err := gs.Validate(); err == nil {
+		t.Fatal("weighted imported round with eval points but non-positive weight must be rejected")
+	}
+
+	gs = valid()
+	gs.EncKeys = append(gs.EncKeys, EncKeyReg{Operator: "op1", Key: pt(14)})
+	if err := gs.Validate(); err == nil {
+		t.Fatal("duplicate imported enc-key operators must be rejected")
+	}
+
+	gs = valid()
+	gs.EncKeys = append(gs.EncKeys, EncKeyReg{Operator: "op3", Key: pt(1)})
+	if err := gs.Validate(); err == nil {
+		t.Fatal("duplicate imported enc-key material must be rejected")
+	}
+
+	gs = valid()
+	nonce := make([]byte, threshold.NonceSize)
+	gs.EncSeq = 2
+	gs.EncTxs = []EncTx{{DecryptHeight: 20, Seq: 1, Submitter: "alice", A: pt(14), Nonce: nonce, Body: []byte{1}, Epoch: 1}}
+	gs.EncShares = []EncShare{
+		{Keyper: "op1", DecryptHeight: 20, Seq: 1, Index: 1, D: pt(15)},
+		{Keyper: "op2", DecryptHeight: 20, Seq: 1, Index: 1, D: pt(16)},
+	}
+	if err := gs.Validate(); err == nil {
+		t.Fatal("duplicate imported decrypt-share slots must be rejected")
 	}
 }
 

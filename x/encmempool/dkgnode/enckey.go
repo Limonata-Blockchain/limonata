@@ -234,14 +234,9 @@ type PoisonReport struct {
 // POST-finalization at derive time, so a returning victim can ATTRIBUTE which QUAL dealer poisoned it
 // (the caller logs it for operator action) instead of just seeing anonymous strands.
 //
-// It is detection + attribution ONLY: it does not change the derived shares (the aggregate is fixed
-// by QUAL and cannot be locally repaired) and safety never depended on it (the on-chain DLEQ already
-// drops the wrong partial, never corrupting decryption; the health rekey recovers liveness). Turning
-// a post-final detection into an AUTOMATIC exclusion->rekey - by accepting the existing framing-
-// resistant justified complaint (SharedPoint + DLEQ) POST-window and routing it to open a fresh epoch
-// - is Byzantine-safe (a false complaint against an honest dealer fails the on-chain VerifyShare, so
-// it cannot grief) but is a consensus-gating + rekey change that needs its own review cycle; it is the
-// scoped follow-up. Node-local (ExtendVote): touches no committed state.
+// The app layer turns these detections into proof-bearing post-final poison reports. A valid report
+// cannot repair the already-installed aggregate key, but it deterministically trips the active epoch's
+// recovery rekey so users do not have to wait for repeated stranded ciphertexts.
 func DetectPoisonedDealers(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []uint64, dealings map[uint64]types.Dealing) []PoisonReport {
 	var reports []PoisonReport
 	for _, p := range myEvalPoints {

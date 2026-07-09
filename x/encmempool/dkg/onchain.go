@@ -72,15 +72,11 @@ func FinalizePublic(members []uint64, t int, dealings []PublicDealing, disqualif
 //     bounded budget). nil => every member weighs 1 (the unweighted path).
 //   - minQualWeight is the minimum TOTAL evaluation-point weight the QUALified dealers must
 //     collectively represent for the round to succeed. On the transparent path this is set to t,
-//     so a round finalizes only when dealers owning >= t points participated (since points are
-//     stake-proportional, that is a coalition above the proven decrypt bar — > 1/3 of committee
-//     stake, ~2/3 - 2n/S in general; see keeper.stakeThreshold) — the correct robustness/secrecy
-//     gate (msk is then guaranteed to mix in honest entropy, and enough of the committee dealt
-//     to reconstruct).
+//     so a round finalizes only when dealers owning >= t points participated.
 //
 // Decoupling degree (the poly / reconstruction threshold, which can exceed the dealer COUNT once
 // points are stake-weighted) from the QUAL participation metric is exactly what lets a
-// t = floor(2S/3)-n+1 threshold coexist with a committee of only n<=128 dealers.
+// a point-budget threshold coexist with a committee of only n<=128 dealers.
 func FinalizePublicWeighted(members []uint64, degree int, dealings []PublicDealing, disqualified []uint64, weightOf map[uint64]int, minQualWeight int) (*PublicResult, error) {
 	if degree < 1 {
 		return nil, fmt.Errorf("invalid threshold t=%d (must be >= 1)", degree)
@@ -145,6 +141,9 @@ func FinalizePublicWeighted(members []uint64, degree int, dealings []PublicDeali
 	vbz := make([][]byte, degree)
 	for j := range V {
 		vbz[j] = compressCopy(&V[j])
+		if !ValidCompressedPoint(vbz[j]) {
+			return nil, fmt.Errorf("DKG failed: aggregate commitment %d is not a valid curve point", j)
+		}
 	}
 	return &PublicResult{Pub: vbz[0], PublicCommitments: vbz, Qual: qual, Disqualified: disqOut}, nil
 }

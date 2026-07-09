@@ -65,7 +65,7 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	// 2. Execute matured reveals in deterministic order.
 	order := uint64(0)
 	for _, pr := range pending {
-		if cur < pr.CommitHeight+p.RevealDelay {
+		if cur < addSat(pr.CommitHeight, p.RevealDelay) {
 			continue // not matured (the reveal gate already enforces this; defensive)
 		}
 		ctx.EventManager().EmitEvent(sdk.NewEvent(
@@ -84,7 +84,7 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	if p.MaxRevealWindow > 0 {
 		var stale []types.Commit
 		k.IterateCommits(ctx, func(c types.Commit) {
-			if c.Height+p.MaxRevealWindow < cur {
+			if addSat(c.Height, p.MaxRevealWindow) < cur {
 				stale = append(stale, c)
 			}
 		})
@@ -107,6 +107,12 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	//    releaseEncTx path (releasing every ref-count and pruning the pinned epoch). The
 	//    O(1) count guard keeps this zero-overhead in the default/dormant config.
 	if p.EncEnabled && (p.Threshold > 0 || p.DkgEnabled) {
+		// Transparent-DKG runtime unavailability is an admission gate, not an immediate
+		// in-flight drop. SubmitEncrypted rejects new ciphertexts while vote extensions
+		// are inactive or the injected commit cannot fit, so the already-accepted set is
+		// finite. Let those entries follow the normal maturity/grace path: decrypt if
+		// shares already exist, defer within grace if the outage is temporary, and release
+		// loudly after grace if it never heals.
 		k.decryptMatured(ctx, cur, p)
 	} else if k.GetGlobalEncCount(ctx) > 0 {
 		k.drainDisabledEncTx(ctx, cur, p)
@@ -575,19 +581,10 @@ func (k Keeper) recoverSharedSecret(ctx sdk.Context, p types.Params, e types.Enc
 		if len(shares) < need {
 			return nil, need, errNotEnoughShares
 		}
-		// HIGH-3 DEFENSE-IN-DEPTH: the stake weighting is now enforced by the CRYPTOGRAPHY —
-		// each member holds Shamir shares only at its stake-proportional evaluation points, and
-		// the threshold need = floor(2S/3)-n+1 is set against the point budget, so the
-		// `len(shares) < need` gate above ALREADY means a decrypting set holds > 1/3 of the
-		// snapshotted committee stake (>= 2/3 - 2n/S in general; ~54.7% at live defaults — the
-		// PROVEN bar, see stakeThreshold; a <=1/3-stake coalition holds < need points and cannot
-		// reconstruct even off-chain). This residual stake gate is kept as a redundant guard on
-		// the ON-CHAIN combine: map each present evaluation point to its owning member and
-		// require those members to hold a strict majority of committee stake. In worst-case
-		// rounding it can bind above the crypto bar, but it never blocks the guaranteed
-		// liveness case (an online >2/3-stake set is also a strict majority) and a rejection is
-		// a bounded deferral (errStakeMinority), not a silent drop. It is a no-op on the
-		// unweighted legacy path (no recorded weights => returns true).
+		// HIGH-3 DEFENSE-IN-DEPTH: the crypto threshold is now a strict >2/3 of eval points.
+		// Map each present evaluation point to its owning member and require those members to
+		// also hold >2/3 of snapshotted stake, so rounded apportionment cannot make on-chain
+		// decryption succeed with a <=2/3-stake set.
 		if round, ok := k.GetDkgRound(ctx, e.Epoch); ok && len(round.Members) > 0 {
 			memberPresent := make(map[uint64]bool, len(shares))
 			for _, s := range shares {

@@ -26,13 +26,14 @@ import (
 // OFF-CHAIN (an anti-MEV / front-running break that no on-chain gate can stop). This file
 // bakes stake into the CRYPTOGRAPHY instead: each member is allocated a number of distinct
 // Shamir evaluation points PROPORTIONAL to its stake, within a fixed total budget S, and the
-// threshold t is chosen from S and the committee size n so that (see stakeThreshold):
+// threshold t is chosen from S so that (see stakeThreshold):
 //
-//	(SAFETY)   any coalition holding <= 1/3 of the snapshotted committee stake holds < t
-//	           points — on AND off chain — whenever S >= 6n - 1 (validation enforces the
-//	           stronger S >= MinShareBudgetPerMember*n = 8n);
-//	(LIVENESS) any ONLINE set holding > 2/3 of the snapshotted committee stake holds >= t
-//	           points, for ALL n and ALL stake distributions (no residual band).
+//	(SAFETY)   a coalition needs > 2/3 of the evaluation-point domain to reconstruct.
+//	           SubmitEncrypted additionally fails closed if apportionment gives any
+//	           <=2/3-stake coalition enough points to meet that threshold.
+//	(LIVENESS) an ONLINE set must own >= t points. This is intentionally stricter than
+//	           the old liveness-maximizing threshold; privacy wins over decrypting with a
+//	           sub-2/3 coalition.
 //
 // DETERMINISM: allocation is a pure integer function of the snapshotted per-member stake,
 // the budget, and the epoch number (largest-remainder apportionment; remainder ties broken
@@ -63,8 +64,7 @@ import (
 //     it decouples a seat count from stake — a swarm of dust validators could then accumulate
 //     seats out of proportion to stake and defeat the very bound this feature establishes.
 //   - Largest-remainder keeps Σ = S exactly (so a threshold expressed against S is exact) and
-//     bounds every coalition C's allocation to (quota(C) - |C|, quota(C) + min(|C|, n-1)] —
-//     the slop bounds stakeThreshold's safety/liveness proof is built on.
+//     bounds every coalition C's allocation to (quota(C) - |C|, quota(C) + min(|C|, n-1)].
 //   - Remainder-seat ties (equal fractional remainders) are broken by stake DESC first (more
 //     stake => strictly-no-worse treatment), then by sha256(epoch || operator) ASC. The hash
 //     key is deterministic and byte-identical across nodes (pure function of committed
@@ -182,67 +182,20 @@ func weightOrZero(w sdkmath.Int) sdkmath.Int {
 }
 
 // stakeThreshold returns the reconstruction threshold t for a round with the given
-// (already-allocated) members, plus whether the safety floor had to DEGRADE liveness
-// because the S >= 6n - 1 coupling was violated (unreachable through validated params +
-// the committee clamp; pure defense-in-depth).
+// already-allocated members.
 //
-// WEIGHTED committee (S = total eval points, n = committee size):
-//
-//	t = floor(2S/3) - n + 1
-//
-// WORST-CASE HAMILTON APPORTIONMENT BOUNDS (the whole proof rests on these two):
-// for any coalition C with exact stake fraction f (of the snapshotted committee total),
-// quota(C) = f*S, and largest-remainder gives every member floor(q_i) or floor(q_i)+1
-// with exactly R = S - Σ_all floor(q_i) <= n-1 "+1" seats total, so
-//
-//	points(C) >= Σ_{i∈C} floor(q_i) >  f*S - |C|          (each floor loses < 1)
-//	points(C) <= Σ_{i∈C} floor(q_i) + min(|C|, R)
-//	          <= floor(f*S) + min(|C|, n-1)               (Σ floors <= floor of Σ)
-//
-// (SAFETY — confidentiality at the Byzantine bound) f <= 1/3 and |C| <= n-1 (some member
-// holds the other >= 2/3) give points(C) <= floor(S/3) + n - 1. This is < t iff
-// floor(2S/3) - floor(S/3) >= 2n - 1, which holds whenever S >= 6n - 1; the validated
-// coupling S >= 8n (types.MinShareBudgetPerMember) therefore guarantees it with a margin
-// of >= (2n+1)/3 points. So a <=1/3-stake coalition can NEVER assemble t points — on chain
-// or off — closing HIGH-3 without the cycle-3 H-A config hole.
-//
-// (LIVENESS — the cycle-3 H-B fix) any ONLINE set O with stake fraction f > 2/3 satisfies
-// points(O) > (2/3)S - |O| >= (2/3)S - n, and points are integers, so
-// points(O) >= floor(2S/3) - n + 1 = t EXACTLY — for ALL n, ALL stake distributions, and
-// ALL offline patterns whose online remainder still holds > 2/3 of the SNAPSHOTTED
-// committee stake. There is NO residual liveness band: t is the LARGEST threshold with
-// this guarantee, so the choice maximizes confidentiality subject to guaranteed liveness.
-// (The previous t = floor(2S/3)+1 demanded points the rounding slop could deny an honest
-// supermajority — a 66.7%..~72.9% dead band at S=256, n=16 — and the matured ciphertext
-// was then silently dropped; see decryptMatured for the non-silent deferral counterpart.)
-//
-// (REAL DECRYPT BAR — cycle-3 M-1, stated honestly) the ">2/3 stake to decrypt" claim is
-// NOT achievable together with guaranteed >2/3-liveness, because rounding slop is +-n
-// points. The PROVEN bar: any coalition that reaches t points holds stake fraction
-//
-//	f >= (t - n + 1)/S = (floor(2S/3) - 2n + 2)/S  >  2/3 - 2n/S
-//	  >= 2/3 - 2/MinShareBudgetPerMember = 5/12 (~41.7%) under the enforced S >= 8n,
-//	  and ALWAYS > 1/3 (the safety inequality above);
-//	  at the live defaults (S=256, n<=16) f >= 140/256 ~ 54.7%.
-//
-// Every "supermajority to decrypt" comment/doc claim is replaced by this bar. The on-chain
-// combine additionally keeps the strict-stake-majority gate (DecryptingSetMeetsStake) as
-// defense-in-depth; in worst-case rounding that gate can bind ABOVE the crypto bar for
-// on-chain decryption, but it can never block the guaranteed liveness case (an online
-// >2/3-stake set is also a strict majority).
+// WEIGHTED committee (S = total eval points): t = floor(2S/3)+1. The old
+// liveness-maximizing t = floor(2S/3)-n+1 let ~55% stake reconstruct at the default
+// S=256,n=16 topology. That was not a 2/3 confidentiality threshold. This stricter
+// threshold makes the crypto bar a strict >2/3 of evaluation points; SubmitEncrypted
+// then fails closed for any active apportionment where a <=2/3-stake coalition can
+// still own enough rounded points to reconstruct.
 //
 // UNWEIGHTED committee (legacy/declared or the all-zero-weight fallback, S == n): the
 // original count supermajority t = floor(2n/3) + 1, byte-identical to the pre-cycle-3
 // behaviour.
-//
-// DEGRADED clamp (defense-in-depth only): if a weighted round somehow opens with
-// S < 6n - 1 (impossible via Params.Validate + the TransparentMembers committee clamp),
-// t is raised to the safety floor min(S, floor(S/3)+n+1) — CONFIDENTIALITY IS PREFERRED
-// OVER LIVENESS on an invalid config — and the caller emits a loud event. Deterministic
-// on every node either way; never a halt or fork.
 func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
 	S := types.TotalEvalPoints(members)
-	n := len(members)
 	if S < 1 {
 		return 1, false
 	}
@@ -261,27 +214,19 @@ func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
 		}
 		return uint32(tt), false
 	}
-	tt := (2*S)/3 - n + 1
-	if safetyFloor := S/3 + n + 1; tt < safetyFloor {
-		// S < ~6n: no threshold satisfies both inequalities. Prefer safety.
-		tt = safetyFloor
-		degraded = true
-	}
+	tt := (2*S)/3 + 1
 	if tt > S {
 		tt = S
 	}
 	if tt < 1 {
 		tt = 1
 	}
-	return uint32(tt), degraded
+	return uint32(tt), false
 }
 
-// CommitteeConcentrationBreached reports whether a single operator in the epoch's committee owns
-// >= the reconstruction threshold of Shamir eval-points, i.e. it can reconstruct the decryption key
-// ALONE - so the encrypted mempool provides NO confidentiality against it (round-9 #4, the "whale"
-// topology). SubmitEncrypted uses this as a FAIL-CLOSED gate: it refuses "confidential" submissions
-// in that state rather than offer false confidentiality. This does NOT create confidentiality
-// (impossible against a legitimately key-holding whale); only decentralization does.
+// CommitteeConcentrationBreached reports whether the active epoch fails the confidentiality topology:
+// either one operator alone owns >= t points, or any coalition with <=2/3 of the snapshotted stake owns
+// >= t points after apportionment. SubmitEncrypted uses this as a fail-closed gate.
 //
 // Deterministic: a pure function of the committed DkgRound + ActiveThresholdKey. Legacy/unweighted
 // committees (Weighted==false, no recorded stake) are EXEMPT - they are not the stake-topology case
@@ -304,6 +249,63 @@ func (k Keeper) CommitteeConcentrationBreached(ctx context.Context, epoch uint64
 		}
 		if uint32(len(m.OwnedEvalPoints())) >= ak.Threshold {
 			return true // this operator alone holds >= t points -> decrypts alone
+		}
+	}
+	if k.coalitionBelowTwoThirdsCanDecrypt(round.Members, ak.Threshold) {
+		return true
+	}
+	return false
+}
+
+func (k Keeper) coalitionBelowTwoThirdsCanDecrypt(members []types.RoundMember, threshold uint32) bool {
+	if threshold == 0 {
+		return false
+	}
+	totalStake := sdkmath.ZeroInt()
+	S := 0
+	for _, m := range members {
+		if !m.Weighted {
+			return false
+		}
+		totalStake = totalStake.Add(weightOrZero(m.Weight))
+		S += len(m.OwnedEvalPoints())
+	}
+	if !totalStake.IsPositive() || S == 0 {
+		return false
+	}
+	target := int(threshold)
+	if target > S {
+		return false
+	}
+	ok := make([]bool, S+1)
+	dp := make([]sdkmath.Int, S+1) // minimum stake needed to own exactly this many capped points
+	ok[0] = true
+	dp[0] = sdkmath.ZeroInt()
+	for _, m := range members {
+		pts := len(m.OwnedEvalPoints())
+		if pts == 0 {
+			continue
+		}
+		w := weightOrZero(m.Weight)
+		for have := S; have >= 0; have-- {
+			if !ok[have] {
+				continue
+			}
+			next := have + pts
+			if next > S {
+				next = S
+			}
+			cand := dp[have].Add(w)
+			if !ok[next] || dp[next].GT(cand) {
+				ok[next] = true
+				dp[next] = cand
+			}
+		}
+	}
+	limit := totalStake.MulRaw(2)
+	for pts := target; pts <= S; pts++ {
+		if ok[pts] && !dp[pts].MulRaw(3).GT(limit) {
+			return true
 		}
 	}
 	return false

@@ -187,11 +187,11 @@ func (k Keeper) releaseEncTx(ctx sdk.Context, e types.EncTx) {
 	k.refundBond(ctx, e) // round-9 #1: return the escrowed anti-sybil bond, whatever the release cause
 }
 
-// refundBond returns the anti-sybil bond escrowed for an EncTx (round-9 #1) IN FULL to its
-// submitter. Called from releaseEncTx, the SINGLE choke point every EncTx removal passes through, so
-// a matured decrypt AND a last-resort drop both refund. It returns exactly the amount stamped on the
-// EncTx (immune to a later param change), and the module account always holds it (escrowed at submit),
-// so the transfer cannot fail on funds. Deterministic (bank sends + committed EncTx fields).
+// refundBond releases the anti-sybil bond escrowed for an EncTx: burn the stamped burn portion and
+// refund the remainder. Called from releaseEncTx, the SINGLE choke point every EncTx removal passes
+// through, so matured decrypts and last-resort drops use identical accounting. It uses exactly the
+// amounts stamped on the EncTx (immune to later param changes), and the module account holds them from
+// submit time, so the transfer cannot fail on funds. Deterministic (bank sends + committed EncTx fields).
 func (k Keeper) refundBond(ctx sdk.Context, e types.EncTx) {
 	if e.Bond == 0 || k.bankKeeper == nil {
 		return
@@ -376,6 +376,13 @@ func (k Keeper) resetDecryptStrandStreak(ctx context.Context, epoch uint64) {
 	_ = k.store(ctx).Delete(decryptStrandStreakKey(epoch))
 }
 
+func (k Keeper) forceDecryptHealthRekey(ctx context.Context, epoch uint64) {
+	if k.GetDecryptStrandStreak(ctx, epoch) >= decryptHealthStrandThreshold {
+		return
+	}
+	_ = k.store(ctx).Set(decryptStrandStreakKey(epoch), u64(decryptHealthStrandThreshold))
+}
+
 func (k Keeper) decGlobalEncCount(ctx context.Context) {
 	c := k.GetGlobalEncCount(ctx)
 	if c > 0 {
@@ -406,6 +413,11 @@ func (k Keeper) incSubmitterEncCount(ctx context.Context, submitter string) {
 // sustainable" clause). Final sizing + a sybil price on the submitter are tuned against a live drain;
 // this const is the safe always-on backstop.
 const maxEncSubmitsPerBlockPerSubmitter = 4
+
+// maxEncSubmitsPerBlockGlobal is the GLOBAL per-block encrypted-submit admission cap. The per-submitter
+// cap is still useful fairness, but it is sybilable; this cap bounds total ciphertext arrival before it
+// can translate into sustained DKG share-verification and decrypt work.
+const maxEncSubmitsPerBlockGlobal = maxDeferredDecryptsPerBlock
 
 // maxCiphertextBodyBytes caps the GCM-sealed ciphertext body at ingress (external-review #2). The plaintext
 // is a single anti-MEV transaction; 16 KiB is generous for one (a swap/trade is a few hundred bytes) while
@@ -475,6 +487,10 @@ func encSubmitRateKey(height uint64, submitter string) []byte {
 	return concat(types.EncSubmitRatePrefix, u64(height), []byte(submitter))
 }
 
+func encSubmitGlobalRateKey(height uint64) []byte {
+	return concat(types.EncSubmitGlobalRatePrefix, u64(height))
+}
+
 // maxRateGCPerBlock bounds how many stale submit-rate entries BeginBlock reclaims per block; the entries
 // sort height-ascending so the oldest (stale) ones are reclaimed first and the backlog drains steadily.
 // Set above the realistic per-block distinct-submitter inflow (a submit costs base gas, so even a
@@ -502,28 +518,47 @@ func (k Keeper) bumpEncSubmitsThisBlock(ctx context.Context, submitter string, h
 	return cnt
 }
 
+func (k Keeper) bumpGlobalEncSubmitsThisBlock(ctx context.Context, height uint64) uint64 {
+	key := encSubmitGlobalRateKey(height)
+	bz, _ := k.store(ctx).Get(key)
+	var cnt uint64
+	if len(bz) == 8 {
+		cnt = binary.BigEndian.Uint64(bz)
+	}
+	cnt++
+	_ = k.store(ctx).Set(key, u64(cnt))
+	return cnt
+}
+
 // gcEncSubmitRate reclaims up to maxRateGCPerBlock submit-rate entries from PAST blocks (height < current).
 // Entries sort height-ascending, so the scan visits the oldest first and stops the instant it reaches the
 // current height — bounded work per block that keeps the counter's KV footprint at ~one block's submitters.
 func (k Keeper) gcEncSubmitRate(ctx context.Context, currentHeight uint64) {
 	st := k.store(ctx)
-	it, err := st.Iterator(types.EncSubmitRatePrefix, prefixEnd(types.EncSubmitRatePrefix))
-	if err != nil {
-		return
-	}
-	pfxLen := len(types.EncSubmitRatePrefix)
 	var stale [][]byte
-	for ; it.Valid() && len(stale) < maxRateGCPerBlock; it.Next() {
-		key := it.Key()
-		if len(key) < pfxLen+8 {
-			continue
+	collect := func(prefix []byte, limit int) {
+		if len(stale) >= limit {
+			return
 		}
-		if binary.BigEndian.Uint64(key[pfxLen:pfxLen+8]) >= currentHeight {
-			break // reached current/future entries (height-ascending order) — nothing older remains
+		it, err := st.Iterator(prefix, prefixEnd(prefix))
+		if err != nil {
+			return
 		}
-		stale = append(stale, append([]byte(nil), key...))
+		pfxLen := len(prefix)
+		for ; it.Valid() && len(stale) < limit; it.Next() {
+			key := it.Key()
+			if len(key) < pfxLen+8 {
+				continue
+			}
+			if binary.BigEndian.Uint64(key[pfxLen:pfxLen+8]) >= currentHeight {
+				break // reached current/future entries (height-ascending order) — nothing older remains
+			}
+			stale = append(stale, append([]byte(nil), key...))
+		}
+		it.Close()
 	}
-	it.Close()
+	collect(types.EncSubmitRatePrefix, maxRateGCPerBlock)
+	collect(types.EncSubmitGlobalRatePrefix, maxRateGCPerBlock)
 	for _, key := range stale {
 		_ = st.Delete(key)
 	}

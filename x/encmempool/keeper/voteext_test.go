@@ -70,7 +70,8 @@ func transparentParams(thr uint32, maxMembers uint32) types.Params {
 	return types.Params{
 		RevealDelay: 1, MaxRevealWindow: 100, EncEnabled: true, EncExecEnabled: true, DecryptDelay: 2,
 		MaxInFlightEncTx: 32768, // finding 4: a live enc path requires a finite global admission cap
-		DkgEnabled:       true, DkgTransparent: true, DkgStartHeight: 1,
+		EncSubmitBond:    1, EncSubmitBondDenom: "stake", EncSubmitBondBurnBps: 10000,
+		DkgEnabled: true, DkgTransparent: true, DkgStartHeight: 1,
 		DkgDealWindow: 2, DkgComplaintWindow: 2, DkgThreshold: thr, DkgMaxMembers: maxMembers,
 		DkgRetryBackoff: 5, DkgMaxAttempts: 8, DkgMinRekeyGap: 0,
 		// finding 2 fail-closed guard: a live transparent path must arm a staleness-rekey
@@ -88,9 +89,9 @@ func transparentParams(thr uint32, maxMembers uint32) types.Params {
 }
 
 // transparentStakeThreshold is the stake-weighted reconstruction threshold
-// t = floor(2S/3) - n + 1 for the test share budget S=128 and the 3-member committees the
+// t = floor(2S/3)+1 for the test share budget S=128 and the 3-member committees the
 // voteext tests build, mirroring keeper.stakeThreshold for assertions.
-const transparentStakeThreshold = (2*128)/3 - 3 + 1 // = 83
+const transparentStakeThreshold = (2*128)/3 + 1 // = 86
 
 func idxByOp(round types.DkgRound, op string) uint64 {
 	for _, m := range round.Members {

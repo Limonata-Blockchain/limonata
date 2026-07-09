@@ -40,7 +40,7 @@ func c8StoredAt(c h3Committee, e types.EncTx) int {
 // SEVERAL in-flight ciphertexts of one epoch in ONE block, and the per-(operator,ciphertext) budget
 // lets EVERY one of them accrue >= t shares that block — not just the oldest.
 func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.T) {
-	c := c7Committee(t) // S=32, n=4, each owns 8 points, t=18
+	c := c7Committee(t) // S=32, n=4, each owns 8 points, t=22
 	tThresh := int(c.ak.Threshold)
 	ops := []string{"attacker", "honest_A", "honest_B", "honest_C"} // canonical (operator-sorted) order
 

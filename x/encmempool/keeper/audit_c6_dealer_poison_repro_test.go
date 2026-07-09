@@ -168,16 +168,15 @@ func setupPoisonRound(t *testing.T, poison bool, openable bool) (keeper.Keeper, 
 	return k, ctx, round, ak, mem
 }
 
-// TestRepro_ByzantineDealerInQual_BreaksLiveness_NoComplaintRecourse is the reproduction.
-func TestRepro_ByzantineDealerInQual_BreaksLiveness_NoComplaintRecourse(t *testing.T) {
-	// ---- CONTROL: all-honest committee decrypts fine with only op1+op2 online (16 >= t points).
+func TestRepro_ByzantineDealerInQual_BreaksLiveness_PostFinalReportRekeys(t *testing.T) {
+	// ---- CONTROL: all-honest committee decrypts fine with the full committee online.
 	{
 		k, ctx, round, ak, mem := setupPoisonRound(t, false, false)
 		t.Logf("[control] t(threshold)=%d  QUAL=%v  budget-points=%d", round.Threshold, ak.Qual, types.TotalEvalPoints(round.Members))
-		if err := tryDecrypt(t, k, ctx, round, ak, []member{mem[0], mem[1]}); err != nil {
-			t.Fatalf("[control] honest online supermajority MUST decrypt, got: %v", err)
+		if err := tryDecrypt(t, k, ctx, round, ak, mem); err != nil {
+			t.Fatalf("[control] full honest committee MUST decrypt, got: %v", err)
 		}
-		t.Logf("[control] op1+op2 (honest, online) decrypt OK -> liveness holds when all dealers honest")
+		t.Logf("[control] full honest committee decrypts when all dealers honest")
 	}
 
 	// ---- ATTACK variant 1 (unopenable): op3 deals valid commitments but well-shaped-but-
@@ -226,16 +225,62 @@ func TestRepro_ByzantineDealerInQual_BreaksLiveness_NoComplaintRecourse(t *testi
 		t.Logf("[attack-v2] openable-but-wrong poisoning also breaks decryption: %v", err)
 	}
 
-	// ---- NO RECOURSE: the transparent path has no complaint field on the VE and
-	// TransparentMembers never sets AccountAddr, so the legacy MsgDkgComplaint is unusable.
+	// ---- RECOURSE: a returning victim proves post-final poison and trips a recovery rekey.
 	{
-		_, _, round, _, _ := setupPoisonRound(t, true, false)
-		for _, m := range round.Members {
-			if m.AccountAddr != "" {
-				t.Fatalf("expected transparent members to carry NO AccountAddr (complaint msg unusable), got %q", m.AccountAddr)
-			}
+		k, ctx, round, ak, mem := setupPoisonRound(t, true, true)
+		report := buildPostFinalPoisonReport(t, k, ctx, round, ak, mem[0])
+		verifies := 0
+		if !k.IngestPoisonReportFromVE(ctx, round, mem[0].op, report, &verifies) {
+			t.Fatal("valid post-final poison report must be accepted")
 		}
-		t.Logf("[no-recourse] transparent RoundMembers carry no AccountAddr -> MsgDkgComplaint memberIndexByAccount==0 -> complaint always 'not a member'")
+		p := k.GetParams(ctx)
+		p.DkgMinRekeyGap = 1_000
+		if err := k.SetParams(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		k.SetLastRekeyHeight(ctx, round.ComplaintDeadline)
+		k.EndBlockDKG(ctx.WithBlockHeight(int64(round.ComplaintDeadline + 1)))
+		if cur := k.GetCurrentEpoch(ctx); cur <= round.Epoch {
+			t.Fatalf("poison report must bypass the flap gap and trigger a recovery rekey, current epoch=%d old=%d", cur, round.Epoch)
+		}
+	}
+}
+
+func buildPostFinalPoisonReport(t *testing.T, k keeper.Keeper, ctx sdk.Context, round types.DkgRound, ak types.ActiveThresholdKey, victim member) types.VoteExtComplaint {
+	t.Helper()
+	var victimPoints []uint64
+	victimIdx := idxByOp(round, victim.op)
+	for _, rm := range round.Members {
+		if rm.Index == victimIdx {
+			victimPoints = rm.OwnedEvalPoints()
+			break
+		}
+	}
+	dealings := map[uint64]types.Dealing{}
+	k.IterateDealings(ctx, round.Epoch, func(d types.Dealing) { dealings[d.DealerIndex] = d })
+	reports := dkgnode.DetectPoisonedDealers(victimPoints, victim.priv, ak.Qual, dealings)
+	if len(reports) == 0 {
+		t.Fatal("expected a poison report")
+	}
+	r := reports[0]
+	dealing := dealings[r.Dealer]
+	var enc *types.DkgStoredEncShare
+	for i := range dealing.EncShares {
+		if dealing.EncShares[i].MemberIndex == r.Point {
+			enc = &dealing.EncShares[i]
+			break
+		}
+	}
+	if enc == nil {
+		return types.VoteExtComplaint{Epoch: round.Epoch, Against: r.Dealer, EvalPoint: r.Point}
+	}
+	ds, proof, err := dkg.ProveDecryptShare(threshold.Share{Index: r.Point, Xi: victim.priv}, &threshold.Ciphertext{A: enc.A})
+	if err != nil {
+		t.Fatalf("prove poison report: %v", err)
+	}
+	return types.VoteExtComplaint{
+		Epoch: round.Epoch, Against: r.Dealer, EvalPoint: r.Point,
+		SharedPoint: ds.D, DleqProof: dkg.MarshalDLEQProof(proof),
 	}
 }
 

@@ -167,6 +167,7 @@ func (app *EVMD) dkgExtendVoteHandler() sdk.ExtendVoteHandler {
 
 		// Decryption shares for MATURED ciphertexts I can serve (never before decrypt_height).
 		ve.Shares = app.buildDecryptShares(ctx, ek, op)
+		ve.PoisonReports = app.buildDkgPoisonReports(ctx, ek, op)
 
 		// Justified complaints against QUAL-candidate dealers, ONLY inside the complaint window
 		// (after dealing closes, before finalize). The share-validity gate: I open each other
@@ -313,19 +314,87 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 	}
 	dealings := map[uint64]encmempooltypes.Dealing{}
 	k.IterateDealings(ctx, epoch, func(d encmempooltypes.Dealing) { dealings[d.DealerIndex] = d })
+	if reports := dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, ak.Qual, dealings); len(reports) > 0 {
+		for _, r := range reports {
+			ctx.Logger().Error("encmempool: DKG share poison detected (offline-victim residual); suppressing decrypt shares for this epoch until recovery rekey",
+				"epoch", epoch, "dealer", r.Dealer, "point", r.Point)
+		}
+		return &sharedCache{}
+	}
 	shares, err := dkgnode.DeriveShares(myPoints, ek.Priv, ak.Qual, dealings)
 	if err != nil {
 		return &sharedCache{}
 	}
-	// round-9 #2: post-finalization derive-time poison detection. If a dealer poisoned one of this
-	// node's points while the node was OFFLINE for the complaint window (so buildDkgComplaints never
-	// ran for it), attribute it here so the operator can act; the automatic health rekey still
-	// recovers liveness. Node-local (ExtendVote), no committed-state effect.
-	for _, r := range dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, ak.Qual, dealings) {
-		ctx.Logger().Error("encmempool: DKG share poison detected (offline-victim residual); your derived share for this point is compromised - the health rekey will recover, investigate this dealer",
-			"epoch", epoch, "dealer", r.Dealer, "point", r.Point)
-	}
 	return &sharedCache{ok: true, shares: shares}
+}
+
+func (app *EVMD) buildDkgPoisonReports(ctx sdk.Context, ek *dkgnode.EncKey, op string) []encmempooltypes.VoteExtComplaint {
+	k := app.EncMempoolKeeper
+	epoch := k.GetActiveEpoch(ctx)
+	if epoch == 0 {
+		return nil
+	}
+	round, ok := k.GetDkgRound(ctx, epoch)
+	if !ok || round.Status != encmempooltypes.DkgStatusActive {
+		return nil
+	}
+	myIdx := encmempooltypes.MemberIndexByOperator(round.Members, op)
+	if myIdx == 0 {
+		return nil
+	}
+	var myPoints []uint64
+	for _, m := range round.Members {
+		if m.Index == myIdx {
+			myPoints = m.OwnedEvalPoints()
+			break
+		}
+	}
+	if len(myPoints) == 0 {
+		return nil
+	}
+	ak, ok := k.GetActiveKey(ctx, epoch)
+	if !ok {
+		return nil
+	}
+	dealings := map[uint64]encmempooltypes.Dealing{}
+	k.IterateDealings(ctx, epoch, func(d encmempooltypes.Dealing) { dealings[d.DealerIndex] = d })
+	reports := dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, ak.Qual, dealings)
+	if len(reports) == 0 {
+		return nil
+	}
+	out := make([]encmempooltypes.VoteExtComplaint, 0, len(reports))
+	for _, r := range reports {
+		if len(out) >= len(round.Members) {
+			break
+		}
+		if k.GetComplaint(ctx, epoch, r.Dealer, myIdx) || k.HasComplaintRejected(ctx, epoch, r.Dealer, myIdx, r.Point) {
+			continue
+		}
+		dealing, ok := dealings[r.Dealer]
+		if !ok {
+			continue
+		}
+		var enc *encmempooltypes.DkgStoredEncShare
+		for i := range dealing.EncShares {
+			if dealing.EncShares[i].MemberIndex == r.Point {
+				enc = &dealing.EncShares[i]
+				break
+			}
+		}
+		if enc == nil {
+			out = append(out, encmempooltypes.VoteExtComplaint{Epoch: epoch, Against: r.Dealer, EvalPoint: r.Point})
+			continue
+		}
+		ds, proof, err := encmempooldkg.ProveDecryptShare(threshold.Share{Index: r.Point, Xi: ek.Priv}, &threshold.Ciphertext{A: enc.A})
+		if err != nil {
+			continue
+		}
+		out = append(out, encmempooltypes.VoteExtComplaint{
+			Epoch: epoch, Against: r.Dealer, EvalPoint: r.Point,
+			SharedPoint: ds.D, DleqProof: encmempooldkg.MarshalDLEQProof(proof),
+		})
+	}
+	return out
 }
 
 // buildDkgComplaints is the share-validity DETECTOR: for each OTHER dealer, it opens the enc-share
@@ -439,7 +508,7 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 		// decryption shares + <=committee complaints, all bounded by VoteExtShareCap(); reject
 		// (safely) well above that. Only a lenient local pre-filter — the authoritative bound is
 		// the keeper's deterministic PreBlock verify budget.
-		if bytes.Count(req.VoteExtension, veObjectOpen) > 8+3*p.VoteExtShareCap() {
+		if bytes.Count(req.VoteExtension, veObjectOpen) > 8+4*p.VoteExtShareCap() {
 			return reject, nil
 		}
 		ve, ok := encmempooltypes.UnmarshalVoteExtension(req.VoteExtension)
@@ -481,7 +550,7 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 		// complaint per OTHER dealer (<= committee size). VerifyVoteExtension otherwise bounds only bytes
 		// (VoteExtMaxBytes 1 MiB) — a peer could pack ~20k minimal complaints, each forcing membership /
 		// ownership / store-read work on the deterministic PreBlock complaint path. Refuse the padding early.
-		if len(ve.Complaints) > p.EffectiveMaxMembers() {
+		if len(ve.Complaints) > p.EffectiveMaxMembers() || len(ve.PoisonReports) > p.EffectiveMaxMembers() {
 			return reject, nil
 		}
 		// EXTERNAL-REVIEW #2: cap each variable-length FIELD's bytes to its honest maximum. The total (1 MiB)
@@ -524,6 +593,11 @@ func (app *EVMD) dkgVerifyVoteExtensionHandler() sdk.VerifyVoteExtensionHandler 
 				return reject, nil
 			}
 		}
+		for i := range ve.PoisonReports {
+			if len(ve.PoisonReports[i].SharedPoint) > veMaxPointBytes || len(ve.PoisonReports[i].DleqProof) > veMaxDleqProofBytes {
+				return reject, nil
+			}
+		}
 		// Everything else (crypto validity, membership, dedup) is enforced deterministically on-chain in
 		// ProcessProposal + PreBlock, so accept structurally-valid extensions generously — an honest
 		// node's extension always passes, preserving liveness.
@@ -542,7 +616,7 @@ func (app *EVMD) wrapDkgPrepareProposal(inner sdk.PrepareProposalHandler) sdk.Pr
 		}
 		blob, ok := boundedInjectedCommit(req.LocalLastCommit, req.MaxTxBytes)
 		if !ok {
-			return inner(ctx, req) // no valid (> 2/3-power) injection fits: fall back cleanly
+			return inner(ctx, req) // if injection is required, peers will reject; no forged partial commit is emitted
 		}
 		// Reserve the blob's bytes so the composed proposal stays within MaxTxBytes.
 		sub := *req
@@ -554,6 +628,30 @@ func (app *EVMD) wrapDkgPrepareProposal(inner sdk.PrepareProposalHandler) sdk.Pr
 		resp.Txs = append([][]byte{blob}, resp.Txs...)
 		return resp, nil
 	}
+}
+
+func (app *EVMD) dkgInjectionRequired(ctx sdk.Context) bool {
+	if !app.veActive(ctx) {
+		return false
+	}
+	p := app.EncMempoolKeeper.GetParams(ctx)
+	if uint64(ctx.BlockHeight()) < p.DkgStartHeight {
+		return false
+	}
+	cp := app.GetConsensusParams(ctx)
+	if cp.Abci != nil && ctx.BlockHeight() <= cp.Abci.VoteExtensionsEnableHeight+1 {
+		return false // previous-height votes may not have carried extensions yet
+	}
+	if cp.Block != nil && cp.Block.MaxBytes > 0 && !p.DkgInjectedCommitFitsMaxTxBytes(cp.Block.MaxBytes) {
+		return false // runtime param mismatch: EndBlock emits a loud stall event, but do not halt proposals
+	}
+	k := app.EncMempoolKeeper
+	if cur := k.GetCurrentEpoch(ctx); cur > 0 {
+		if r, ok := k.GetDkgRound(ctx, cur); ok && r.Status == encmempooltypes.DkgStatusOpen {
+			return true
+		}
+	}
+	return k.GetGlobalEncCount(ctx) > 0
 }
 
 // marshalInjectedCommit serializes an ExtendedCommitInfo behind the inject marker.
@@ -789,8 +887,10 @@ func (app *EVMD) wrapDkgProcessProposal(inner sdk.ProcessProposalHandler) sdk.Pr
 	}
 	return func(ctx sdk.Context, req *abci.RequestProcessProposal) (*abci.ResponseProcessProposal, error) {
 		if len(req.Txs) == 0 || !bytes.HasPrefix(req.Txs[0], veInjectMarker) {
-			// No injected blob: normal proposal. (First block after enable, or a proposer
-			// that had no extensions.) Delegate unchanged.
+			if app.dkgInjectionRequired(ctx) {
+				return reject()
+			}
+			// No injected blob: normal proposal while DKG has no active VE-dependent work.
 			return inner(ctx, req)
 		}
 		// An injected blob is only legitimate while the transparent path is active.
@@ -837,7 +937,7 @@ func (app *EVMD) consumeDkgVoteExtensions(ctx sdk.Context, txs [][]byte) {
 	// '{' count is an exact object-count upper bound, and both checks read only committed extension
 	// bytes + committed params, so every node skips the same extensions identically.
 	p := app.EncMempoolKeeper.GetParams(ctx)
-	objCap := 8 + 3*p.VoteExtShareCap()
+	objCap := 8 + 4*p.VoteExtShareCap()
 	entries := make([]encmempoolkeeper.VEEntry, 0, len(ext.Votes))
 	for _, v := range ext.Votes {
 		// Only votes actually committed carry a usable, signed extension.

@@ -64,6 +64,12 @@ type VoteExtension struct {
 	// path, so finalizeRound's disq set can be populated and a cheating dealer excluded
 	// from QUAL (HIGH-2 / HIGH-3). Bounded by committee size (<= n-1 per node).
 	Complaints []VoteExtComplaint `json:"complaints,omitempty"`
+
+	// PoisonReports are the same framing-resistant proof shape as Complaints, but emitted
+	// after an epoch finalized. They cover the offline-victim case: a validator that missed
+	// the complaint window can still prove a QUAL dealer poisoned one of its eval points,
+	// and the committed consume path uses that proof to trigger a recovery rekey.
+	PoisonReports []VoteExtComplaint `json:"poison_reports,omitempty"`
 }
 
 // VoteExtComplaint is a framing-resistant justified complaint that a dealer sealed a bad

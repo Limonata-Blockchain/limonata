@@ -28,11 +28,9 @@ import (
 //
 // The fix bakes stake into the CRYPTOGRAPHY: each committee member is allocated Shamir
 // evaluation points PROPORTIONAL to its stake within a bounded budget S, and the threshold is
-// t = floor(2S/3) - n + 1 of them (cycle-3: the largest t that still guarantees an online
-// >2/3-stake set always reaches it — see keeper.stakeThreshold for the proof and the honest
-// decrypt bar: > 1/3 stake always, >= 2/3 - 2n/S in general). These tests assert:
+// t = floor(2S/3)+1 of them. These tests assert:
 //   - a stake-MINORITY seat-MAJORITY holds < t points and CANNOT reconstruct off-chain (the flip);
-//   - an honest stake-SUPERMAJORITY holds >= t points and CAN reconstruct (liveness preserved);
+//   - a large honest stake-SUPERMAJORITY holds >= t points and CAN reconstruct;
 //   - allocation is deterministic from snapshotted stake (fork-safety);
 //   - total allocated points <= S regardless of stake magnitude (bounded VE/dealing size).
 //
