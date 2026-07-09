@@ -19,6 +19,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
 
+	"github.com/cosmos/evm/x/encmempool/client/cli"
 	"github.com/cosmos/evm/x/encmempool/keeper"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
@@ -55,7 +56,7 @@ func (AppModuleBasic) ValidateGenesis(_ codec.JSONCodec, _ client.TxEncodingConf
 }
 func (AppModuleBasic) RegisterRESTRoutes(_ client.Context, _ *mux.Router)              {}
 func (AppModuleBasic) RegisterGRPCGatewayRoutes(_ client.Context, _ *runtime.ServeMux) {}
-func (AppModuleBasic) GetTxCmd() *cobra.Command                                        { return nil }
+func (AppModuleBasic) GetTxCmd() *cobra.Command                                        { return cli.GetTxCmd() }
 func (AppModuleBasic) GetQueryCmd() *cobra.Command                                     { return nil }
 
 type AppModule struct {

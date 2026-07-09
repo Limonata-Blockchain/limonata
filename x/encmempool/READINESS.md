@@ -47,16 +47,24 @@ attaquant arbitraire dans le consensus sur une chaine live sans audit profession
 risque de halt/exploit. **A faire : audit d'une firme crypto/consensus sur `keeper/evm_exec.go` + le
 chemin de decrypt/execute.**
 
-### 3. Flux DKG multi-NOEUD ABCI++ - PROUVE sur un vrai reseau 4-noeuds (2026-07-09)
-Un testnet throwaway de 4 validateurs (stake equilibre, chain-id dkgtest_20777-1, isole de la chaine
-live) a fait tourner le binaire hardened avec DKG transparent + vote extensions actives. RESULTAT :
-round ouvert (h4 : dkg_round_opened + dkg_ve_consumed = dealings/shares circulent entre noeuds via
-ABCI++), **DKG FINALISE (h18 : epoch 1, QUAL=[1,2,3,4] les 4 validateurs, cle seuil installee,
-threshold=86)**. Les 4 noeuds en SYNC PARFAITE (meme height, catching_up=false, ZERO CONSENSUS
-FAILURE) => deterministe, pas de fork. Une seule convergence propre, pas de re-run. **Le flux ABCI++
-multi-noeud tient.** (Test de CONVERGENCE, EncExec OFF pour eviter l'exigence de bond ; le
-decrypt+execute est prouve par le test de readiness single-node. Un run multi-noeud AVEC
-decrypt+execute reste le complement optionnel.)
+### 3. Flux DKG multi-NOEUD ABCI++ - PROUVE END-TO-END (DKG + decrypt + EXECUTE) sur un vrai reseau 4-noeuds (2026-07-09)
+Un testnet throwaway de 4 validateurs (stake equilibre 25% chacun, IPs distinctes 127.0.0.1-4,
+chain-id dkgtest_20777-1, EncExec **ON** + bond, isole de la chaine live) a fait tourner le binaire
+hardened avec DKG transparent + vote extensions actives. RESULTAT complet :
+- **DKG converge** (h4 : dkg_round_opened + dkg_ve_consumed ; h18 : **dkg_finalized** epoch 1,
+  QUAL=[1,2,3,4] les 4 validateurs, cle seuil 028e58d9... installee, threshold=86).
+- **Soumission chiffree** (h133 : `encmempool_encrypted_submitted`) via la nouvelle CLI
+  `tx encmempool submit-encrypted` : une vraie tx EVM signee, chiffree a la cle seuil DKG cote client,
+  bond escrow.
+- **Dechiffrement + EXECUTION automatiques a travers le reseau** (h137 : `encmempool_tx_reinjected`) :
+  les validateurs produisent leurs decrypt-shares DLEQ **automatiquement** dans ExtendVote
+  (buildDecryptShares), le comite reconstruit le secret, BeginBlock dechiffre ET execute la tx EVM.
+  **Destinataire credite EXACTEMENT 12345 wei (eth_getBalance = 0x3039).**
+- Les 4 noeuds en SYNC PARFAITE tout du long (meme height, catching_up=false, **ZERO CONSENSUS
+  FAILURE** sur les 4) => deterministe, pas de fork. **La chaine live (861k+) intacte pendant tout le test.**
+
+**Le chemin ENTIER active (DKG multi-parti transparent -> soumission chiffree -> collecte de shares
+via ABCI++ -> decrypt+execute EVM) tient sur un vrai reseau multi-noeud.** Blocker #3 FERME.
 
 ### 4. Items de design deferres (niveau protocole)
 - **Censure-proposer** : un proposer peut omettre l'injection ; la liveness DKG en depend (limite
@@ -84,8 +92,13 @@ Tant que 1-4 ne sont pas faits : **ship le code gated OFF dans 0.3.0**, active p
 
 ## Ce qui N'A PAS ete teste (honnete)
 
-- Le flux DKG **sur un vrai reseau multi-noeud** (seulement simule en process).
-- L'activation via un **vrai upgrade gouvernance** de bout en bout sur un testnet live.
+- L'activation via un **vrai upgrade gouvernance** de bout en bout sur un testnet live (le run
+  multi-noeud demarre EncExec via genesis, pas via une prop gov ; l'activation par gov reste a
+  exercer sur un testnet persistant).
 - Le comportement **sous charge reelle** (sybil finance, censure active) sur un reseau.
-- Le chemin **transparent stake-weighted** end-to-end avec EncExec (le test de readiness utilise le
-  chemin DECLARE non-pondere ; le stake-weighted est teste au niveau keeper mais pas +EncExec+reseau).
+- Le chemin **transparent stake-weighted** end-to-end avec EncExec (le test multi-noeud et le test de
+  readiness utilisent le chemin committee-declare ; le stake-weighted est teste au niveau keeper mais
+  pas encore +EncExec+reseau).
+
+NOTE : le flux DKG multi-noeud + decrypt + EXECUTE **a maintenant tourne sur un vrai reseau 4-noeuds**
+(voir blocker #3, resolu 2026-07-09) - ce n'est plus dans la liste du non-teste.
