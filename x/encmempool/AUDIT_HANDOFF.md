@@ -147,13 +147,16 @@ and assess severity; do not re-report them as new without engaging the rationale
    (Ephemeral state - caches, streaks, submit-rate, complaints, rotation cooldowns - is
    intentionally not carried; it self-rebuilds after import.)
 
-6. **Decrypt→execute: precompile sub-call isolation is half-built (EncExecEnabled only).** The
-   re-injection rejects a tx whose TOP-LEVEL `To` is a precompile, but a tx calling an ordinary
-   contract that SUB-CALLs a precompile still reaches it, from the BeginBlock context (which runs
-   before staking/distribution/gov BeginBlockers). No confirmed non-deterministic fork was found
-   (precompiles are deterministic since DeliverTx runs them), but the isolation guarantee is not
-   complete. Close with a call-hook/tracer that rejects any precompile touch, OR a per-precompile
-   determinism audit, before enabling `EncExecEnabled`. Refs: `keeper/evm_exec.go` GetPrecompileInstance.
+6. **Decrypt→execute: precompile isolation + ante-bypass — CLOSED (round-11 #1 deep fix).** The
+   re-injection now runs the decrypted tx under `WithBlockedPrecompiles`, so a new EVM call hook
+   (`GetPrecompileBlockingCallHook`) rejects a call whose recipient is a precompile at ANY depth
+   (the hook fires on every Call/CallCode/Delegate/Static frame before the precompile is installed) -
+   a sub-call via a contract/constructor is blocked exactly like a top-level `To`. It also applies
+   the net-seller cap (`NetCapChecker`) to a decrypted native value transfer, matching the
+   `NetCapEVMDecorator` the BeginBlock path bypasses. Verify: `x/vm/keeper` GetPrecompileBlockingCallHook
+   + TestGetPrecompileBlockingCallHook, `keeper/evm_exec.go`, e2e `precompile_call_blocked`. (EncExec
+   remains a large surface - executing attacker EVM in BeginBlock - and still needs the external firm
+   before enable, but the specific isolation/bypass HIGH is closed.)
 
 **Already fixed (do not re-report; verify if you wish):** DLEQ nonce/index binding (key-extraction),
 same-A replay via PoK-of-r, early decrypt-share exposure (maturity gate), VE-decode DoS,
