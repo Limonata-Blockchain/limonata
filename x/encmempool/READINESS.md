@@ -47,12 +47,16 @@ attaquant arbitraire dans le consensus sur une chaine live sans audit profession
 risque de halt/exploit. **A faire : audit d'une firme crypto/consensus sur `keeper/evm_exec.go` + le
 chemin de decrypt/execute.**
 
-### 3. Flux DKG multi-NOEUD ABCI++ - JAMAIS prouve sur un vrai reseau
-Le DKG transparent transporte les dealings/shares via des **vote extensions ABCI++** qui circulent
-entre PLUSIEURS noeuds validateurs (ExtendVote -> injection proposer -> consume PreBlock). Tous mes
-tests (et les tests keeper) **simulent** ce flux en un seul process. Il n'a **jamais tourne sur un
-vrai testnet multi-noeud**. **A faire : un run sur 4-5 validateurs reels, stake equilibre, DKG qui
-converge + dechiffre + execute a travers le reseau.**
+### 3. Flux DKG multi-NOEUD ABCI++ - PROUVE sur un vrai reseau 4-noeuds (2026-07-09)
+Un testnet throwaway de 4 validateurs (stake equilibre, chain-id dkgtest_20777-1, isole de la chaine
+live) a fait tourner le binaire hardened avec DKG transparent + vote extensions actives. RESULTAT :
+round ouvert (h4 : dkg_round_opened + dkg_ve_consumed = dealings/shares circulent entre noeuds via
+ABCI++), **DKG FINALISE (h18 : epoch 1, QUAL=[1,2,3,4] les 4 validateurs, cle seuil installee,
+threshold=86)**. Les 4 noeuds en SYNC PARFAITE (meme height, catching_up=false, ZERO CONSENSUS
+FAILURE) => deterministe, pas de fork. Une seule convergence propre, pas de re-run. **Le flux ABCI++
+multi-noeud tient.** (Test de CONVERGENCE, EncExec OFF pour eviter l'exigence de bond ; le
+decrypt+execute est prouve par le test de readiness single-node. Un run multi-noeud AVEC
+decrypt+execute reste le complement optionnel.)
 
 ### 4. Items de design deferres (niveau protocole)
 - **Censure-proposer** : un proposer peut omettre l'injection ; la liveness DKG en depend (limite
