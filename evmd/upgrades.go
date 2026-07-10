@@ -7,6 +7,8 @@ import (
 	"os"
 	"slices"
 
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -208,6 +210,95 @@ func (app *EVMD) applyEncMempoolInit(ctx sdk.Context, act encActivation, configu
 	return nil
 }
 
+// Lead blocks between the upgrade height and, respectively, vote-extensions turning ON and the
+// first DKG round opening. The transparent DKG rides on CometBFT vote extensions, which must be
+// enabled at a FUTURE height (VoteExtEnabledAt: height > enableHeight), and the DKG must not open
+// until VE is genuinely live. So: upgrade @H -> VE on @H+dkgVoteExtLeadBlocks -> DKG epoch 1 opens
+// @H+dkgVoteExtLeadBlocks+dkgStartLeadBlocks. The gap also gives validators a moment on the new
+// binary before consensus starts requiring vote extensions.
+const (
+	dkgVoteExtLeadBlocks = 20 // ~1 min at ~3.2s blocks
+	dkgStartLeadBlocks   = 20
+)
+
+// applyDkgActivation turns on the TRANSPARENT VALIDATOR DKG + encrypted mempool + EncExec
+// deterministically (every validator runs the same release binary, so the same params land on
+// every node). Unlike the keyper path (bakedEncActivation), the threshold key is NOT baked: the
+// bonded validators generate it on-chain via the DKG. This ALSO enables CometBFT vote extensions
+// (the DKG's transport) at a near-future height. Idempotent. NEVER touches user funds; refuses to
+// write params that fail validation (a bad activation must HALT the upgrade loudly, not install a
+// broken live consensus path).
+func (app *EVMD) applyDkgActivation(ctx sdk.Context) error {
+	logger := ctx.Logger().With("upgrade", EncMempoolUpgradeName, "path", "transparent-dkg")
+	h := ctx.BlockHeight()
+	veEnable := h + dkgVoteExtLeadBlocks
+
+	// 1. Enable CometBFT vote extensions at a future height (idempotent: skip if already enabled
+	// at or before now). VoteExtEnabledAt requires enableHeight != 0 && height > enableHeight.
+	cp, err := app.ConsensusParamsKeeper.ParamsStore.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("read consensus params: %w", err)
+	}
+	if cp.Abci == nil {
+		cp.Abci = &cmtproto.ABCIParams{}
+	}
+	if cp.Abci.VoteExtensionsEnableHeight == 0 || cp.Abci.VoteExtensionsEnableHeight > h {
+		cp.Abci.VoteExtensionsEnableHeight = veEnable
+		if err := app.ConsensusParamsKeeper.ParamsStore.Set(ctx, cp); err != nil {
+			return fmt.Errorf("enable vote extensions: %w", err)
+		}
+		logger.Info("vote extensions enabled", "enable_height", veEnable)
+	} else {
+		veEnable = cp.Abci.VoteExtensionsEnableHeight // already enabled; anchor the DKG start to it
+	}
+
+	// 2. Activate the transparent DKG + encrypted mempool + EncExec.
+	p := app.EncMempoolKeeper.GetParams(ctx)
+	if p.DkgEnabled && p.DkgTransparent && p.EncEnabled {
+		logger.Info("transparent DKG already active; no-op")
+		return nil
+	}
+	// Commit-reveal window (kept valid defaults; independent of the DKG path).
+	p.RevealDelay = 1
+	p.MaxRevealWindow = 100
+	// Encrypted path + on-chain execution of decrypted txs.
+	p.EncEnabled = true
+	p.EncExecEnabled = true
+	p.DecryptDelay = 10 // ~32s at ~3.2s blocks: time for keypers/validators to post VE shares
+	p.MaxInFlightEncTx = 32768
+	p.MaxInFlightPerSubmitter = 2048
+	p.MaxVerifyOpsPerBlock = 16384
+	// Anti-sybil submit bond (gov-tunable). aLIMO is 18-decimal; 1e15 aLIMO = 0.001 LIMO.
+	p.EncSubmitBond = 1_000_000_000_000_000
+	p.EncSubmitBondDenom = "aLIMO"
+	p.EncSubmitBondBurnBps = 100 // 1% burned per submit
+	// Transparent validator DKG (committee derived on-chain from bonded validators; no baked key).
+	p.DkgEnabled = true
+	p.DkgTransparent = true
+	p.DkgStartHeight = uint64(veEnable) + dkgStartLeadBlocks // open epoch 1 once VE is live
+	p.DkgDealWindow = 20                                     // ~64s
+	p.DkgComplaintWindow = 10                                // ~32s
+	p.DkgRetryBackoff = 5
+	p.DkgMaxAttempts = 8
+	p.DkgMinRekeyGap = 30
+	p.DkgMaxMembers = 0  // 0 => DefaultDkgMaxMembers (top-16 bonded by stake)
+	p.DkgShareBudget = 0 // 0 => DefaultDkgShareBudget (256)
+	// The DKG supplies the active key, so the trusted-setup keyper fields stay empty.
+	p.ThresholdPub = nil
+	p.Threshold = 0
+	p.Keypers = nil
+	if err := p.Validate(); err != nil {
+		return fmt.Errorf("transparent DKG activation params invalid, refusing to write: %w", err)
+	}
+	if err := app.EncMempoolKeeper.SetParams(ctx, p); err != nil {
+		return err
+	}
+	logger.Info("transparent validator DKG + encrypted mempool ACTIVATED",
+		"ve_enable_height", veEnable, "dkg_start_height", p.DkgStartHeight,
+		"enc_exec", p.EncExecEnabled, "bond", p.EncSubmitBond, "bond_denom", p.EncSubmitBondDenom)
+	return nil
+}
+
 // --- Limonata: gassponsor security caps in-place upgrade (v0.3.0) ---
 //
 // SecurityCapsUpgradeName is the LATER Limonata gov upgrade that HARDENS x/gassponsor
@@ -373,8 +464,11 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 			if err != nil {
 				return nil, err
 			}
-			act, configured := bakedEncActivation()
-			if err := app.applyEncMempoolInit(sdkCtx, act, configured); err != nil {
+			// v0.3.0 activates the TRANSPARENT VALIDATOR DKG (not the keyper path): the bonded
+			// validators generate the threshold key on-chain, and this also enables CometBFT vote
+			// extensions (the DKG's transport). The keyper path (applyEncMempoolInit) stays in the
+			// binary for the alternative/fallback deployment but is not what v0.3.0 turns on.
+			if err := app.applyDkgActivation(sdkCtx); err != nil {
 				return nil, err
 			}
 			return newVM, nil
