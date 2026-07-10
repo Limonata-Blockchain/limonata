@@ -127,6 +127,13 @@ func (app *EVMD) applyValGrantInit(ctx sdk.Context) error {
 // StoreUpgrades", which this wiring fixes.
 const EncMempoolUpgradeName = "encmempool-threshold-vpcap-v1"
 
+// TransparentDkgUpgradeName is the LATER Limonata gov upgrade that switches the (already-live)
+// encrypted mempool from the KEYPER committee to the TRANSPARENT VALIDATOR DKG + EncExec, and
+// enables CometBFT vote extensions (the DKG's transport). It adds NO store (encmempool + vpcap
+// already exist since EncMempoolUpgradeName at height 766558): it only runs migrations, then
+// applyDkgActivation. Distinct name because EncMempoolUpgradeName is already consumed on-chain.
+const TransparentDkgUpgradeName = "encmempool-transparent-dkg-v1"
+
 // EncMempoolForceUpgradeEnv enables the fast NON-GOV single-operator path (same
 // shape as valgrant's): swap the binary with the env set, the vpcap store is
 // added at the next height and the one-shot below runs migrations + activation.
@@ -464,11 +471,13 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 			if err != nil {
 				return nil, err
 			}
-			// v0.3.0 activates the TRANSPARENT VALIDATOR DKG (not the keyper path): the bonded
-			// validators generate the threshold key on-chain, and this also enables CometBFT vote
-			// extensions (the DKG's transport). The keyper path (applyEncMempoolInit) stays in the
-			// binary for the alternative/fallback deployment but is not what v0.3.0 turns on.
-			if err := app.applyDkgActivation(sdkCtx); err != nil {
+			// HISTORICAL - DO NOT CHANGE. This upgrade already APPLIED on the live chain (10777)
+			// at height 766558; it activated the KEYPER encrypted mempool (2-of-3) and added the
+			// vpcap store. A resyncing node replays this handler at 766558, so its behaviour must
+			// stay byte-for-byte what produced the live app hash. The transparent DKG is a SEPARATE,
+			// later upgrade (encmempool-transparent-dkg-v1) - never fold it into this one.
+			act, configured := bakedEncActivation()
+			if err := app.applyEncMempoolInit(sdkCtx, act, configured); err != nil {
 				return nil, err
 			}
 			return newVM, nil
@@ -493,6 +502,25 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 				return nil, err
 			}
 			if err := app.applySqueezeSplitParams(sdkCtx); err != nil {
+				return nil, err
+			}
+			return newVM, nil
+		},
+	)
+
+	// Limonata: transparent-DKG GOV upgrade. Switches the (already-live, keyper) encrypted mempool
+	// to the TRANSPARENT VALIDATOR DKG + EncExec and enables vote extensions. Adds NO store (both
+	// encmempool and vpcap already exist from EncMempoolUpgradeName @766558): only migrations +
+	// applyDkgActivation. No StoreLoader is wired below for this name.
+	app.UpgradeKeeper.SetUpgradeHandler(
+		TransparentDkgUpgradeName,
+		func(ctx context.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+			sdkCtx := sdk.UnwrapSDKContext(ctx)
+			newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), fromVM)
+			if err != nil {
+				return nil, err
+			}
+			if err := app.applyDkgActivation(sdkCtx); err != nil {
 				return nil, err
 			}
 			return newVM, nil
