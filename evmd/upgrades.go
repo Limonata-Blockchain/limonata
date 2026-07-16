@@ -17,6 +17,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	squeezetypes "github.com/cosmos/evm/x/squeeze/types"
 	valgranttypes "github.com/cosmos/evm/x/valgrant/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 	vpcaptypes "github.com/cosmos/evm/x/vpcap/types"
@@ -290,6 +291,13 @@ func (app *EVMD) applyDkgActivation(ctx sdk.Context) error {
 	p.DkgMinRekeyGap = 30
 	p.DkgMaxMembers = 0  // 0 => DefaultDkgMaxMembers (top-16 bonded by stake)
 	p.DkgShareBudget = 0 // 0 => DefaultDkgShareBudget (256)
+	// Staleness-rekey trigger (AUDIT FINDING 2 guard in Params.Validate): MUST be set
+	// explicitly - the live chain's params predate these fields, so inheriting them via
+	// GetParams yields 0/0 and Validate refuses to write (observed live at 998735,
+	// 2026-07-16). 500 bps = rekey when live stake drifts >5% (total-variation) from the
+	// epoch snapshot - the value proven in the cycle-5 live stake-drift test; rekey storms
+	// are dampened by DkgMinRekeyGap. Governance can tune it later via MsgUpdateParams.
+	p.DkgRekeyOnStakeDriftBps = 500
 	// The DKG supplies the active key, so the trusted-setup keyper fields stay empty.
 	p.ThresholdPub = nil
 	p.Threshold = 0
@@ -509,9 +517,11 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 	)
 
 	// Limonata: transparent-DKG GOV upgrade. Switches the (already-live, keyper) encrypted mempool
-	// to the TRANSPARENT VALIDATOR DKG + EncExec and enables vote extensions. Adds NO store (both
-	// encmempool and vpcap already exist from EncMempoolUpgradeName @766558): only migrations +
-	// applyDkgActivation. No StoreLoader is wired below for this name.
+	// to the TRANSPARENT VALIDATOR DKG + EncExec and enables vote extensions. encmempool and vpcap
+	// already exist from EncMempoolUpgradeName @766558, but the app gained x/squeeze (774cbe69)
+	// AFTER the live chain's last store change, so its KV store must be created at this height -
+	// see the TransparentDkgUpgradeName StoreLoader case below. RunMigrations InitGenesis-es the
+	// squeeze module into the fresh store (it is absent from fromVM).
 	app.UpgradeKeeper.SetUpgradeHandler(
 		TransparentDkgUpgradeName,
 		func(ctx context.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
@@ -572,6 +582,15 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 		// new store this upgrade introduces).
 		storeUpgrades := storetypes.StoreUpgrades{
 			Added: []string{vpcaptypes.StoreKey},
+		}
+		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
+	case TransparentDkgUpgradeName:
+		// Limonata: the live chain's state predates x/squeeze (774cbe69), so its KV
+		// store must be created at the upgrade height. Without this the node fails
+		// at LoadLatestVersion with "version of store squeeze mismatch root store's
+		// version" (observed live at 998735, 2026-07-16).
+		storeUpgrades := storetypes.StoreUpgrades{
+			Added: []string{squeezetypes.StoreKey},
 		}
 		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
 	}
