@@ -24,6 +24,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
+	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
 )
 
 // EthHexToCosmosAddr takes a given Hex string and derives a Cosmos SDK account address
@@ -224,21 +225,34 @@ func Bytes32ToString(data [32]byte) string {
 }
 
 // GetChainIDFromHome returns the chain ID from the client configuration
-// in the given home directory.
+// (config/client.toml) in the given home directory, falling back to the genesis
+// chain-id when client.toml has none.
+//
+// The genesis fallback is REQUIRED for STATE-SYNCED nodes. client.toml's chain-id is
+// empty by default after `init`, and a state-synced node never runs InitChain, so it
+// never learns the chain-id from RequestInitChain either. If this returns "", baseapp's
+// app.chainID stays empty and the node executes blocks with an empty header ChainID.
+// x/staking persists the block header into HistoricalInfo every block, so the empty
+// chain-id diverges the staking store from the rest of the network and the node halts on
+// an app-hash mismatch at its first post-snapshot block. Reading the genesis chain-id here
+// closes that gap so state sync works without requiring an explicit --chain-id flag.
 func GetChainIDFromHome(home string) (string, error) {
 	v := viper.New()
 	v.AddConfigPath(filepath.Join(home, "config"))
 	v.SetConfigName("client")
 	v.SetConfigType("toml")
 
-	if err := v.ReadInConfig(); err != nil {
-		return "", err
-	}
-	conf := new(config.ClientConfig)
-
-	if err := v.Unmarshal(conf); err != nil {
-		return "", err
+	if err := v.ReadInConfig(); err == nil {
+		conf := new(config.ClientConfig)
+		if err := v.Unmarshal(conf); err == nil && conf.ChainID != "" {
+			return conf.ChainID, nil
+		}
 	}
 
-	return conf.ChainID, nil
+	// client.toml missing or has no chain-id: fall back to the genesis chain-id.
+	appGenesis, err := genutiltypes.AppGenesisFromFile(filepath.Join(home, "config", "genesis.json"))
+	if err != nil {
+		return "", err
+	}
+	return appGenesis.ChainID, nil
 }
