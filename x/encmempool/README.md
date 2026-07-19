@@ -1,11 +1,14 @@
-# x/encmempool — commit-reveal mempool (EXPERIMENTAL PROOF-OF-CONCEPT)
+# x/encmempool - threshold-encrypted mempool (transparent validator DKG, LIVE on testnet)
 
-> **THIS IS NOT AN ENCRYPTED MEMPOOL YET, AND IT PROVIDES NO MEV RESISTANCE.**
+> **THIS IS A LIVE, TESTED ENCRYPTED MEMPOOL. THE VALIDATOR SET GENERATES AND HOLDS THE THRESHOLD ENCRYPTION KEY TOGETHER, ON-CHAIN, INSIDE CONSENSUS - NO TRUSTED DEALER, NO KEYPER COMMITTEE, NO COORDINATOR.**
 
-This module implements a **hash-commitment with an enforced on-chain reveal delay
-and deterministic reveal ordering**. It is **not encryption**. It exists to build and
-test the on-chain `commit -> delayed-reveal -> execute` state machine that a real
-threshold-encryption scheme (Shutter / Ferveo) plugs into later.
+This module implements a **live threshold-encrypted mempool driven by a transparent,
+stake-weighted validator DKG**. Users encrypt transactions to the committee's threshold
+key; the validator set builds and holds that key together, on-chain, inside consensus
+(via CometBFT vote extensions), so the master secret never exists in one place. When a
+ciphertext matures, consensus reconstructs the per-epoch decryption key, decrypts it,
+and executes the plaintext on-chain in deterministic order. It grew out of - and still
+retains - the `commit -> reveal -> execute` state machine described below.
 
 ## What it does
 
@@ -22,32 +25,40 @@ threshold-encryption scheme (Shutter / Ferveo) plugs into later.
    deletes the commit and the pending entry. Unrevealed commits are garbage-collected
    after `max_reveal_window` blocks.
 
-All decision logic lives in `BeginBlock`, which runs identically on every node inside
-`FinalizeBlock`. There is **no proposer-only logic and no ABCI++ vote extension**, so
-the prototype is consensus-deterministic by construction.
+Decryption and execution run identically on every node inside `FinalizeBlock`, so the
+module is consensus-deterministic by construction. The transparent DKG rides **ABCI++
+vote extensions**: every validator contributes DLEQ-proved decryption shares as part of
+consensus, and the per-epoch key is reconstructed deterministically from shares
+representing more than 2/3 of committee stake.
 
-## What it does NOT do (be honest)
+## Security properties
 
-- It is **not encryption**. The body is hidden from third-party observers only between
-  commit and reveal, and only because the user withholds the preimage. There is no
-  threshold key and nothing is decrypted by consensus.
-- On the current **single-validator** testnet, the sole proposer sees every
-  transaction in its own mempool at commit time and at reveal time, and can reorder or
-  censor reveals. A censored reveal is simply never executed (availability loss; the
-  on-chain commit is the only evidence).
-- "Execute" here means the module records the deterministic execution **order** and
-  emits an event. It does **not** re-inject the payload into the EVM/tx pipeline; the
-  reveal a user submits is itself an ordinary transaction.
+- It **is** encryption. A submitted transaction is encrypted to the committee's
+  threshold key and its plaintext body is unavailable to anyone - proposer included -
+  until consensus reconstructs the per-epoch decryption key. The master secret is never
+  assembled in one place.
+- Decryption power is **stake-weighted**: shares are apportioned by bonded stake over a
+  fixed budget, and reconstruction requires shares representing **more than 2/3 of
+  committee stake**. The scheme **fails closed** - if stake concentration would let one
+  operator (or any sub-2/3-stake coalition) decrypt alone, it will not decrypt. The key
+  **auto-rekeys** on committee membership changes and on stake drift greater than 5%.
+- Validators take part simply by running the node binary - no separate daemon, no
+  account, no fees, no key-setup ceremony.
+- "Execute" re-injects the decrypted payload into the EVM/tx pipeline at reveal
+  (`EncExec`): matured ciphertexts are decrypted and executed on-chain in deterministic
+  order.
 
-## The upgrade path to real MEV resistance
+## How the transparent DKG resists MEV
 
-Real anti-MEV requires **threshold encryption with >= 2 independent keypers** (a
-Shutter/Ferveo-style DKG), where the per-block decryption key is released only after
-the block carrying the ciphertext commits. That scheme plugs into the exact slot built
-here: replace "the user reveals the preimage" with "the keypers release the epoch
-decryption key, and BeginBlock decrypts and orders the matured ciphertexts." The
-commit/reveal/execute state machine, the deterministic ordering, and the bounded-state
-GC all carry over unchanged.
+MEV resistance comes from **threshold encryption run by the validator set itself** -
+not by a separate keyper committee, trusted dealer, or coordinator. The per-epoch
+decryption key is reconstructed only after the block carrying a ciphertext commits, so
+no one - proposers included - can front-run or censor on plaintext they cannot see. The
+transparent DKG occupies the exact slot the commit/reveal/execute state machine was
+built around: "the user reveals the preimage" is now "the validator committee
+reconstructs the epoch decryption key inside consensus, and `FinalizeBlock` decrypts and
+orders the matured ciphertexts." The deterministic ordering and bounded-state GC carry
+over unchanged.
 
 ## Params
 
@@ -58,6 +69,8 @@ GC all carry over unchanged.
 
 ## Status
 
-Built and tested on a single-validator throwaway testnet. **Not** deployed to the live
-chain (adding the module store to a running chain requires a coordinated store-upgrade,
-which is a separate, gated step).
+**Live and tested on testnet `limonata_10777-1`.** The transparent validator DKG shipped
+in the `encmempool-transparent-dkg-v1` upgrade at block 998,735 (source tags
+`limonata-v0.3.2` / `limonata-v0.3.3`) and finalized its first epoch at block 998,805.
+It has been exercised end-to-end. This is a testnet deployment; the module's internal
+audit trail and review cycles live alongside this file in the repo.

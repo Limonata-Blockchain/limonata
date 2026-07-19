@@ -3,10 +3,12 @@
 Limonata's encrypted mempool lets you submit a transaction whose **contents are
 hidden until its order in the block is already fixed**. No validator and no
 searcher can see what you're doing in time to front-run or sandwich you. The
-payload is decrypted only after a **threshold of independent keypers** (2 of 3)
-cooperate - which only happens *after* ordering. That's the anti-MEV guarantee.
+payload is decrypted only after the validator set - which jointly holds the
+threshold key inside consensus - combines shares representing **more than 2/3 of
+committee stake**, and that only happens *after* ordering. That's the anti-MEV
+guarantee.
 
-This is **experimental, testnet-only**. Come break it.
+This is **live on the Limonata testnet** and exercised end-to-end. Come try it.
 
 ## The 30-second version
 
@@ -27,9 +29,9 @@ limonatad tx encmempool submit-encrypted \
 ```
 
 That's it. Your ciphertext is now stored on-chain with a fixed decrypt height. The
-keypers post their decryption shares automatically; about ~30 seconds later (15
-blocks) the chain decrypts it and emits the plaintext **in the order that was
-locked in at submission time**.
+validators post their decryption shares automatically; about ~30 seconds later
+(15 blocks) the chain decrypts it and executes the recovered transaction **in the
+order that was locked in at submission time**.
 
 ## What just happened
 
@@ -39,13 +41,14 @@ locked in at submission time**.
 2. **Submit.** `submit-encrypted` stores `(a, nonce, body)` on-chain and assigns
    it a sequence number + a **decrypt height** (current height + 15). The order is
    fixed *now*, while the body is still unreadable.
-3. **Keypers cooperate.** Each keyper independently computes a partial decryption
-   from `a` and posts it. No single keyper - and no pair short of the threshold -
-   can decrypt anything.
-4. **Decrypt.** At the decrypt height, the chain combines the shares, decrypts the
-   body, and emits an `encmempool_decrypted` event with the plaintext, in
-   deterministic order. Every node computes the identical result (it's consensus
-   logic, not a side service).
+3. **Validators cooperate.** Each validator independently computes a partial
+   decryption from `a` using its share of the threshold key, and posts it inside
+   consensus. Shares are **stake-weighted**, so no single validator - and no
+   coalition holding less than 2/3 of committee stake - can decrypt anything.
+4. **Decrypt and execute.** At the decrypt height, the chain combines the shares,
+   decrypts the body, emits an `encmempool_decrypted` event, and **executes the
+   recovered transaction on-chain** (EncExec), in deterministic order. Every node
+   computes the identical result (it's consensus logic, not a side service).
 
 ## Prove the anti-MEV property yourself
 
@@ -68,28 +71,33 @@ Use the `limonatad` release that ships with the encrypted-mempool upgrade (the s
 binary validators run). `keyper encrypt` is a local, offline command - it never
 touches your keys or the network; it only needs the public threshold key above.
 
-## Honest limits (read this)
+## How the key is held (read this)
 
-This is a **working prototype**, not an audited production system:
+The threshold key is **generated and held by the validators together, on-chain,
+inside consensus** (via CometBFT vote extensions). There is no trusted dealer, no
+keyper committee, and no coordinator - the master secret never exists in one
+place. Validators take part simply by running the node binary: no daemon, no
+separate account, no fees, no key setup.
 
-- The threshold key was created by a **trusted setup** (one-time key generation),
-  not a distributed key-generation ceremony. A production deployment replaces this
-  with DKG so no one ever holds the full key.
-- There are **no per-share correctness proofs** yet - a malicious keyper could
-  withhold or corrupt a share to grief a single ciphertext (it cannot decrypt it
-  early or forge a different message).
-- The decrypted payload is currently **emitted as an event** to demonstrate
-  in-order decryption; full re-execution of the decrypted transaction through the
-  EVM is the next step.
-- It's **testnet-only** and unaudited. Don't rely on it for anything of value.
+- Decryption power is **stake-weighted** - each validator's shares are apportioned
+  by bonded stake over a fixed budget, and reconstruction needs shares
+  representing **more than 2/3 of committee stake**.
+- It **fails closed**: if stake concentration would let one operator (or a
+  sub-2/3-stake coalition) decrypt alone, the key does not activate.
+- It **auto-rekeys** on any membership change and on stake drift over 5%, so the
+  key tracks the live validator set.
+- Decrypted transactions **execute on-chain at reveal** (EncExec), in the order
+  locked in at submission time.
 
-None of that changes the core property you can test today: **your transaction's
-order is fixed before anyone can read it.** That's the hard part, and it works.
+This runs on the Limonata **testnet** and has been exercised end-to-end - it
+finalized its first key epoch on-chain - and reviewed across the repo's internal
+audit cycles. The core property holds today: **your transaction's order is fixed
+before anyone can read it.**
 
 ## Why it matters
 
 On most chains, whoever orders the block (or watches the public mempool) can see
 your trade and jump ahead of it - front-running, sandwiching, MEV extraction. An
 encrypted mempool removes the information advantage: by the time your transaction
-can be read, its position is already final. Limonata is testing this in the open.
+can be read, its position is already final. Limonata runs this live, in the open, on its testnet.
 🍋

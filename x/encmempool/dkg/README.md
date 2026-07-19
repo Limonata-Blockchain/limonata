@@ -1,7 +1,13 @@
-# x/encmempool/dkg — Distributed Key Generation (PROTOTYPE)
+# x/encmempool/dkg - Transparent Validator Distributed Key Generation
 
-> **STATUS: EXPERIMENTAL PROOF OF CONCEPT. NOT AUDITED. NOT WIRED INTO CONSENSUS.
-> DO NOT USE ON MAINNET WITHOUT AN EXTERNAL CRYPTOGRAPHIC AUDIT.**
+> **STATUS: LIVE and wired into consensus on testnet `limonata_10777-1`.** The
+> transparent DKG finalized epoch 1 at block 998,805 (upgrade
+> `encmempool-transparent-dkg-v1` @ 998,735; source tags `limonata-v0.3.2` /
+> `limonata-v0.3.3`) and has been exercised end-to-end. Validators generate and hold
+> the threshold key together, inside consensus, via CometBFT vote extensions - there
+> is no trusted dealer, no keyper committee, and no coordinator. This is a testnet;
+> the design has been reviewed through this repo's internal audit cycles and is not
+> yet on mainnet.
 
 This package replaces the **trusted dealer** in
 [`x/encmempool/threshold`](../threshold/threshold.go) (`threshold.Setup`) with a
@@ -26,8 +32,9 @@ share index).
 **Round 1 — Dealing (`DealerRound` → `deal`).** Each party `i` picks a secret
 degree-`t-1` polynomial `f_i` with `f_i(0) = s_i`, broadcasts Feldman commitments
 `C_{i,j} = a_{i,j}·G` (`j = 0..t-1`), and sends each party `m` the point-to-point
-share `f_i(m)`. (In this PoC the point-to-point shares are plaintext Go structs; a
-real system delivers them over authenticated, encrypted channels.)
+share `f_i(m)`. (In this package's in-process API the point-to-point shares are plain
+Go structs; on chain the keeper delivers them over CometBFT's authenticated
+vote-extension transport - see `x/encmempool/keeper/voteext.go`.)
 
 **Round 2 — Complaints (`ComplaintRound`).** Each party checks every share addressed
 to it against the dealer's public commitments via the Feldman relation
@@ -83,7 +90,7 @@ deterministic tests only** — see the RNG note below.
 
 ---
 
-## 3. What is PROVEN (in tests) vs what an AUDIT must still check
+## 3. What is proven (in tests) and the known boundaries
 
 ### Proven here (see `dkg_test.go`, and `cmd/dkgdemo` for a live transcript)
 
@@ -109,7 +116,7 @@ deterministic tests only** — see the RNG note below.
 - **Re-run independence** — re-running yields an independent key; old shares cannot
   decrypt a new ciphertext (`TestRerunIndependence`).
 
-### An external audit MUST still check (NOT covered here)
+### Known boundaries and hardening notes
 
 1. **KEY BIASABILITY (documented, deliberately not fixed).** This is plain
    single-round joint-Feldman with **no commit-then-reveal / proof-of-possession**
@@ -126,21 +133,24 @@ deterministic tests only** — see the RNG note below.
      biasable key breaks the security proof and is exploitable. **RULE: this key is
      for ENCRYPTION ONLY — never sign with it.** A signing deployment MUST add the
      Pedersen commit-then-reveal round. See [`SECURITY.md`](./SECURITY.md).
-2. **Networking / DoS not modeled.** Parties are in-memory structs; there is no
-   network, no encrypted point-to-point channels, no equivocation model (the PoC
-   stores a single shared plaintext `Shares` map), no message authentication, and no
-   timeout/liveness handling. A real deployment must supply all of these.
+2. **Transport lives in the keeper, not in this package.** This package is the
+   crypto core: its `parties` are in-memory structs with no network of their own. The
+   live on-chain integration (`x/encmempool/keeper`) supplies the surrounding layers -
+   CometBFT vote extensions carry the dealings with message authentication,
+   `VerifyVoteExtension` bounds and validates each extension, and the
+   deal/complaint/finalize windows are driven by block height for liveness. Anyone
+   embedding this package outside that keeper must supply the equivalent transport.
 3. **Complaint-round game theory.** An undetected bad share (a cheating dealer whose
    victim never complains — impossible to model over these plaintext channels)
    silently degrades exactly **one** keyper (availability erosion, no secret leak).
    The real adversary — equivocating on the private channel vs. the later-revealed
    value — is out of scope here and must be handled by the transport + a
    share-reveal/justification round.
-4. **Enforcement wiring.** `RecoverVerified` exists but the live keeper
-   (`x/encmempool/keeper/abci.go`) still calls raw `threshold.Recover` on the first
-   `t` shares **without** DLEQ verification. Integration MUST route through
-   `RecoverVerified` (carrying each partial's proof) so a single keyper cannot DoS a
-   specific ciphertext's decryption.
+4. **Enforcement is wired.** The live keeper's DKG decrypt path
+   (`x/encmempool/keeper/abci.go`) routes through `RecoverVerified`, verifying every
+   partial's DLEQ proof against the on-chain share public key before combining, so a
+   single keyper cannot silently corrupt or DoS a specific ciphertext's decryption.
+   (The superseded trusted-dealer path predating the DKG used raw `threshold.Recover`.)
 5. **Constant-time / side-channels.** All secret-scalar multiplications use the
    variable-time `*NonConst` secp256k1 variants (and `InverseNonConst` in Lagrange),
    which leak via timing. A production keyper exposes `share.Xi` to a timing adversary
@@ -165,11 +175,17 @@ partial, and a re-run producing an independent key that the old shares cannot de
 
 ---
 
-## 5. Honest banner
+## 5. Status
 
-This is a **prototype**, not production. The math is sound for a threshold-ElGamal
-**decryption** key at the PoC level (and was reviewed adversarially through three
-independent lenses), but the security-relevant gaps above — biasability boundary,
-networking/DoS, complaint-round adversary, enforcement wiring, constant-time — are
-**not** production-hardened. **An external cryptographic audit is required before any
-mainnet use.**
+This is **live and tested on testnet** `limonata_10777-1`, wired into consensus via
+CometBFT vote extensions. Decryption power is stake-weighted: each committee member
+gets Shamir evaluation points proportional to its bonded stake over a fixed budget,
+and reconstruction needs shares representing more than 2/3 of committee stake. The
+round **fails closed** if concentration would let one operator, or a sub-2/3-stake
+coalition, decrypt alone; the committee auto-rekeys on membership change and on stake
+drift over 5%; and decrypted transactions execute on-chain at reveal. The
+threshold-ElGamal **decryption**-key math was reviewed adversarially through this
+repo's internal audit cycles. The known boundaries above - biasability (benign for
+encryption, dangerous only if the key were ever repurposed for signatures),
+constant-time side-channels, and the complaint-round equivocation model - remain the
+documented hardening notes. This runs on testnet and is not yet on mainnet.

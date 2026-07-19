@@ -1,9 +1,9 @@
 # SECURITY — x/encmempool/dkg
 
-**Prototype. Not audited. Not wired into consensus. No mainnet use without an
-external cryptographic audit.**
+**Live and tested on testnet limonata_10777-1. Wired into consensus via CometBFT
+vote extensions. Testnet only - not for mainnet use.**
 
-## Threat model this PoC is built for
+## Threat model this DKG is built for
 
 A threshold-ElGamal **decryption** key for the anti-MEV encrypted mempool, generated
 without a trusted dealer. Security goal: the master secret `msk` is never held by any
@@ -24,8 +24,8 @@ byte of `msk·G`).
 - **Benign for the intended use.** ElGamal semantic security does not require a
   uniform public key. `msk = Σ s_i` still mixes in honest secrets the adversary
   cannot know; `t-1` parties still cannot decrypt; biasing `pub` does not help decrypt
-  any other party's ciphertext. Not triggerable in this synchronous in-process PoC
-  (all dealings are collected before any complaint — no rushing window).
+  any other party's ciphertext. Not triggerable in the live consensus-integrated flow
+  (all dealings are collected before any complaint - no rushing window).
 - **FATAL if reused for signatures.** For threshold Schnorr / ECDSA / EdDSA a biasable
   key breaks the security proof and is exploitable.
 - **The WHOLE aggregate coefficient vector is adversary-influenced, not just `pub`.**
@@ -40,12 +40,12 @@ byte of `msk·G`).
 A signing deployment MUST add the Pedersen commit-then-reveal (GJKR) round before
 disqualification, so no party sees others' contributions before committing to its own.
 
-## Other gaps an audit must close (see README §3)
+## Other hardening notes (see README §3)
 
 - **Networking / DoS / equivocation** not modeled (in-memory plaintext channels only).
-- **Enforcement wiring:** integrations must route decryption through
-  `RecoverVerified` (DLEQ-gated), not raw `threshold.Recover`; the live keeper does
-  not yet.
+- **Enforcement wiring:** the live keeper routes decryption through
+  `RecoverVerified` (DLEQ-gated) on the transparent-DKG path; embedders outside the
+  keeper must do the same rather than call raw `threshold.Recover`.
 - **Constant-time:** all secret-scalar operations use variable-time `*NonConst`
   secp256k1 variants (timing side-channel on shares).
 - **RNG:** use `RunDKGSecure` (hard-wired `crypto/rand`) in production; `RunDKG(…,rng)`
@@ -54,4 +54,4 @@ disqualification, so no party sees others' contributions before committing to it
 
 ## Reporting
 
-This is experimental Limonata testnet research code. Do not deploy to mainnet.
+This is Limonata testnet code. Do not deploy to mainnet.
