@@ -23,6 +23,12 @@ Limonata is a Cosmos SDK + [cosmos/evm](https://github.com/cosmos/evm) Layer&nbs
 
 **Public testnet:** RPC `https://rpc.limonata.xyz` · Explorer `https://explorer.limonata.xyz` · Faucet `https://faucet.limonata.xyz` · Site `https://limonata.xyz`
 
+## Start here
+
+- 🚀 **Deploy a gasless contract in 5 minutes** → [limonata-quickstart](https://github.com/Limonata-Blockchain/limonata-quickstart)
+- ⚡ **One-click gasless demo** (send a real tx, pay zero gas) → [limonata.xyz/demo](https://limonata.xyz/demo)
+- 💬 **Join the community** → [Discord](https://discord.gg/vzbJ5u5Kex)
+
 > 📖 **How Limonata works**: [Testnet (live today)](HOW_IT_WORKS.md) explains what runs now and how to use it; [the mainnet plan](HOW_IT_WORKS_MAINNET.md) covers the cap table, vesting, the net-seller cap, the inflation/sybil economics ([ECONOMICS.md](ECONOMICS.md)), and what is still being built.
 
 ## What's different (the custom modules)
