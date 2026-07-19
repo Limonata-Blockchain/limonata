@@ -100,7 +100,7 @@ The **grant always comes first** - it funds the account you validate from.
 | One-shot onboarding grant (faucet-free first tx) | **LIVE** |
 | Developer self-funded gas escrow (`x/sponsorpool`) | **LIVE** |
 | Mainnet genesis (real key custody, governed reserve, vesting) | **PLANNED** |
-| Encrypted mempool / real anti-MEV | **BUILT** - threshold-encrypted mempool (2-of-3 keypers), proven end-to-end + full gov-upgrade dry-run; deploying to **testnet** at block 766558 (upgrade `encmempool-threshold-vpcap-v1`). [Guide](/how-it-works/encrypted-mempool). |
+| Encrypted mempool / real anti-MEV | **LIVE on testnet** - transparent validator DKG: the threshold key is generated and held by the validator set itself, inside consensus, with no keyper committee, coordinator, or trusted dealer. Validators take part just by running the node binary (DKG rides in vote extensions - no extra daemon, account, or fees). Decryption power is stake-weighted (key shares apportioned by bonded stake over a 256 budget; reconstruction needs shares for >2/3 of committee stake), it fails closed if any sub-2/3-stake operator could decrypt alone, and it auto-rekeys when stake drifts past 5%. Live at block 998,805, epoch 1 (upgrade `encmempool-transparent-dkg-v1`, source tags `limonata-v0.3.2` / `limonata-v0.3.3`); mainnet ships this same testnet-validated design. [Guide](/how-it-works/encrypted-mempool). |
 
 ---
 
