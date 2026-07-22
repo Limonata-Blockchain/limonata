@@ -18,7 +18,9 @@ import (
 	sdkmath "cosmossdk.io/math"
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 
+	"github.com/cosmos/evm/x/encmempool/dkg"
 	"github.com/cosmos/evm/x/encmempool/dkgnode"
+	"github.com/cosmos/evm/x/encmempool/threshold"
 	"github.com/cosmos/evm/x/encmempool/types"
 )
 
@@ -98,6 +100,104 @@ func buildLiveScaleFixture(t testing.TB, dealers, shareBudget, myPoints, thr int
 	}
 
 	return members[0].OwnedEvalPoints(), privs[0], qual, dealings
+}
+
+// detectNaive is the ORIGINAL pre-refactor algorithm, kept as a parity reference: the
+// refactored DetectPoisonedDealers must return byte-identical reports (same set, same
+// (point, dealer) order) for every input, including poisoned dealings.
+func detectNaive(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []uint64, dealings map[uint64]types.Dealing) []dkgnode.PoisonReport {
+	var reports []dkgnode.PoisonReport
+	for _, p := range myEvalPoints {
+		for _, dealer := range qual {
+			d, ok := dealings[dealer]
+			if !ok {
+				continue
+			}
+			var ct *threshold.Ciphertext
+			for i := range d.EncShares {
+				if d.EncShares[i].MemberIndex == p {
+					ct = &threshold.Ciphertext{A: d.EncShares[i].A, Nonce: d.EncShares[i].Nonce, Body: d.EncShares[i].Body}
+					break
+				}
+			}
+			if ct == nil {
+				reports = append(reports, dkgnode.PoisonReport{Dealer: dealer, Point: p})
+				continue
+			}
+			s, err := dkg.DecryptShareFrom(encPriv, p, ct)
+			if err != nil {
+				reports = append(reports, dkgnode.PoisonReport{Dealer: dealer, Point: p})
+				continue
+			}
+			commitments, perr := dkg.ParseCommitmentPoints(d.Commitments)
+			if perr != nil || !dkg.VerifyShare(commitments, p, s) {
+				reports = append(reports, dkgnode.PoisonReport{Dealer: dealer, Point: p})
+			}
+		}
+	}
+	return reports
+}
+
+// TestDetectPoisonedParity proves the refactor is output-identical to the naive original,
+// on valid dealings AND on dealings poisoned three different ways (missing share, corrupt
+// commitment, tampered ciphertext) so real reports are produced in a real order.
+func TestDetectPoisonedParity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip crypto build in -short")
+	}
+	const (
+		dealers     = 8
+		shareBudget = 96
+		myPoints    = 40
+		thr         = 65 // floor(2*96/3)+1
+	)
+	myPts, myPriv, qual, dealings := buildLiveScaleFixture(t, dealers, shareBudget, myPoints, thr)
+
+	// Poison a few dealers in distinct ways.
+	poison := func(dealerIdx uint64, mut func(d *types.Dealing)) {
+		d := dealings[dealerIdx]
+		mut(&d)
+		dealings[dealerIdx] = d
+	}
+	// (a) drop an enc-share for one of our points -> ct==nil path.
+	poison(qual[1], func(d *types.Dealing) {
+		out := d.EncShares[:0]
+		for _, s := range d.EncShares {
+			if s.MemberIndex != myPts[0] {
+				out = append(out, s)
+			}
+		}
+		d.EncShares = out
+	})
+	// (b) corrupt the commitments -> ParseCommitmentPoints / VerifyShare failure path.
+	poison(qual[3], func(d *types.Dealing) {
+		if len(d.Commitments) > 0 && len(d.Commitments[0]) > 1 {
+			d.Commitments[0][1] ^= 0xFF
+		}
+	})
+	// (c) tamper a ciphertext body -> DecryptShareFrom / VerifyShare failure path.
+	poison(qual[5], func(d *types.Dealing) {
+		for i := range d.EncShares {
+			if len(d.EncShares[i].Body) > 0 {
+				d.EncShares[i].Body[0] ^= 0xFF
+			}
+		}
+	})
+
+	want := detectNaive(myPts, myPriv, qual, dealings)
+	got := dkgnode.DetectPoisonedDealers(myPts, myPriv, qual, dealings)
+	if len(got) != len(want) {
+		t.Fatalf("report count differs: refactor=%d naive=%d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("report[%d] differs: refactor=%+v naive=%+v", i, got[i], want[i])
+		}
+	}
+	if len(want) == 0 {
+		t.Fatalf("expected the poisoned fixture to yield SOME reports, got 0 (test is not exercising the report path)")
+	}
+	t.Logf("parity OK across valid+poisoned dealings: %d reports, identical set and order", len(want))
 }
 
 // TestPoisonCostLiveScale prints the human-readable per-block cost and the amortized

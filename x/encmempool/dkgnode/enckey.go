@@ -239,19 +239,44 @@ type PoisonReport struct {
 // recovery rekey so users do not have to wait for repeated stranded ciphertexts.
 func DetectPoisonedDealers(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar, qual []uint64, dealings map[uint64]types.Dealing) []PoisonReport {
 	var reports []PoisonReport
+
+	// PERF: a dealer's Feldman commitments and enc-share layout are IMMUTABLE across all of our
+	// eval points, but the original nested loop re-parsed the commitments (decompressing t points)
+	// and re-scanned up to S enc-shares for EVERY (point, dealer) pair. For our ~130 owned points
+	// against a ~16-dealer QUAL at S=256/t=171 that is ~2k redundant commitment parses and ~530k
+	// linear share scans per call. Hoist both to ONCE PER DEALER: parse the commitments once and
+	// index the enc-shares by member point once. VerifyShare (the Feldman check) still runs per
+	// (point, dealer) since it is genuinely point-dependent. Output is byte-identical - the same
+	// (point, dealer) iteration order and the same report set as before.
+	type dealerData struct {
+		commitments  []secp256k1.JacobianPoint
+		commitBad    bool
+		shareByPoint map[uint64]*threshold.Ciphertext
+	}
+	parsed := make(map[uint64]*dealerData, len(qual))
+	for _, dealer := range qual {
+		d, ok := dealings[dealer]
+		if !ok {
+			continue // a missing dealing is a separate liveness condition, not a poison attribution
+		}
+		cps, perr := dkg.ParseCommitmentPoints(d.Commitments)
+		dd := &dealerData{commitments: cps, commitBad: perr != nil, shareByPoint: make(map[uint64]*threshold.Ciphertext, len(d.EncShares))}
+		for i := range d.EncShares {
+			// first-wins per point, matching the original inner scan's `break` on first match.
+			if _, seen := dd.shareByPoint[d.EncShares[i].MemberIndex]; !seen {
+				dd.shareByPoint[d.EncShares[i].MemberIndex] = &threshold.Ciphertext{A: d.EncShares[i].A, Nonce: d.EncShares[i].Nonce, Body: d.EncShares[i].Body}
+			}
+		}
+		parsed[dealer] = dd
+	}
+
 	for _, p := range myEvalPoints {
 		for _, dealer := range qual {
-			d, ok := dealings[dealer]
+			dd, ok := parsed[dealer]
 			if !ok {
 				continue // a missing dealing is a separate liveness condition, not a poison attribution
 			}
-			var ct *threshold.Ciphertext
-			for i := range d.EncShares {
-				if d.EncShares[i].MemberIndex == p {
-					ct = &threshold.Ciphertext{A: d.EncShares[i].A, Nonce: d.EncShares[i].Nonce, Body: d.EncShares[i].Body}
-					break
-				}
-			}
+			ct := dd.shareByPoint[p]
 			if ct == nil {
 				reports = append(reports, PoisonReport{Dealer: dealer, Point: p})
 				continue
@@ -261,8 +286,7 @@ func DetectPoisonedDealers(myEvalPoints []uint64, encPriv *secp256k1.ModNScalar,
 				reports = append(reports, PoisonReport{Dealer: dealer, Point: p})
 				continue
 			}
-			commitments, perr := dkg.ParseCommitmentPoints(d.Commitments)
-			if perr != nil || !dkg.VerifyShare(commitments, p, s) {
+			if dd.commitBad || !dkg.VerifyShare(dd.commitments, p, s) {
 				reports = append(reports, PoisonReport{Dealer: dealer, Point: p})
 			}
 		}
