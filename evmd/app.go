@@ -239,6 +239,17 @@ type EVMD struct {
 	dkgConsAddrOnce sync.Once
 	dkgConsAddr     []byte
 
+	// dkgPoison* caches this node's DetectPoisonedDealers result for the CURRENT DKG epoch.
+	// Its inputs (our owned points, our enc key, the QUAL set, the committed dealings) are FROZEN
+	// once an epoch is Active, so the result is stable per epoch - but the check decompresses every
+	// dealer's secp256k1 commitment points (modular sqrt), which pprof shows costs ~8s/block when
+	// re-run every block in ExtendVote. Caching by epoch turns that into a one-time cost. Node-local
+	// (ExtendVote is app-hash-invariant), and the cached value is identical to a fresh computation.
+	dkgPoisonMu    sync.Mutex
+	dkgPoisonEpoch uint64
+	dkgPoisonRpts  []dkgnode.PoisonReport
+	dkgPoisonSet   bool
+
 	// the module manager
 	ModuleManager      *module.Manager
 	BasicModuleManager module.BasicManager

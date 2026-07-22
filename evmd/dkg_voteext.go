@@ -328,6 +328,30 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 	return &sharedCache{ok: true, shares: shares}
 }
 
+// cachedPoisonReports returns DetectPoisonedDealers for the active epoch, computing it at most
+// ONCE per epoch. For an Active epoch the inputs (our owned points, our enc key, the QUAL set, the
+// committed dealings) are frozen, so the cached result is identical to a fresh run - this removes
+// the ~8s/block secp256k1 commitment-point decompression that pprof pinpointed as the dominant
+// ExtendVote cost. Node-local (ExtendVote) so it is app-hash-invariant.
+func (app *EVMD) cachedPoisonReports(
+	epoch uint64,
+	myPoints []uint64,
+	ek *dkgnode.EncKey,
+	qual []uint64,
+	dealings map[uint64]encmempooltypes.Dealing,
+) []dkgnode.PoisonReport {
+	app.dkgPoisonMu.Lock()
+	defer app.dkgPoisonMu.Unlock()
+	if app.dkgPoisonSet && app.dkgPoisonEpoch == epoch {
+		return app.dkgPoisonRpts
+	}
+	rpts := dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, qual, dealings)
+	app.dkgPoisonEpoch = epoch
+	app.dkgPoisonRpts = rpts
+	app.dkgPoisonSet = true
+	return rpts
+}
+
 func (app *EVMD) buildDkgPoisonReports(ctx sdk.Context, ek *dkgnode.EncKey, op string) []encmempooltypes.VoteExtComplaint {
 	k := app.EncMempoolKeeper
 	epoch := k.GetActiveEpoch(ctx)
@@ -358,7 +382,7 @@ func (app *EVMD) buildDkgPoisonReports(ctx sdk.Context, ek *dkgnode.EncKey, op s
 	}
 	dealings := map[uint64]encmempooltypes.Dealing{}
 	k.IterateDealings(ctx, epoch, func(d encmempooltypes.Dealing) { dealings[d.DealerIndex] = d })
-	reports := dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, ak.Qual, dealings)
+	reports := app.cachedPoisonReports(epoch, myPoints, ek, ak.Qual, dealings)
 	if len(reports) == 0 {
 		return nil
 	}
