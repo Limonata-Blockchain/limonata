@@ -19,13 +19,13 @@ import (
 //
 // All logic lives in BeginBlock so every node computes identical state: there is no
 // proposer-only logic and no ABCI++ vote extension. This is the load-bearing reason
-// the prototype is consensus-safe.
+// the commit-reveal path is consensus-safe.
 //
-// HONESTY: this is a delay/ordering primitive, NOT encryption. "Execute" here means
-// the module records the deterministic execution order and emits an event; it does
-// not re-inject the payload into the EVM/tx pipeline. The reveal that a user submits
-// is itself an ordinary tx. Real MEV resistance requires threshold encryption with
-// >= 2 independent keypers, which plugs into this exact commit/reveal/execute slot.
+// SCOPE: the commit-reveal path here is a delay/ordering primitive, NOT encryption -
+// its reveal is an ordinary user tx. The anti-MEV encryption layer is the transparent
+// validator DKG threshold encryption (live on Limonata testnet 10777), which plugs
+// into this exact commit/reveal/execute slot and, with EncExec on, re-injects the
+// decrypted tx into the EVM (see decryptMatured / evm_exec.go).
 func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 	// PANIC-GUARD (symmetry with EndBlockDKG): BeginBlock runs inside consensus, so an
 	// unrecovered panic here halts the whole chain. The per-ciphertext decrypt path already
@@ -141,8 +141,8 @@ func (k Keeper) BeginBlock(ctx sdk.Context) (err error) {
 // block they mature. Since no new EncTx are admitted while disabled and DecryptDelay is
 // bounded, the in-flight set fully drains within a bounded number of blocks — no permanent
 // strand. GC (not decrypt) is the correct kill-switch semantics: the module is being turned
-// OFF and the PoC never re-injects decrypted bodies into the EVM, so shedding the in-flight
-// ciphertexts with a loud event is the clean, non-stranding outcome.
+// OFF (in-flight ciphertexts are not executed on the way out), so shedding them
+// with a loud event is the clean, non-stranding outcome.
 func (k Keeper) drainDisabledEncTx(ctx sdk.Context, cur uint64, _ types.Params) {
 	matured, truncated := k.CollectMaturedUpTo(ctx, cur, maxDecryptScanPerBlock)
 	for _, e := range matured {
@@ -160,16 +160,13 @@ func (k Keeper) drainDisabledEncTx(ctx sdk.Context, cur uint64, _ types.Params) 
 	}
 }
 
-// decryptMatured combines keyper shares to decrypt every EncTx maturing at height
-// cur, in deterministic (seq) order. PROTOTYPE: it emits the decrypted body as an
-// event (proving decryption) rather than re-injecting it into the EVM pipeline.
-//
-// REMAINING GAP (deferred): re-injecting the decrypted plaintext (an RLP EVM tx) into
-// EVM execution. That requires decoding the tx, running it through x/vm's state
-// transition + ante/gas/nonce accounting inside BeginBlock in this deterministic
-// order — a large, halt-risk pipeline change. It is intentionally NOT done here so
-// the multi-node reliability hardening stays build-stable; the decrypted-body event
-// is the stable seam a future EVM-injection step plugs into.
+// decryptMatured combines shares to decrypt every EncTx maturing at height cur, in
+// deterministic (seq) order, and emits the decrypted-body event (proving decryption).
+// When EncExec is enabled it also re-injects the decrypted RLP EVM tx and executes it
+// in this deterministic order — decoding the tx and running it through x/vm's state
+// transition + ante/gas/nonce accounting inside BeginBlock, bounded by a per-block gas
+// ceiling (see evm_exec.go / executeDecryptedTx). With EncExec off, the decrypted-body
+// event is the seam the execution step plugs into.
 //
 // On the DKG path (e.Epoch > 0) it routes through dkg.RecoverVerified: each keyper's
 // partial is checked against its public share key (recomputed from the epoch's DKG

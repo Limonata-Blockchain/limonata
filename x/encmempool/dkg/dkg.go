@@ -3,7 +3,7 @@
 // (see LICENSE.dkg at the repository root). NOT licensed under Apache-2.0 - this file is a
 // separately-licensed part of the Limonata transparent-DKG / encrypted-mempool work.
 
-// Package dkg is an EXPERIMENTAL, standalone joint-Feldman VSS Distributed Key
+// Package dkg is the transparent joint-Feldman VSS Distributed Key
 // Generation for the threshold-ElGamal encrypted mempool. (It is plain single-round
 // joint-Feldman — NOT the Pedersen/GJKR commit-then-reveal variant; see the KEY-
 // BIASABILITY caveat below.) It replaces the TRUSTED dealer in package threshold
@@ -21,12 +21,11 @@
 //
 // It also adds a Chaum-Pedersen NIZK (see proof.go) so a single keyper's partial
 // decryption D_m = x_m*A can be verified against its PUBLIC share key Y_m = x_m*G
-// BEFORE Recover — closing the "no per-share proof" gap of the prototype.
+// BEFORE Recover — closing the earlier "no per-share proof" gap.
 //
-// This package is a CRYPTO PROOF OF CONCEPT: parties are in-memory Go structs that
-// exchange messages via other structs (no networking, no encrypted point-to-point
-// channels). It is NOT wired into any module, app.go, or consensus. It is NOT
-// audited. Do not use in production without a security review.
+// These crypto primitives are wired into x/encmempool and consensus via ABCI++ vote
+// extensions (see evmd/dkg_voteext.go) and run on Limonata testnet 10777; the
+// standalone in-memory harness in the tests exercises them without networking.
 //
 // KEY-BIASABILITY CAVEAT (documented, deliberately NOT fixed here): this is plain
 // joint-Feldman with a single dealing round and no commit-then-reveal / proof-of-
