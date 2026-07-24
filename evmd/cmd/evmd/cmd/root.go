@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"os"
+	"time"
 
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
@@ -153,6 +154,15 @@ func initCometConfig() *cmtcfg.Config {
 	// these values put a higher strain on node memory
 	// cfg.P2P.MaxNumInboundPeers = 100
 	// cfg.P2P.MaxNumOutboundPeers = 40
+
+	// Faster-block consensus defaults (proven on testnet 10777: block time 5.3s -> 3.7s).
+	// timeout_propose = 5s gives proposals enough margin that round 0 succeeds instead of
+	// timing out into a wasteful round change; timeout_commit = 1s trims the post-commit wait.
+	// These ship as the DEFAULT config for a fresh `init` (so genesis validators get fast blocks
+	// without hand-editing config.toml); each operator can still override them per-node. Existing
+	// nodes keep their already-written config.toml. Tune to the deployment's real proposal latency.
+	cfg.Consensus.TimeoutPropose = 5 * time.Second
+	cfg.Consensus.TimeoutCommit = 1 * time.Second
 
 	return cfg
 }
