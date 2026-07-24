@@ -46,9 +46,14 @@ func (AppModuleBasic) DefaultGenesis(_ codec.JSONCodec) json.RawMessage {
 	return bz
 }
 func (AppModuleBasic) ValidateGenesis(_ codec.JSONCodec, _ client.TxEncodingConfig, bz json.RawMessage) error {
-	var gs types.GenesisState
-	if err := json.Unmarshal(bz, &gs); err != nil {
-		return fmt.Errorf("failed to unmarshal %s genesis: %w", types.ModuleName, err)
+	// The module may be ABSENT from an older genesis (added after that genesis was cut).
+	// Treat an empty/missing app_state as the default genesis so `validate-genesis` does
+	// not false-reject a chain genesis the running node already accepts.
+	gs := *types.DefaultGenesisState()
+	if len(bz) > 0 {
+		if err := json.Unmarshal(bz, &gs); err != nil {
+			return fmt.Errorf("failed to unmarshal %s genesis: %w", types.ModuleName, err)
+		}
 	}
 	return gs.Validate()
 }
@@ -68,9 +73,11 @@ func (AppModule) Name() string                          { return types.ModuleNam
 func (am AppModule) RegisterServices(_ module.Configurator) {}
 
 func (am AppModule) InitGenesis(ctx sdk.Context, _ codec.JSONCodec, data json.RawMessage) []abci.ValidatorUpdate {
-	var gs types.GenesisState
-	if err := json.Unmarshal(data, &gs); err != nil {
-		panic(err)
+	gs := *types.DefaultGenesisState()
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &gs); err != nil {
+			panic(err)
+		}
 	}
 	if err := am.keeper.InitGenesis(ctx, gs); err != nil {
 		panic(err)

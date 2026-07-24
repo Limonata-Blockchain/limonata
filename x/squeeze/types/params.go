@@ -60,6 +60,14 @@ func DefaultGenesisState() *GenesisState { return &GenesisState{Params: DefaultP
 // push the fee split to economy-breaking values (e.g. zero burn, or a validator
 // majority-take that looks like yield).
 func (p Params) Validate() error {
+	// A zero/empty config (both bps 0) is the DISABLED state: an empty genesis
+	// (app_state.squeeze = {}, e.g. the retired module) yields zero params and does no
+	// fee split at all, so there is nothing to bound. Treat it as valid so
+	// `validate-genesis` accepts the official chain genesis (the running node already
+	// tolerates it). Any NON-zero config still goes through the full safety bounds below.
+	if p.BurnBps == 0 && p.GrantBps == 0 {
+		return nil
+	}
 	if p.BurnBps < MinBurnBps || p.BurnBps > MaxBurnBps {
 		return fmt.Errorf("burn_bps %d out of allowed range [%d,%d]", p.BurnBps, MinBurnBps, MaxBurnBps)
 	}
