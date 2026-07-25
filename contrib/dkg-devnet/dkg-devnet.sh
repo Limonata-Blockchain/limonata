@@ -115,7 +115,7 @@ for i in $(seq 0 $((N-1))); do
   sed -i \
     -e "s#^laddr = \"tcp://127.0.0.1:26657\"#laddr = \"tcp://127.0.0.1:$((base+657))\"#" \
     -e "s#^laddr = \"tcp://0.0.0.0:26656\"#laddr = \"tcp://0.0.0.0:$((base+656))\"#" \
-    -e "s#^persistent_peers = \"\"#persistent_peers = \"$peers\"#" \
+    -e "s#^persistent_peers = \".*\"#persistent_peers = \"$peers\"#" \
     -e 's#^addr_book_strict = true#addr_book_strict = false#' \
     -e 's#^allow_duplicate_ip = false#allow_duplicate_ip = true#' \
     -e 's#^type = "flood"#type = "app"#' \
