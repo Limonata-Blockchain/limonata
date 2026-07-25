@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	goruntime "runtime"
 	"sync"
 
@@ -238,17 +239,30 @@ type EVMD struct {
 	// load failure (e.g. a full node) degrades to non-participation, never a halt.
 	dkgConsAddrOnce sync.Once
 	dkgConsAddr     []byte
+	dkgConsAddrErr  error
+	// dkgPrivValKeyFile is the RESOLVED priv-validator key file path (CometBFT's
+	// priv_validator_key_file setting, which an operator may relocate). AUDIT FIX (DKG-ID-1):
+	// the loader used to hardcode <home>/config/priv_validator_key.json and ignore the setting.
+	dkgPrivValKeyFile string
+	// dkgRemoteSigner records that CometBFT is configured with a remote signer
+	// (priv_validator_laddr). Such a node is DEFINITIONALLY a validator, so a failure to
+	// self-identify for the DKG is a misconfiguration worth shouting about, not the ordinary
+	// full-node case. It is only used to pick the log level.
+	dkgRemoteSigner bool
 
-	// dkgPoison* caches this node's DetectPoisonedDealers result for the CURRENT DKG epoch.
+	// dkgPoison* caches this node's DetectPoisonedDealers result PER DKG EPOCH.
 	// Its inputs (our owned points, our enc key, the QUAL set, the committed dealings) are FROZEN
 	// once an epoch is Active, so the result is stable per epoch - but the check decompresses every
 	// dealer's secp256k1 commitment points (modular sqrt), which pprof shows costs ~8s/block when
 	// re-run every block in ExtendVote. Caching by epoch turns that into a one-time cost. Node-local
 	// (ExtendVote is app-hash-invariant), and the cached value is identical to a fresh computation.
-	dkgPoisonMu    sync.Mutex
-	dkgPoisonEpoch uint64
-	dkgPoisonRpts  []dkgnode.PoisonReport
-	dkgPoisonSet   bool
+	//
+	// AUDIT FIX (DKG-PERF-2): this was a SINGLE slot keyed on one epoch, which only ever served the
+	// active-epoch call site. deriveEpochShares runs the identical detection for EVERY in-flight
+	// ciphertext's epoch - including a superseded-but-draining one - so a single slot would thrash
+	// between two live epochs and re-run the full cost on both. It is a small bounded map instead.
+	dkgPoisonMu   sync.Mutex
+	dkgPoisonRpts map[uint64][]dkgnode.PoisonReport
 
 	// the module manager
 	ModuleManager      *module.Manager
@@ -473,6 +487,19 @@ func NewExampleApp(
 	// TRANSPARENT in-node DKG: remember the node home so the vote-extension ExtendVote handler
 	// can auto-generate/load this node's DKG enc key (<home>/dkg_enc_key.json) on first boot.
 	app.dkgHome = homePath
+	// DKG-ID-1: resolve CometBFT's priv_validator_key_file rather than assuming the default path.
+	// The DKG reads only the ADDRESS field of that file, but it is the node's sole source of its own
+	// identity, so an operator who relocated the file (or who runs a remote signer and removed it)
+	// would otherwise drop out of the committee silently. priv_validator_laddr tells us a remote
+	// signer is in use, which makes a self-identification failure an error rather than the normal
+	// full-node case.
+	if pv := cast.ToString(appOpts.Get("priv_validator_key_file")); pv != "" {
+		if !filepath.IsAbs(pv) {
+			pv = filepath.Join(homePath, pv)
+		}
+		app.dkgPrivValKeyFile = pv
+	}
+	app.dkgRemoteSigner = cast.ToString(appOpts.Get("priv_validator_laddr")) != ""
 	// set the governance module account as the authority for conducting upgrades
 	app.UpgradeKeeper = upgradekeeper.NewKeeper(
 		skipUpgradeHeights,

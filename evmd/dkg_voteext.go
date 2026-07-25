@@ -8,6 +8,7 @@ package evmd
 import (
 	"bytes"
 	"math/bits"
+	"path/filepath"
 	"sort"
 
 	abci "github.com/cometbft/cometbft/abci/types"
@@ -99,16 +100,59 @@ func (app *EVMD) myOperator(ctx sdk.Context) string {
 		if app.dkgHome == "" {
 			return
 		}
-		app.dkgConsAddr, _ = dkgnode.LoadConsAddress(app.dkgHome)
+		app.dkgConsAddr, app.dkgConsAddrErr = dkgnode.LoadConsAddressFrom(app.privValKeyPath())
 	})
 	if len(app.dkgConsAddr) == 0 {
+		app.logNoDkgIdentity(ctx, "cannot read this node's consensus address", app.dkgConsAddrErr)
 		return ""
 	}
 	val, err := app.StakingKeeper.GetValidatorByConsAddr(ctx, sdk.ConsAddress(app.dkgConsAddr))
 	if err != nil {
+		app.logNoDkgIdentity(ctx, "consensus address does not resolve to a bonded validator", err)
 		return ""
 	}
 	return val.GetOperator()
+}
+
+// privValKeyPath is the resolved priv-validator key file, falling back to CometBFT's default
+// layout when the setting was not readable from the app options.
+func (app *EVMD) privValKeyPath() string {
+	if app.dkgPrivValKeyFile != "" {
+		return app.dkgPrivValKeyFile
+	}
+	return filepath.Join(app.dkgHome, dkgnode.PrivValKeyFile)
+}
+
+// dkgIdentityWarnEvery rate-limits the self-identification alarm so it cannot flood a log.
+const dkgIdentityWarnEvery = 200
+
+// logNoDkgIdentity reports that this node cannot self-identify and is therefore contributing
+// NOTHING to the DKG. AUDIT FIX (DKG-ID-1): this used to be an unlogged `return ""`, which made the
+// most damaging misconfiguration in the system completely invisible - the node keeps signing blocks,
+// stays bonded and unjailed, and looks perfectly healthy while announcing no enc key, dealing
+// nothing and serving no decryption shares. It is ERROR level when a remote signer is configured
+// (that node is definitionally a validator, so this is a real misconfiguration) and DEBUG otherwise,
+// because every ordinary full node takes this path by design. Node-local, so log level and rate
+// limiting carry no consensus obligation.
+func (app *EVMD) logNoDkgIdentity(ctx sdk.Context, reason string, err error) {
+	if ctx.BlockHeight()%dkgIdentityWarnEvery != 0 {
+		return
+	}
+	args := []any{
+		"reason", reason,
+		"priv_validator_key_file", app.privValKeyPath(),
+		"err", err,
+	}
+	if !app.dkgRemoteSigner {
+		ctx.Logger().Debug("encmempool: node is not a DKG committee participant", args...)
+		return
+	}
+	ctx.Logger().Error(
+		"encmempool: DKG NOT PARTICIPATING - this node cannot self-identify, so it announces no enc key, deals nothing and serves no decryption shares",
+		append(args,
+			"hint", "a remote signer is configured, so this node is a validator: the DKG still needs a priv_validator_key.json at the path above whose address field is your REAL consensus address (the private key is never read). The value is cached for the process lifetime, so restart after fixing it.",
+		)...,
+	)
 }
 
 // encKey lazily loads (or, on first boot, generates+persists) the node's secp256k1 DKG
@@ -314,7 +358,12 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 	}
 	dealings := map[uint64]encmempooltypes.Dealing{}
 	k.IterateDealings(ctx, epoch, func(d encmempooltypes.Dealing) { dealings[d.DealerIndex] = d })
-	if reports := dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, ak.Qual, dealings); len(reports) > 0 {
+	// AUDIT FIX (DKG-PERF-2): route through the per-epoch cache. This is the SAME detection with the
+	// SAME frozen inputs as buildDkgPoisonReports, but it was left uncached when the cache landed -
+	// and unlike that call site it runs only when a matured ciphertext is in flight, i.e. exactly
+	// when an attacker would want to charge every committee member the full O(points x dealers)
+	// commitment decompression on every block.
+	if reports := app.cachedPoisonReports(epoch, myPoints, ek, ak.Qual, dealings); len(reports) > 0 {
 		for _, r := range reports {
 			ctx.Logger().Error("encmempool: DKG share poison detected (offline-victim residual); suppressing decrypt shares for this epoch until recovery rekey",
 				"epoch", epoch, "dealer", r.Dealer, "point", r.Point)
@@ -328,11 +377,17 @@ func (app *EVMD) deriveEpochShares(ctx sdk.Context, ek *dkgnode.EncKey, op strin
 	return &sharedCache{ok: true, shares: shares}
 }
 
-// cachedPoisonReports returns DetectPoisonedDealers for the active epoch, computing it at most
-// ONCE per epoch. For an Active epoch the inputs (our owned points, our enc key, the QUAL set, the
-// committed dealings) are frozen, so the cached result is identical to a fresh run - this removes
-// the ~8s/block secp256k1 commitment-point decompression that pprof pinpointed as the dominant
-// ExtendVote cost. Node-local (ExtendVote) so it is app-hash-invariant.
+// dkgPoisonCacheMax bounds the per-epoch poison-verdict cache. Only the ACTIVE epoch and any
+// superseded-but-still-draining epochs are ever queried, so a handful of slots is ample; the bound
+// stops a long-running node from retaining one verdict per epoch forever.
+const dkgPoisonCacheMax = 4
+
+// cachedPoisonReports returns DetectPoisonedDealers for an epoch, computing it at most ONCE per
+// epoch. Once a round is finalized its inputs (our owned points, our enc key, the QUAL set, the
+// committed dealings) are frozen - dealings are only ever deleted, never added - so the cached
+// result is identical to a fresh run. This removes the ~8s/block secp256k1 commitment-point
+// decompression that pprof pinpointed as the dominant ExtendVote cost. Node-local (ExtendVote) so
+// it is app-hash-invariant.
 func (app *EVMD) cachedPoisonReports(
 	epoch uint64,
 	myPoints []uint64,
@@ -342,13 +397,24 @@ func (app *EVMD) cachedPoisonReports(
 ) []dkgnode.PoisonReport {
 	app.dkgPoisonMu.Lock()
 	defer app.dkgPoisonMu.Unlock()
-	if app.dkgPoisonSet && app.dkgPoisonEpoch == epoch {
-		return app.dkgPoisonRpts
+	if app.dkgPoisonRpts == nil {
+		app.dkgPoisonRpts = make(map[uint64][]dkgnode.PoisonReport, dkgPoisonCacheMax)
+	}
+	if rpts, ok := app.dkgPoisonRpts[epoch]; ok {
+		return rpts
 	}
 	rpts := dkgnode.DetectPoisonedDealers(myPoints, ek.Priv, qual, dealings)
-	app.dkgPoisonEpoch = epoch
-	app.dkgPoisonRpts = rpts
-	app.dkgPoisonSet = true
+	// Evict lowest-epoch-first (epochs increase monotonically) so the cache stays O(1).
+	for len(app.dkgPoisonRpts) >= dkgPoisonCacheMax {
+		oldest := uint64(0)
+		for e := range app.dkgPoisonRpts {
+			if oldest == 0 || e < oldest {
+				oldest = e
+			}
+		}
+		delete(app.dkgPoisonRpts, oldest)
+	}
+	app.dkgPoisonRpts[epoch] = rpts
 	return rpts
 }
 

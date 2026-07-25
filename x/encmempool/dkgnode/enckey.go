@@ -26,9 +26,11 @@ import (
 // EncKeyFile is the node-home-relative filename of the persisted DKG enc key.
 const EncKeyFile = "dkg_enc_key.json"
 
-// privValKeyFile is the standard CometBFT path (relative to the node home) of the file
-// carrying the node's consensus key + its derived consensus address.
-const privValKeyFile = "config/priv_validator_key.json"
+// PrivValKeyFile is the DEFAULT CometBFT path (relative to the node home) of the file
+// carrying the node's consensus key + its derived consensus address. CometBFT lets an
+// operator move it with the priv_validator_key_file setting, so callers that can read the
+// node config should resolve that and use LoadConsAddressFrom instead of assuming this.
+const PrivValKeyFile = "config/priv_validator_key.json"
 
 // LoadConsAddress reads THIS node's consensus address (the 20-byte address CometBFT tags
 // its votes with) from <homeDir>/config/priv_validator_key.json. It is node-local and
@@ -38,7 +40,22 @@ const privValKeyFile = "config/priv_validator_key.json"
 // possession to that identity. Returns an error when the node has no validator key (a full
 // node), in which case the caller simply does not participate.
 func LoadConsAddress(homeDir string) ([]byte, error) {
-	raw, err := os.ReadFile(filepath.Join(homeDir, privValKeyFile))
+	return LoadConsAddressFrom(filepath.Join(homeDir, PrivValKeyFile))
+}
+
+// LoadConsAddressFrom is LoadConsAddress against an EXPLICIT priv-validator key file path,
+// for callers that can resolve CometBFT's priv_validator_key_file setting.
+//
+// REMOTE-SIGNER NOTE (audit fix DKG-ID-1): this reads ONLY the "address" field; the private
+// key is never parsed, used or exposed. But the DKG has no other source of the node's own
+// identity, so a validator running a remote signer (Horcrux and friends) must STILL keep a
+// file here whose address is its real consensus address. Without one, cosmos-sdk's
+// LoadOrGenFilePV silently generates a fresh random key file at startup before the remote
+// signer is attached: the node signs blocks perfectly through the signer while the DKG
+// resolves a nonexistent operator and contributes nothing. Callers must therefore treat a
+// failure here as loud when a remote signer is configured.
+func LoadConsAddressFrom(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

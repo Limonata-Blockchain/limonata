@@ -357,6 +357,10 @@ func (k Keeper) decryptMatured(ctx sdk.Context, cur uint64, p types.Params) {
 						sdk.NewAttribute("height", strconv.FormatUint(cur, 10)),
 						sdk.NewAttribute("have", strconv.Itoa(len(shares))),
 						sdk.NewAttribute("need", strconv.Itoa(need)),
+						// ENC-ATTR-1: name WHO did not contribute, while the shares still exist —
+						// releaseEncTx deletes them on the next line, so this is the last moment the
+						// evidence is readable from state.
+						sdk.NewAttribute("missing_operators", k.MissingShareOperators(ctx, e.Epoch, shares)),
 						sdk.NewAttribute("reason", err.Error())))
 					k.bumpDecryptStrandStreak(ctx, e.Epoch) // MED-2: sustained per-epoch streak triggers a recovery rekey
 					return                                  // release stays true

@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"strconv"
+	"strings"
 
 	corestore "cosmossdk.io/core/store"
 
@@ -592,6 +594,79 @@ func (k Keeper) CollectShares(ctx context.Context, h, seq uint64) []types.EncSha
 		}
 	}
 	return out
+}
+
+// MissingShareOperators returns the sorted, comma-joined operator addresses of an epoch's committee
+// members that COULD have contributed a decryption share for a ciphertext and did not.
+//
+// AUDIT FIX (ENC-ATTR-1): withholding decryption shares is a working censorship primitive and it was
+// always DERIVABLE — the share records carry their keyper and the round record carries the expected
+// member set — but it was never RECORDED. releaseEncTx deletes every share in the same block the
+// strand event fires, so once a ciphertext is dropped the state-side evidence is gone and only an
+// archival replay of block data could reconstruct who withheld. Naming the missing operators on the
+// strand event makes sustained non-participation permanently self-evident in the event log, which is
+// what any accountability or exclusion mechanism has to be built on.
+//
+// Because that is its purpose, a FALSE name is the worst possible output, so membership is decided
+// two ways and either one clears a member:
+//
+//   - by eval point: a stored share carries the Shamir point it answers, and a point is owned by
+//     exactly one member. This is identity-free and is the authoritative test.
+//   - by keyper string: EncShare.Keyper is the OPERATOR address on the transparent vote-extension
+//     path but the ACCOUNT address on the legacy signed-tx path (that path authorizes by account),
+//     and RoundMember carries both. Matching only one of them named the whole committee on the
+//     other path.
+//
+// Members that own NO eval point are skipped entirely: the stake-weighted allocation deliberately
+// gives a negligible-stake member zero points, the share-ingest path refuses any share from a member
+// at a point it does not own, so such a member is structurally incapable of contributing and is not
+// a withholder.
+//
+// CAVEAT for any future consumer: this is evidence of NON-CONTRIBUTION, not proof of misbehaviour. A
+// member that detected a poisoned dealing correctly suppresses all of its shares for the epoch, and a
+// member that is merely offline looks identical to one that is censoring. Do not wire it into an
+// automated penalty without a second signal.
+//
+// Informational only: a pure function of committed state, sorted for a stable string, bounded by the
+// committee size, and computed identically on every node.
+func (k Keeper) MissingShareOperators(ctx context.Context, epoch uint64, shares []types.EncShare) string {
+	round, ok := k.GetDkgRound(ctx, epoch)
+	if !ok {
+		return ""
+	}
+	byKeyper := make(map[string]struct{}, len(shares))
+	byPoint := make(map[uint64]struct{}, len(shares))
+	for _, s := range shares {
+		byKeyper[s.Keyper] = struct{}{}
+		byPoint[s.Index] = struct{}{}
+	}
+	missing := make([]string, 0, len(round.Members))
+	for _, m := range round.Members {
+		points := m.OwnedEvalPoints()
+		if len(points) == 0 {
+			continue // owns no share slot: cannot contribute, so cannot be withholding
+		}
+		if _, ok := byKeyper[m.OperatorAddr]; ok {
+			continue
+		}
+		if m.AccountAddr != "" {
+			if _, ok := byKeyper[m.AccountAddr]; ok {
+				continue
+			}
+		}
+		contributed := false
+		for _, p := range points {
+			if _, ok := byPoint[p]; ok {
+				contributed = true
+				break
+			}
+		}
+		if !contributed {
+			missing = append(missing, m.OperatorAddr)
+		}
+	}
+	sort.Strings(missing)
+	return strings.Join(missing, ",")
 }
 
 // hasEncShareAt reports whether a decryption share is ALREADY stored at the exact eval-point slot
