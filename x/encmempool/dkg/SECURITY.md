@@ -54,4 +54,9 @@ disqualification, so no party sees others' contributions before committing to it
 
 ## Reporting
 
-This is Limonata testnet code. Do not deploy to mainnet.
+Report vulnerabilities privately, never in a public issue, pull request or Discord message:
+
+https://github.com/Limonata-Blockchain/limonata/security/advisories/new
+
+See the repository root `SECURITY.md` for scope, our response commitments and the rules of
+engagement. This is Limonata testnet code; mainnet has not launched.

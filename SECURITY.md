@@ -1,64 +1,88 @@
-# Coordinated Vulnerability Disclosure Policy
+# Security Policy
 
-The Cosmos ecosystem believes that strong security is a blend of highly
-technical security researchers who care about security and the forward
-progression of the ecosystem and the attentiveness and openness of Cosmos core
-contributors to help continually secure our operations.
+Limonata is a Cosmos SDK + cosmos/evm Layer 1. The public network today is the testnet
+`limonata_10777-1` (EVM chain id 10777). Mainnet has not launched.
 
-> **IMPORTANT**: *DO NOT* open public issues on this repository for security
-> vulnerabilities.
+> Do NOT open a public issue, pull request, Discord message, or social post for a security
+> vulnerability.
+
+## Supported versions
+
+| Scope | Supported |
+|---|---|
+| Latest tagged release (currently `limonata-v0.3.4`) | yes |
+| `main` branch | yes |
+| Older tags | no |
+
+A report is in scope if it reproduces against the latest tagged release or `main`. Findings in
+inherited upstream `cosmos/evm` or Cosmos SDK code that Limonata does not modify should also go
+upstream. Tell us and we will coordinate.
+
+## How to report
+
+Preferred: open a private security advisory on GitHub.
+
+https://github.com/Limonata-Blockchain/limonata/security/advisories/new
+
+This gives us a private thread, file attachments, a private fork to develop the fix in, and a
+coordinated publication and CVE path.
+
+Alternative: email security@limonata.xyz.
+
+If you need end to end encryption and neither route works for you, send a first contact message
+with no technical detail and we will arrange a key.
+
+Please include: affected version or commit, component (module, precompile, or binary), reproduction
+steps, observed and expected behaviour, and your assessment of impact. A proof of concept against a
+local devnet is welcome. See `contrib/dkg-devnet/` for an isolated devnet kit. Say up front whether
+you want public credit.
+
+## What we commit to
+
+- Acknowledge your report within 48 hours.
+- Give you an initial triage and severity assessment within 5 business days.
+- Keep you updated at least every 7 days while the issue is open.
+- Agree an embargo period and a public disclosure date with you in writing, rather than leaving it
+  open ended.
+- Credit you by name or handle in the advisory and the release notes, unless you ask us not to.
+- Not pursue or support legal action against you for research conducted under this policy.
+
+Because consensus level fixes on a live network require a coordinated validator upgrade, embargo
+windows for consensus bugs are typically measured in weeks, not days. We will tell you the expected
+timeline as soon as we have triaged.
+
+We score severity by impact on the mainnet genesis binary, not by "it is only a testnet". The
+mainnet binary is built from this code.
+
+## Rules of engagement
+
+We ask that you:
+
+- Test against a local devnet or your own isolated network.
+- Do not run exploit attempts, denial of service, spam, resource exhaustion, or Byzantine validator
+  behaviour against the public testnet without prior written approval from us, per test.
+- Do not access, modify, or exfiltrate data belonging to other users.
+- Do not use social engineering, phishing, or physical attacks against contributors or
+  infrastructure providers.
+- Give us reasonable time to ship a fix before publishing.
+
+Read only observation of the public testnet, running your own node, and testing on your own
+isolated network are always in scope and need no approval.
+
+## Bounty
+
+There is no bug bounty program yet. An independent security audit and a public bug bounty are
+committed before mainnet launch. Reporters who help us before then will be credited publicly and
+invited to the bounty program when it opens.
 
 ## Scope
 
-| Scope                 |
-|-----------------------|
-| last release (tagged) |
-| main branch           |
+In scope: consensus and state machine bugs, DKG and encrypted mempool (`x/encmempool`), the gas
+sponsorship modules (`x/gassponsor`, `x/sponsorpool`), custom precompiles, the passkey account
+system, key handling, and anything that can halt the chain, fork it, mint tokens, steal funds, or
+break the confidentiality guarantees of the encrypted mempool.
 
-The latest **release tag** of this repository is supported for security updates
-as well as the **main** branch. Security vulnerabilities should be reported if
-the vulnerability can be reproduced on either one of those.
-
-## Reporting a Vulnerability
-
-| Reporting methods                                             | Bounty eligible |
-|---------------------------------------------------------------|-----------------|
-| [HackerOne program][h1]                                       |       no        |
-| [security@cosmoslabs.io](mailto:security@cosmoslabs.io)       |       no        |
-
-Issues identified in this repository may be eligible for a [bug bounty][h1]. For your report to be bounty
-eligible it must be reported exclusively through the [HackerOne Bug Bounty][h1].
-
-If you do not wish to be eligible for a bounty or do not want to use the HackerOne platform to report an
-issue, please send your report via email to [security@cosmoslabs.io](mailto:security@cosmoslabs.io) with
-reproduction steps and details of the issue.
-
-### Guidelines
-
-We require that all researchers:
-
-* Abide by this policy to disclose vulnerabilities, and avoid posting
-  vulnerability information in public places, including GitHub, Discord,
-  Telegram, and Twitter.
-* Make every effort to avoid privacy violations, degradation of user experience,
-  disruption to production systems (including but not limited to the Cosmos
-  Hub), and destruction of data.
-* Keep any information about vulnerabilities that you’ve discovered confidential
-  between yourself and the Cosmos engineering team until the issue has been
-  resolved and disclosed.
-* Avoid posting personally identifiable information, privately or publicly.
-
-If you follow these guidelines when reporting an issue to us, we commit to:
-
-* Not pursue or support any legal action related to your research on this
-  vulnerability
-* Work with you to understand, resolve and ultimately disclose the issue in a
-  timely fashion
-
-### More information
-
-* See [EXAMPLES.md] for some of the examples that we are interested in for the
-  bug bounty program.
-
-[h1]: https://hackerone.com/cosmos
-[EXAMPLES.md]: https://github.com/cosmos/security/blob/main/resources/CLASSIFICATION_MATRIX.md#real-world-examples
+Out of scope: findings that require a validator to already control more than one third of stake,
+issues in third party infrastructure we do not run, and best practice recommendations with no
+demonstrated impact. Report them anyway if you think they matter, but expect them to be triaged as
+hardening rather than as vulnerabilities.
