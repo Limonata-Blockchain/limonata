@@ -146,6 +146,111 @@ func (k Keeper) purgeDealings(ctx context.Context, epoch uint64) {
 	}
 }
 
+// purgeDealingsIfDrained sheds a superseded epoch's dealing bulk ONLY when nothing still needs it,
+// and reports whether it purged.
+//
+// AUDIT FIX (DKG-GC-ACTIVE): the two rekey branches used to purge the superseded-but-still-ACTIVE
+// epoch's dealings UNCONDITIONALLY, on the (pre-transparent) assumption recorded in purgeDealings
+// that "the old dealing bulk is dead weight once the round finalized". On the TRANSPARENT path that
+// assumption is false. A node persists NO Shamir share anywhere: deriveEpochShares re-derives the
+// whole set from the committed dealings on EVERY block, and DeriveShares hard-fails on the first
+// absent QUAL dealer. So deleting the dealings while the epoch is still the SERVING key makes every
+// node on the network unable to mint a decryption share for it — while SubmitEncrypted keeps
+// stamping NEW ciphertexts onto that same still-active epoch for the ~DealWindow+ComplaintWindow
+// blocks until the fresh round finalizes. Those ciphertexts are born undecryptable and strand.
+// Worse, the poison-recovery rekey (forceDecryptHealthRekey) routes through this very path, so the
+// recovery destroyed exactly the in-flight traffic it was invoked to rescue.
+//
+// The correct predicate is "is this epoch still LOAD-BEARING", which has two independent halves and
+// BOTH must hold before the bulk can go:
+//
+//	(a) it is no longer the SERVING key. A rekey opens epoch cur+1 but does NOT advance ActiveEpoch —
+//	    finalizeRound is its only writer — so the superseded epoch keeps serving, and SubmitEncrypted
+//	    keeps stamping it, for the whole DealWindow+ComplaintWindow of the fresh round (30 blocks on
+//	    the live params, and unbounded while that round keeps failing sub-quorum). Purging on the
+//	    "nothing in flight right now" reading alone therefore still bricks every ciphertext accepted
+//	    during that window — the COMMON case on a quiet chain, and the case the decrypt-health
+//	    recovery rekey lands in by construction, because the strand streak that triggers it is bumped
+//	    by the very releases that drain the epoch to zero.
+//	(b) nothing un-matured is still pinned to it, or those ciphertexts lose their shares.
+//
+// Both call sites are only reachable with lastRound.Status == Active, i.e. epoch == ActiveEpoch, so
+// (a) makes the rekey-time purge a guarded no-op by construction. It is kept rather than deleted so
+// the invariant is enforced at the choke point instead of relying on every future caller to know it.
+// Nothing is lost: maybePruneEpoch reclaims dealings + round record + active key together and is
+// already invoked on both closing edges — finalizeRound on the previous active epoch the moment the
+// successor installs its key, and releaseEncTx when the last pinned ciphertext leaves state. So the
+// bulk is reclaimed one rekey window later at worst, and the HIGH-2 state bound is preserved
+// (retained epochs stay O(1)). Deterministic (a pure function of committed state).
+func (k Keeper) purgeDealingsIfDrained(ctx sdk.Context, p types.Params, epoch uint64) bool {
+	// GATE: before the v0.3.5 upgrade height this param is absent (=> false) and the legacy
+	// unconditional purge is replayed byte-for-byte, so historical blocks keep their app hash.
+	if !p.DkgRetainActiveDealings {
+		k.purgeDealings(ctx, epoch)
+		return true
+	}
+	serving := epoch == k.GetActiveEpoch(ctx)
+	inFlight := k.getEpochEncCount(ctx, epoch)
+	if serving || inFlight != 0 {
+		reason := "in_flight"
+		if serving {
+			reason = "still_serving" // takes priority: it is the stronger reason to keep them
+		}
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			"encmempool_dkg_dealings_retained",
+			sdk.NewAttribute("epoch", u64str(epoch)),
+			sdk.NewAttribute("in_flight", u64str(inFlight)),
+			sdk.NewAttribute("reason", reason),
+		))
+		return false
+	}
+	k.purgeDealings(ctx, epoch)
+	return true
+}
+
+// hasAnyDealing reports whether ANY dealing is still stored for an epoch. O(1): it opens the
+// epoch's dealing range and only asks whether the first key exists.
+func (k Keeper) hasAnyDealing(ctx context.Context, epoch uint64) bool {
+	pfx := concat(types.DkgDealPrefix, u64(epoch))
+	it, err := k.store(ctx).Iterator(pfx, prefixEnd(pfx))
+	if err != nil {
+		return false
+	}
+	defer it.Close()
+	return it.Valid()
+}
+
+// ActiveEpochCanDeriveShares reports whether the currently-serving epoch still has the committed
+// dealings that every node needs to re-derive its decryption shares.
+//
+// AUDIT FIX (DKG-GC-ACTIVE, belt): on the TRANSPARENT path a ciphertext is only decryptable if the
+// dealings of the epoch it is stamped to are present, because no node persists a Shamir share — every
+// member rebuilds it from those dealings each block. This is the ingress guard that stops the chain
+// from SELLING a provably-dead ciphertext: a user who pays the submit bond and gets an accepted tx
+// must not be handed a payload already guaranteed to strand. The purge-side fix makes this
+// unreachable going forward; this covers an active epoch whose dealings were purged by an earlier
+// binary, and fails closed until the next rekey installs a healthy key.
+//
+// SCOPE: transparent path only. On the legacy declared-keyper path a keyper holds its share
+// out-of-band, so decryption does NOT depend on the dealings still being in state and their absence
+// says nothing about decryptability — gating there would refuse perfectly serviceable submissions.
+// Epoch 0 (trusted setup) has no per-epoch dealings at all and is likewise always allowed.
+func (k Keeper) ActiveEpochCanDeriveShares(ctx context.Context, p types.Params) bool {
+	// Same gate as the purge side: this belt only makes sense once the purge rule it complements is
+	// active, and turning it on earlier would change tx acceptance (and gas) on historical replay.
+	if !p.DkgRetainActiveDealings {
+		return true
+	}
+	if !p.DkgTransparent {
+		return true
+	}
+	epoch := k.GetActiveEpoch(ctx)
+	if epoch == 0 {
+		return true
+	}
+	return k.hasAnyDealing(ctx, epoch)
+}
+
 // purgeFailedRound GCs a FAILED, superseded round ENTIRELY — its dealings, complaints,
 // AND the DkgRound record itself. It is called on auto-retry.
 //

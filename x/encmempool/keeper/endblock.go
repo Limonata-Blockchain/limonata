@@ -232,7 +232,11 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		// its record entirely, so a member-change FLAP that keeps interrupting rounds cannot
 		// mint unbounded orphaned round records.
 		if lastRound.Status == types.DkgStatusActive {
-			k.purgeDealings(ctx, cur)
+			// DKG-GC-ACTIVE: shed the dealing bulk only if NOTHING is still in flight against this
+			// epoch. It stays the SERVING key until the new round finalizes, and on the transparent
+			// path a node re-derives its share from these dealings every block — purging them while
+			// a ciphertext is pinned here makes it permanently undecryptable on every node.
+			k.purgeDealingsIfDrained(ctx, p, cur)
 		} else {
 			k.purgeFailedRound(ctx, cur)
 		}
@@ -256,7 +260,11 @@ func (k Keeper) EndBlockDKG(ctx sdk.Context) {
 		// at the identical height.
 		driftBps := committeeMaxCoalitionDriftBps(lastRound.Members, active)
 		strandStreak := k.GetDecryptStrandStreak(ctx, cur)
-		k.purgeDealings(ctx, cur)
+		// DKG-GC-ACTIVE: same rule as the member-change branch. This branch is also the
+		// decrypt-health RECOVERY path (a verified poison report forces it), where purging a
+		// still-referenced epoch would destroy precisely the stranded ciphertexts the recovery
+		// exists to rescue.
+		k.purgeDealingsIfDrained(ctx, p, cur)
 		k.SetLastRekeyHeight(ctx, h)
 		k.resetDecryptStrandStreak(ctx, cur) // MED-2: clear the superseded epoch's streak (the fresh epoch is 0)
 		ctx.EventManager().EmitEvent(sdk.NewEvent(

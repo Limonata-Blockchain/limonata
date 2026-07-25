@@ -135,6 +135,23 @@ const EncMempoolUpgradeName = "encmempool-threshold-vpcap-v1"
 // applyDkgActivation. Distinct name because EncMempoolUpgradeName is already consumed on-chain.
 const TransparentDkgUpgradeName = "encmempool-transparent-dkg-v1"
 
+// DkgDealingRetentionUpgradeName is the v0.3.5 Limonata gov upgrade carrying the DKG-GC-ACTIVE fix.
+//
+// Pre-fix, both rekey branches shed the dealing bulk of an epoch that was still the SERVING key. On
+// the transparent path no node persists a Shamir share — each re-derives it from the committed
+// dealings every block — so that delete made the serving epoch's in-flight and newly-accepted
+// ciphertexts permanently undecryptable network-wide, and the decrypt-health recovery rekey routed
+// through the same path.
+//
+// The corrected rule is gated on the DkgRetainActiveDealings param rather than shipped as plain
+// code, because the legacy rule already produced live history: an unconditional change would compute
+// a different app hash when replaying the historical rekey heights, breaking sync-from-genesis and
+// any state sync whose replay window contains one. A stored params blob written by an older binary
+// has no such key and unmarshals to false, so every pre-upgrade block replays exactly as it
+// executed; this handler flips it to true at the plan height and the whole network adopts the fixed
+// rule together. Adds NO store and needs no migration — it is a params write plus RunMigrations.
+const DkgDealingRetentionUpgradeName = "encmempool-dkg-dealing-retention-v1"
+
 // EncMempoolForceUpgradeEnv enables the fast NON-GOV single-operator path (same
 // shape as valgrant's): swap the binary with the env set, the vpcap store is
 // added at the next height and the one-shot below runs migrations + activation.
@@ -533,6 +550,30 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 			if err := app.applyDkgActivation(sdkCtx); err != nil {
 				return nil, err
 			}
+			return newVM, nil
+		},
+	)
+
+	// Limonata v0.3.5: DKG-GC-ACTIVE. Turns on DkgRetainActiveDealings so that, from this height,
+	// a rekey stops deleting the dealings of an epoch that is still serving or still ref-counted,
+	// and SubmitEncrypted fail-closes when the active epoch has no dealings left. No store, no
+	// migration - the whole upgrade is this one params write. Idempotent: setting an already-true
+	// flag is a no-op, and a chain whose genesis already defaults it true simply rewrites true.
+	app.UpgradeKeeper.SetUpgradeHandler(
+		DkgDealingRetentionUpgradeName,
+		func(ctx context.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+			sdkCtx := sdk.UnwrapSDKContext(ctx)
+			newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), fromVM)
+			if err != nil {
+				return nil, err
+			}
+			p := app.EncMempoolKeeper.GetParams(sdkCtx)
+			p.DkgRetainActiveDealings = true
+			if err := app.EncMempoolKeeper.SetParams(sdkCtx, p); err != nil {
+				return nil, err
+			}
+			sdkCtx.Logger().Info("encmempool: DKG-GC-ACTIVE enabled - rekeys no longer purge a still-serving epoch's dealings",
+				"upgrade", DkgDealingRetentionUpgradeName, "height", sdkCtx.BlockHeight())
 			return newVM, nil
 		},
 	)

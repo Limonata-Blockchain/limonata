@@ -284,6 +284,17 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
 			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (a <=2/3-stake coalition holds enough decryption power) - send a normal transaction, or wait for the committee to decentralize")
 	}
+	// DKG-GC-ACTIVE (belt, fail-closed): on the transparent path NO node persists a Shamir share -
+	// every member re-derives it from the epoch's committed dealings each block - so a ciphertext
+	// stamped to an epoch whose dealings are gone can NEVER be decrypted by anyone. Refuse rather
+	// than take the bond and hand back an accepted tx that is guaranteed to strand. The purge-side
+	// fix makes this unreachable going forward; this covers an active epoch already purged by an
+	// earlier binary, and fails closed until the next rekey installs a healthy key. No-op on the
+	// legacy path, where keypers hold their shares out-of-band.
+	if !m.Keeper.ActiveEpochCanDeriveShares(goCtx, p) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
+			"encrypted mempool unavailable: the active DKG epoch has no committed dealings, so no validator could derive a decryption share - send a normal transaction, or wait for the next rekey")
+	}
 	// CRITICAL A-BINDING (same-A replay): require a Schnorr proof of knowledge of r (A = r*G)
 	// bound to THIS submitter + ciphertext. A decryption share is x_i*A and the AES key is
 	// KDF(x*A), so any two ciphertexts sharing A share the decryption secret; the maturity gate

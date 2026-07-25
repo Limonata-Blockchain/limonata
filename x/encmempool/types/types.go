@@ -152,6 +152,30 @@ type Params struct {
 	// the max coalition-fraction drift to this many bps (+ whatever stake can move within the
 	// flap gap / an in-flight round before the next re-genesis fires).
 	DkgRekeyOnStakeDriftBps uint64 `json:"dkg_rekey_on_stake_drift_bps"`
+
+	// DkgRetainActiveDealings gates the DKG-GC-ACTIVE fix: when true, a rekey does NOT shed the
+	// dealing bulk of an epoch that is still the SERVING key or still ref-counted by an un-matured
+	// ciphertext, and SubmitEncrypted fail-closes when the active epoch has no dealings left.
+	//
+	// It is a PARAM rather than plain code because the fix changes COMMITTED state. The pre-fix rule
+	// already ran on live chains (every historical rekey deleted the still-serving epoch's dealings),
+	// so an unconditional fix would compute a different app hash when replaying those heights and
+	// would break both sync-from-genesis and any state sync whose snapshot-to-tip window contains a
+	// rekey. Params are stored as plain JSON, so a chain upgraded from an older binary unmarshals a
+	// stored blob with no such key to FALSE — the historical behaviour, replayed exactly — and the
+	// v0.3.5 upgrade handler flips it to true at the plan height, from which every node applies the
+	// new rule together. DefaultParams sets it TRUE so a fresh genesis (mainnet included) is born
+	// with the fixed behaviour and never carries the legacy path at all.
+	//
+	// `omitempty` IS LOAD-BEARING, not style. Params are persisted as a raw json.Marshal of this
+	// struct (keeper.SetParams), so a plain tag would emit `,"dkg_retain_active_dealings":false`
+	// and make every params WRITE 35 bytes longer than what v0.3.4 wrote — a different app hash at
+	// InitGenesis and at every later params write (applyDkgActivation, gov MsgUpdateParams). That
+	// breaks sync-from-genesis, breaks any state sync whose replay window contains a params write,
+	// and would FORK a node running v0.3.5 before the plan height the moment a gov params update
+	// executed. With omitempty the gate-off blob is byte-identical to v0.3.4, while true still
+	// serialises normally. Keep this field LAST so the emitted field order is unchanged.
+	DkgRetainActiveDealings bool `json:"dkg_retain_active_dealings,omitempty"`
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -488,6 +512,10 @@ func DefaultParams() Params {
 		// only matter on the transparent path (DkgEnabled is itself default-off).
 		DkgRekeyOnStakeDriftBps: 500,
 		DkgMaxEpochBlocks:       43200,
+		// DKG-GC-ACTIVE: ON by default so a fresh genesis never runs the legacy purge rule. Existing
+		// chains get it from the v0.3.5 upgrade handler instead, because their history was produced
+		// under the old rule and must replay under it.
+		DkgRetainActiveDealings: true,
 	}
 }
 
