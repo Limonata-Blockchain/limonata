@@ -184,7 +184,8 @@ func weightOrZero(w sdkmath.Int) sdkmath.Int {
 // stakeThreshold returns the reconstruction threshold t for a round with the given
 // already-allocated members.
 //
-// WEIGHTED committee (S = total eval points): t = floor(2S/3)+1. The old
+// WEIGHTED committee (S = total eval points): t = floor(2S/3)+1 (legacy, DkgStrictConcentration
+// off) or floor(2S/3)+n (v0.3.6 two-clause guard, on). The old
 // liveness-maximizing t = floor(2S/3)-n+1 let ~55% stake reconstruct at the default
 // S=256,n=16 topology. That was not a 2/3 confidentiality threshold. This stricter
 // threshold makes the crypto bar a strict >2/3 of evaluation points; SubmitEncrypted
@@ -194,7 +195,13 @@ func weightOrZero(w sdkmath.Int) sdkmath.Int {
 // UNWEIGHTED committee (legacy/declared or the all-zero-weight fallback, S == n): the
 // original count supermajority t = floor(2n/3) + 1, byte-identical to the pre-cycle-3
 // behaviour.
-func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
+//
+// The +n confidentiality raise and the coupled strand check are GATED on the
+// DkgStrictConcentration param (v0.3.6). strict==false reproduces the EXACT legacy
+// t = floor(2S/3)+1 (weighted and unweighted) byte-for-byte, which is mandatory: this
+// result is written to committed state at every DKG finalization, and live chains
+// finalized ~16 epochs under the old formula that must replay under the old formula.
+func stakeThreshold(members []types.RoundMember, strict bool) (t uint32, degraded bool) {
 	S := types.TotalEvalPoints(members)
 	if S < 1 {
 		return 1, false
@@ -207,14 +214,34 @@ func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
 		}
 	}
 	if !weighted {
-		// Unweighted (legacy / fallback) committee: original count supermajority.
+		// Unweighted (legacy / fallback) committee: original count supermajority. UNCHANGED by the
+		// two-clause fix in either gate state (the fix targets the weighted/stake topology only).
 		tt := (2*S)/3 + 1
 		if tt > S {
 			tt = S
 		}
 		return uint32(tt), false
 	}
+	// LEGACY (strict==false): byte-identical to the pre-v0.3.6 behaviour, t = floor(2S/3)+1.
 	tt := (2*S)/3 + 1
+	if strict {
+		// TWO-CLAUSE FIX, clause 1 (CONFIDENTIALITY). Weighted t = floor(2S/3) + n, where n is the
+		// committee size (every member of a weighted round is Weighted, so n = len(members)).
+		//
+		// Why +n and not +1: largest-remainder apportionment bounds any coalition C's points to
+		// pts(C) <= quota(C) + min(|C|, n-1). A <=2/3-stake coalition has quota(C) <= 2S/3, so
+		//   pts(C) <= 2S/3 + (n-1) < floor(2S/3) + n = t.
+		// Therefore NO <=2/3-stake coalition can ever reach t (strict), which is exactly the
+		// confidentiality property the guard needs. The old t = floor(2S/3)+1 was BELOW the
+		// worst-case rounding of a legitimate <=2/3 coalition, so the fail-closed admission guard
+		// tripped on ~every realistic committee (0/1600 pass) — structurally unsatisfiable.
+		//
+		// CLAMP SAFETY: the enforced param coupling S >= minShareBudgetPerMember * committee-cap
+		// (== 8) gives S >= 8n, so t = floor(2S/3) + n <= 2S/3 + S/8 = 0.7917S < S, meaning the
+		// `tt > S` clamp below can NEVER bite for a validly-configured committee and so can never
+		// silently void the < t proof above.
+		tt = (2*S)/3 + len(members)
+	}
 	if tt > S {
 		tt = S
 	}
@@ -224,6 +251,13 @@ func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
 	return uint32(tt), false
 }
 
+// minShareBudgetPerMember mirrors types.MinShareBudgetPerMember (== 8), the enforced eval-point
+// budget floor PER COMMITTEE SEAT. Param validation requires S >= this * the committee cap, so a
+// weighted committee always satisfies S >= 8n. That coupling keeps clause-1's t = floor(2S/3)+n
+// strictly below S (t <= 0.7917S), so the `tt > S` clamp can never bite and void the
+// confidentiality proof. Bound to the canonical types constant so the two can never drift.
+const minShareBudgetPerMember = types.MinShareBudgetPerMember
+
 // CommitteeConcentrationBreached reports whether the active epoch fails the confidentiality topology:
 // either one operator alone owns >= t points, or any coalition with <=2/3 of the snapshotted stake owns
 // >= t points after apportionment. SubmitEncrypted uses this as a fail-closed gate.
@@ -231,7 +265,7 @@ func stakeThreshold(members []types.RoundMember) (t uint32, degraded bool) {
 // Deterministic: a pure function of the committed DkgRound + ActiveThresholdKey. Legacy/unweighted
 // committees (Weighted==false, no recorded stake) are EXEMPT - they are not the stake-topology case
 // this guards, and the trusted-setup epoch 0 never reaches here.
-func (k Keeper) CommitteeConcentrationBreached(ctx context.Context, epoch uint64) bool {
+func (k Keeper) CommitteeConcentrationBreached(ctx context.Context, epoch uint64, strict bool) bool {
 	if epoch == 0 {
 		return false
 	}
@@ -243,16 +277,39 @@ func (k Keeper) CommitteeConcentrationBreached(ctx context.Context, epoch uint64
 	if !ok || len(round.Members) == 0 {
 		return false
 	}
+	// clause 2 (STRAND / LIVENESS) is GATED on DkgStrictConcentration (v0.3.6). `strict` is passed
+	// IN by the caller (the SubmitEncrypted handler already holds the loaded params) rather than
+	// re-read here — a GetParams(ctx) at this point is a metered store read that v0.3.5 never
+	// performed on this path, so it would raise gas_used for any historical SubmitEncrypted and
+	// diverge the app hash (LastResultsHash) when a v0.3.6 binary replays those pre-upgrade blocks
+	// from genesis. Threading the flag keeps this path byte-AND-gas-identical to v0.3.5 when
+	// strict==false (legacy guard: 1a + 1b only), and adds the strand clause only once strict is on.
+	// clause-1 raising t to floor(2S/3)+n necessarily LOWERS the single-operator strand bar to
+	// S - t + 1. An operator that alone owns >= S-t+1 eval points holds enough that the remaining
+	// t-1 < t points can never reconstruct without it — it can unilaterally withhold and FREEZE
+	// decryption for the epoch. Shipping clause 1 without clause 2 would OPEN a feature a single
+	// concentrated node could freeze for free, strictly worse than staying closed. S = eval-point domain.
+	strandBar := 0
+	if strict {
+		S := types.TotalEvalPoints(round.Members)
+		if S+1 > int(ak.Threshold) { // t <= S always holds; strandBar = S - t + 1 >= 1
+			strandBar = S - int(ak.Threshold) + 1
+		}
+	}
 	for _, m := range round.Members {
 		if !m.Weighted {
 			return false // unweighted (legacy) committee: not the stake-concentration case
 		}
-		if uint32(len(m.OwnedEvalPoints())) >= ak.Threshold {
-			return true // this operator alone holds >= t points -> decrypts alone
+		owned := len(m.OwnedEvalPoints())
+		if uint32(owned) >= ak.Threshold {
+			return true // clause 1a: this operator alone holds >= t points -> decrypts alone (confidentiality)
+		}
+		if strandBar > 0 && owned >= strandBar {
+			return true // clause 2: this operator alone holds >= S-t+1 points -> can freeze reconstruction (liveness)
 		}
 	}
 	if k.coalitionBelowTwoThirdsCanDecrypt(round.Members, ak.Threshold) {
-		return true
+		return true // clause 1b: a <=2/3-stake coalition can reach t (confidentiality)
 	}
 	return false
 }

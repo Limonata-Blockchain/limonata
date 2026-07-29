@@ -12,6 +12,7 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
@@ -66,6 +67,26 @@ func (m msgServer) UpdateParams(goCtx context.Context, msg *types.MsgUpdateParam
 		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid params: %v", err)
 	}
 	ctx := sdk.UnwrapSDKContext(goCtx)
+	// ONE-WAY RATCHET (audit finding). A gov MsgUpdateParams carries a FULL Params JSON that is
+	// unmarshalled into a ZERO struct, so any params tune whose JSON omits a gate key would silently
+	// REVERT that gate to false (re-opening a hole a prior upgrade closed). Make the safety gates
+	// monotonic: once on, a later params write can never turn them off. Read the currently-stored
+	// value and OR it in. This is safe on replay because it only differs from the raw write when a
+	// gov update omits a key that is already stored true — the ratchet then keeps it true, which is
+	// the intended (and strictly fail-closed) direction. Params always exist by the time any gov
+	// update runs (InitGenesis wrote them), so GetParams here returns the real stored blob, not the
+	// DefaultParams fallback — the ratchet must NOT be moved into SetParams, where InitGenesis's
+	// empty-store GetParams would fall back to DefaultParams(true) and corrupt a legacy genesis replay.
+	//
+	// REPLAY-SAFETY (v0.3.6): read the stored gates through a THROWAWAY infinite gas meter so this read
+	// charges NO tx gas. v0.3.5's UpdateParams performed no params read at all, so a metered read here
+	// would raise gas_used for EVERY historical MsgUpdateParams and diverge the app hash (LastResultsHash)
+	// when a v0.3.6 binary replays those pre-upgrade blocks from genesis. The OR-in is a pure state no-op
+	// pre-upgrade anyway (the gates are false in stored state until their upgrade height), so reading them
+	// gas-free is exactly replay-equivalent to v0.3.5, while still enforcing monotonicity post-upgrade.
+	stored := m.GetParams(ctx.WithGasMeter(storetypes.NewInfiniteGasMeter()))
+	p.DkgRetainActiveDealings = p.DkgRetainActiveDealings || stored.DkgRetainActiveDealings
+	p.DkgStrictConcentration = p.DkgStrictConcentration || stored.DkgStrictConcentration
 	// HIGH-1: the TRANSPARENT in-node DKG rides ABCI++ vote extensions, which are governed by
 	// a SEPARATE consensus param (VoteExtensionsEnableHeight). Enabling DkgTransparent while
 	// vote extensions are not scheduled arms a path whose ProcessProposal would later reject
@@ -280,7 +301,7 @@ func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEn
 	// mempool offers NO confidentiality in that stake topology. Refuse the submission rather than lull
 	// the user into sending a "private" tx a whale reads. This does not (and cannot) create
 	// confidentiality; decentralization does. Deterministic (committed round + key).
-	if epoch > 0 && m.Keeper.CommitteeConcentrationBreached(goCtx, epoch) {
+	if epoch > 0 && m.Keeper.CommitteeConcentrationBreached(goCtx, epoch, p.DkgStrictConcentration) {
 		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
 			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (a <=2/3-stake coalition holds enough decryption power) - send a normal transaction, or wait for the committee to decentralize")
 	}
