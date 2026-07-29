@@ -85,13 +85,18 @@ func transparentParams(thr uint32, maxMembers uint32) types.Params {
 		// Params.Validate (tests that need a different budget/committee shape override
 		// DkgShareBudget per test and drive the keeper directly).
 		DkgShareBudget: 128,
+		// v0.3.6: exercise the GATED two-clause guard in the transparent-DKG test suite. With this
+		// on, the weighted threshold is t = floor(2S/3)+n and CommitteeConcentrationBreached also
+		// fails closed on a single-operator strand. Mirrors DefaultParams (born-on for mainnet).
+		DkgStrictConcentration: true,
 	}
 }
 
-// transparentStakeThreshold is the stake-weighted reconstruction threshold
-// t = floor(2S/3)+1 for the test share budget S=128 and the 3-member committees the
-// voteext tests build, mirroring keeper.stakeThreshold for assertions.
-const transparentStakeThreshold = (2*128)/3 + 1 // = 86
+// transparentStakeThreshold is the stake-weighted reconstruction threshold under the v0.3.6
+// two-clause guard (DkgStrictConcentration on in transparentParams): t = floor(2S/3)+n for the
+// test share budget S=128 and the 3-member committees the voteext tests build (n=3), mirroring
+// keeper.stakeThreshold for assertions.
+const transparentStakeThreshold = (2*128)/3 + 3 // = 88
 
 func idxByOp(round types.DkgRound, op string) uint64 {
 	for _, m := range round.Members {

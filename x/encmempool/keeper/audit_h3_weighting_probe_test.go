@@ -26,9 +26,10 @@ import (
 // loudly rather than silently consume user ciphertexts.
 // ============================================================================
 
-// tNew mirrors keeper.stakeThreshold for a WEIGHTED round: t = floor(2S/3)+1.
+// tNew mirrors keeper.stakeThreshold for a WEIGHTED round under the v0.3.6 two-clause guard
+// (DkgStrictConcentration on): t = floor(2S/3)+n.
 func tNew(S, n int) int {
-	t := (2*S)/3 + 1
+	t := (2*S)/3 + n
 	if t > S {
 		t = S
 	}

@@ -66,15 +66,15 @@ func TestAudit_C7_NeverHeals_DropsStrandedAtGraceEnd_H2Safe(t *testing.T) {
 	}
 	e := c.k.SubmitEncTx(ctx, "user", 20, 2, ct.A, ct.Nonce, ct.Body, 1) // matures @22, grace end @ 22+32=54
 
-	// 16 REAL verified honest points (A+B, < t=22) + 8 UNVERIFIED chaff at the attacker's own
-	// points: raw count 24 >= t (count gate passes), attacker marked present (stake gate passes),
-	// verified 16 < 18 -> RecoverVerified returns ErrInsufficientVerified -> fix #3 -> DEFER.
-	if got := setValidShares(t, c, ctx, e, ct, "honest_A") + setValidShares(t, c, ctx, e, ct, "honest_B"); got != 16 {
-		t.Fatalf("expected 16 honest verified points, got %d", got)
+	// 32 REAL verified honest points (A+B, < t=46) + 16 UNVERIFIED chaff at the attacker's own
+	// points: raw count 48 >= t (count gate passes), attacker marked present (stake gate passes),
+	// verified 32 < 46 -> RecoverVerified returns ErrInsufficientVerified -> fix #3 -> DEFER.
+	if got := setValidShares(t, c, ctx, e, ct, "honest_A") + setValidShares(t, c, ctx, e, ct, "honest_B"); got != 32 {
+		t.Fatalf("expected 32 honest verified points, got %d", got)
 	}
 	injectChaffAtAttackerPoints(t, c, ctx, e)
-	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 24 {
-		t.Fatalf("precondition: raw count padded to 24, got %d", n)
+	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 48 {
+		t.Fatalf("precondition: raw count padded to 48, got %d", n)
 	}
 	if rc := c.k.GetEpochEncCount(c.ctx, 1); rc != 1 {
 		t.Fatalf("precondition: epoch-1 in-flight ref-count should be 1, got %d", rc)
@@ -151,11 +151,11 @@ func TestAudit_C7_MalformedBody_HardDropsNotMasked(t *testing.T) {
 	ctx := c.ctx.WithBlockHeight(20).WithEventManager(sdk.NewEventManager())
 	e := c.k.SubmitEncTx(ctx, "user", 20, 2, ct.A, ct.Nonce, badBody, 1) // matures @22
 
-	// A+B+C = 24 REAL verified shares >= t=22: both gates pass and RecoverVerified SUCCEEDS.
+	// A+B+C = 48 REAL verified shares >= t=46: both gates pass and RecoverVerified SUCCEEDS.
 	if got := setValidShares(t, c, ctx, e, ct, "honest_A") +
 		setValidShares(t, c, ctx, e, ct, "honest_B") +
-		setValidShares(t, c, ctx, e, ct, "honest_C"); got != 24 {
-		t.Fatalf("expected 24 verified shares, got %d", got)
+		setValidShares(t, c, ctx, e, ct, "honest_C"); got != 48 {
+		t.Fatalf("expected 48 verified shares, got %d", got)
 	}
 
 	b22 := c.ctx.WithBlockHeight(22).WithEventManager(sdk.NewEventManager())
@@ -199,7 +199,7 @@ func TestAudit_C7_InsufficientVerifiedFlood_DeferCapBounded(t *testing.T) {
 		// Distinct submitters so per-submitter fairness does not ration them before the cap; the
 		// cap itself is what must bound the set.
 		e := c.k.SubmitEncTx(ctx, submitterName(i), 20, 2, ct.A, ct.Nonce, ct.Body, 1) // all mature @22
-		// 16 honest verified + 8 chaff => raw 24 >= t=22, verified 16 < 18 => ErrInsufficientVerified.
+		// 32 honest verified + 16 chaff => raw 48 >= t=46, verified 32 < 46 => ErrInsufficientVerified.
 		_ = setValidShares(t, c, ctx, e, ct, "honest_A") + setValidShares(t, c, ctx, e, ct, "honest_B")
 		injectChaffAtAttackerPoints(t, c, ctx, e)
 		made++

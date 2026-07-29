@@ -114,7 +114,7 @@ func TestC7Audit_VerifyDecryptShare_NeverPanics(t *testing.T) {
 // guard would abort the whole consume loop and STARVE honest_A/honest_B (sorted after) of ever
 // storing a share -> the ciphertext could never heal (a permanent liveness DoS). We spray the
 // attacker's worst case (valid-D + C=Z=0 zero proof, the infinity-forcer, at every owned point) and
-// assert: (i) no panic escaped, (ii) no consume-panic event, (iii) all 16 honest shares still
+// assert: (i) no panic escaped, (ii) no consume-panic event, (iii) all 32 honest shares still
 // stored, (iv) chaff rejected, (v) the matured-but-short ciphertext DEFERS (not a hard drop).
 func TestC7Audit_ConsumePreBlock_AttackerSortsFirst_NoHaltNoStarve(t *testing.T) {
 	c := c7Committee(t)
@@ -155,11 +155,11 @@ func TestC7Audit_ConsumePreBlock_AttackerSortsFirst_NoHaltNoStarve(t *testing.T)
 		t.Fatal("STARVE: a consume-panic fired — the recover guard caught a verify-path panic; honest shares after the attacker were skipped")
 	}
 	stored := c.k.CollectShares(ctx, e.DecryptHeight, e.Seq)
-	if len(stored) != 16 {
-		t.Fatalf("STARVE/HALT: expected 16 honest shares stored despite attacker-first chaff, got %d", len(stored))
+	if len(stored) != 32 {
+		t.Fatalf("STARVE/HALT: expected 32 honest shares stored despite attacker-first chaff, got %d", len(stored))
 	}
-	if n := countEvents(ing, "encmempool_dkg_ve_share_rejected"); n != 8 {
-		t.Fatalf("expected 8 chaff rejections, got %d", n)
+	if n := countEvents(ing, "encmempool_dkg_ve_share_rejected"); n != 16 {
+		t.Fatalf("expected 16 chaff rejections, got %d", n)
 	}
 	// The short ciphertext must DEFER (heal-eligible), never hard-drop.
 	b12 := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
@@ -214,8 +214,8 @@ func TestC7Audit_IngestVerdict_OrderIndependent(t *testing.T) {
 
 	a := consumeOn(order("attacker", "honest_A", "honest_B"))
 	b := consumeOn(order("honest_B", "attacker", "honest_A"))
-	if len(a) != 16 || len(b) != 16 {
-		t.Fatalf("expected 16 verified shares each order, got %d and %d", len(a), len(b))
+	if len(a) != 32 || len(b) != 32 {
+		t.Fatalf("expected 32 verified shares each order, got %d and %d", len(a), len(b))
 	}
 	for i := range a {
 		if a[i].Index != b[i].Index || !bytes.Equal(a[i].D, b[i].D) || !bytes.Equal(a[i].Proof, b[i].Proof) {

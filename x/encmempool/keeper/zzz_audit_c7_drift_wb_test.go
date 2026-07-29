@@ -204,7 +204,7 @@ func TestC7_CouplingBreaksAtValidD(t *testing.T) {
 		snap[i].Index = uint64(i + 1)
 	}
 	alloc := AllocateEvalPoints(snap, S, epoch)
-	tt, degraded := stakeThreshold(alloc)
+	tt, degraded := stakeThreshold(alloc, true)
 	if degraded {
 		t.Fatalf("unexpected degraded threshold")
 	}

@@ -35,12 +35,12 @@ import (
 
 // TestC9Probe_HonestManyCiphertextsOneEpoch_AllIngestOneBlock is guarantee (i): a SINGLE honest member
 // serves complete valid share sets for C=30 in-flight ciphertexts of one epoch in ONE block; the per-
-// (operator,ciphertext) budget ingests every one of its 30*8 = 240 legitimate shares — none throttled.
-// Under cycle-8's per-(operator,epoch) budget only 8 (one ciphertext's worth) would have stored.
+// (operator,ciphertext) budget ingests every one of its 16*16 = 256 legitimate shares — none throttled.
+// Under cycle-8's per-(operator,epoch) budget only 16 (one ciphertext's worth) would have stored.
 func TestC9Probe_HonestManyCiphertextsOneEpoch_AllIngestOneBlock(t *testing.T) {
 	c := c7Committee(t)
-	owned := len(c.memberPoints("honest_A")) // 8
-	const C = 30                             // 30*8 = 240 shares <= per-VE cap 256, and 30 <= cap(128)
+	owned := len(c.memberPoints("honest_A")) // 16
+	const C = 16                             // 16*16 = 256 shares <= per-VE cap 256, and 16 <= cap(128)
 
 	base := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 	var es []types.EncTx
@@ -183,7 +183,7 @@ func TestC9Probe_ProcessedSetCap_BeyondWindowChaffClassifiedOut(t *testing.T) {
 
 // TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals is guarantee (iii): the cycle-7 "chaff
 // rejected -> defer -> heal" behaviour survives the per-ciphertext budget across MULTIPLE ciphertexts.
-// TWO ciphertexts mature short (honest_A+honest_B = 16 < t=22 each) while the attacker sprays chaff at
+// TWO ciphertexts mature short (honest_A+honest_B = 32 < t=46 each) while the attacker sprays chaff at
 // its own points on BOTH; every honest share stores, all chaff is rejected, BOTH defer (not drop), and
 // BOTH heal from a late honest_C share within grace.
 func TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals(t *testing.T) {
@@ -213,18 +213,18 @@ func TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals(t *testing.T) {
 		{Operator: "honest_B", VE: types.VoteExtension{Shares: honest("honest_B")}},
 	})
 
-	// Each ct holds exactly the 16 verified honest shares; the attacker's chaff (8 owned points/ct,
-	// deduped over the 5 repeats) is rejected on BOTH cts => 16 reject events total, none stored.
+	// Each ct holds exactly the 32 verified honest shares; the attacker's chaff (16 owned points/ct,
+	// deduped over the 5 repeats) is rejected on BOTH cts => 32 reject events total, none stored.
 	for _, e := range []types.EncTx{e1, e2} {
-		if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 16 {
-			t.Fatalf("cycle-9 (iii): each ct must store 16 verified honest shares (chaff rejected), got %d", n)
+		if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 32 {
+			t.Fatalf("cycle-9 (iii): each ct must store 32 verified honest shares (chaff rejected), got %d", n)
 		}
 	}
 	if rej := countEvents(ing, "encmempool_dkg_ve_share_rejected"); rej != 2*len(c.memberPoints("attacker")) {
 		t.Fatalf("cycle-9 (iii): expected %d chaff rejections (attacker owned points on 2 cts), got %d", 2*len(c.memberPoints("attacker")), rej)
 	}
 
-	// Block 12: BOTH mature short (16 < 18) => DEFER, never hard-drop.
+	// Block 12: BOTH mature short (32 < t=46) => DEFER, never hard-drop.
 	b12 := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
@@ -242,8 +242,8 @@ func TestC9Probe_DropDoSPreserved_MultiCiphertext_DefersAndHeals(t *testing.T) {
 		{Operator: "honest_C", VE: types.VoteExtension{Shares: honest("honest_C")}},
 	})
 	for _, e := range []types.EncTx{e1, e2} {
-		if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 24 {
-			t.Fatalf("after heal each ct expected 24 verified shares (16+8 honest_C), got %d", n)
+		if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 48 {
+			t.Fatalf("after heal each ct expected 48 verified shares (32+16 honest_C), got %d", n)
 		}
 	}
 	b13 := base.WithBlockHeight(13).WithEventManager(sdk.NewEventManager())
@@ -312,8 +312,8 @@ func TestC9Probe_MultiCiphertextBound_OrderIndependent(t *testing.T) {
 	a := consumeOn(order("attacker", "honest_A", "honest_B"))
 	b := consumeOn(order("honest_B", "attacker", "honest_A"))
 	for i := 0; i < C; i++ {
-		if len(a[i]) != 16 || len(b[i]) != 16 {
-			t.Fatalf("ct %d: expected 16 verified honest shares each order, got %d and %d", i, len(a[i]), len(b[i]))
+		if len(a[i]) != 32 || len(b[i]) != 32 {
+			t.Fatalf("ct %d: expected 32 verified honest shares each order, got %d and %d", i, len(a[i]), len(b[i]))
 		}
 		for j := range a[i] {
 			if a[i][j].Index != b[i][j].Index {

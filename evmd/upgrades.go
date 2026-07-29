@@ -152,6 +152,23 @@ const TransparentDkgUpgradeName = "encmempool-transparent-dkg-v1"
 // rule together. Adds NO store and needs no migration — it is a params write plus RunMigrations.
 const DkgDealingRetentionUpgradeName = "encmempool-dkg-dealing-retention-v1"
 
+// StrictConcentrationUpgradeName is the v0.3.6 Limonata gov upgrade carrying the TWO-CLAUSE
+// concentration-guard fix. It flips DkgStrictConcentration on, from which the weighted DKG
+// reconstruction threshold becomes t = floor(2S/3)+n (no <=2/3-stake coalition can reach it) and
+// CommitteeConcentrationBreached also fails closed on a single-operator strand (>= S-t+1 points).
+//
+// It is gated on a param rather than shipped as plain code for the SAME reason as v0.3.5's
+// DkgDealingRetentionUpgradeName: stakeThreshold's result is written to committed state
+// (ActiveThresholdKey.Threshold) at every DKG finalization, and live chains already finalized ~16
+// epochs under the old floor(2S/3)+1 formula. An unconditional change would recompute a different
+// threshold when replaying those heights -> app-hash divergence -> broken sync-from-genesis and
+// state sync. A stored params blob written by an older binary has no such key and unmarshals to
+// false (the exact legacy formula, replayed byte-for-byte); this handler flips it to true at the
+// plan height and the whole network adopts the two-clause rule together. Adds NO store and needs no
+// migration — it is a params write plus RunMigrations. DefaultParams() sets it true so a fresh
+// mainnet genesis is born with the guard and never carries the legacy path.
+const StrictConcentrationUpgradeName = "encmempool-strict-concentration-v1"
+
 // EncMempoolForceUpgradeEnv enables the fast NON-GOV single-operator path (same
 // shape as valgrant's): swap the binary with the env set, the vpcap store is
 // added at the next height and the one-shot below runs migrations + activation.
@@ -574,6 +591,31 @@ func (app *EVMD) RegisterUpgradeHandlers() {
 			}
 			sdkCtx.Logger().Info("encmempool: DKG-GC-ACTIVE enabled - rekeys no longer purge a still-serving epoch's dealings",
 				"upgrade", DkgDealingRetentionUpgradeName, "height", sdkCtx.BlockHeight())
+			return newVM, nil
+		},
+	)
+
+	// Limonata v0.3.6: STRICT-CONCENTRATION (two-clause guard). Turns on DkgStrictConcentration so
+	// that, from this height, the weighted DKG threshold becomes t = floor(2S/3)+n and
+	// CommitteeConcentrationBreached also fails closed on a single-operator strand. No store, no
+	// migration — the whole upgrade is this one params write. Idempotent: setting an already-true
+	// flag is a no-op, and a chain whose genesis already defaults it true simply rewrites true.
+	// Mirrors the DKG-GC-ACTIVE handler above exactly.
+	app.UpgradeKeeper.SetUpgradeHandler(
+		StrictConcentrationUpgradeName,
+		func(ctx context.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+			sdkCtx := sdk.UnwrapSDKContext(ctx)
+			newVM, err := app.ModuleManager.RunMigrations(ctx, app.Configurator(), fromVM)
+			if err != nil {
+				return nil, err
+			}
+			p := app.EncMempoolKeeper.GetParams(sdkCtx)
+			p.DkgStrictConcentration = true
+			if err := app.EncMempoolKeeper.SetParams(sdkCtx, p); err != nil {
+				return nil, err
+			}
+			sdkCtx.Logger().Info("encmempool: STRICT-CONCENTRATION enabled - weighted threshold t=floor(2S/3)+n and single-operator strand guard now active",
+				"upgrade", StrictConcentrationUpgradeName, "height", sdkCtx.BlockHeight())
 			return newVM, nil
 		},
 	)

@@ -31,8 +31,8 @@ import (
 
 // TestC9_MultiHonestCiphertextsPerEpoch_BothHeal: the in-block proof. TWO honest ciphertexts, same
 // epoch, same maturity height. ALL FOUR committee members serve their FULL real share sets for BOTH
-// (16 shares each: 8 for ct1, 8 for ct2 — exactly what buildDecryptShares produces). The per-
-// (operator,ciphertext) budget stores BOTH ciphertexts' 32 shares — under cycle-8 ct2 was starved.
+// (32 shares each: 16 for ct1, 16 for ct2 — exactly what buildDecryptShares produces). The per-
+// (operator,ciphertext) budget stores BOTH ciphertexts' 64 shares — under cycle-8 ct2 was starved.
 func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 	c := c7Committee(t)
 	servers := []string{"honest_A", "honest_B", "honest_C", "attacker"} // all serve REAL shares
@@ -52,13 +52,13 @@ func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 	e2 := c.k.SubmitEncTx(base, "user", 10, 2, ct2.A, ct2.Nonce, ct2.Body, 1) // (12, seq2)
 
 	// Every member's ONE vote extension carries its real shares for ct1 THEN ct2 (oldest-first,
-	// exactly as buildDecryptShares orders them). 8 + 8 = 16 real shares per member.
+	// exactly as buildDecryptShares orders them). 16 + 16 = 32 real shares per member.
 	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	var entries []keeper.VEEntry
 	for _, op := range servers {
 		sh := append(veSharesFor(t, c, base, e1, ct1, op), veSharesFor(t, c, base, e2, ct2, op)...)
-		if len(sh) != 16 {
-			t.Fatalf("precondition: %s should serve 16 real shares (8 per ct), built %d", op, len(sh))
+		if len(sh) != 32 {
+			t.Fatalf("precondition: %s should serve 32 real shares (16 per ct), built %d", op, len(sh))
 		}
 		entries = append(entries, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: sh}})
 	}
@@ -75,14 +75,14 @@ func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 	if rejected != 0 {
 		t.Fatalf("no attacker: expected 0 chaff rejections, got %d", rejected)
 	}
-	// THE FIX: both honest ciphertexts got ALL 32 of their shares stored in the same block.
-	if stored1 != 4*8 || stored2 != 4*8 {
-		t.Fatalf("cycle-9: both ciphertexts must accrue all 32 honest shares in one block, got ct1=%d ct2=%d", stored1, stored2)
+	// THE FIX: both honest ciphertexts got ALL 64 of their shares stored in the same block.
+	if stored1 != 4*16 || stored2 != 4*16 {
+		t.Fatalf("cycle-9: both ciphertexts must accrue all 64 honest shares in one block, got ct1=%d ct2=%d", stored1, stored2)
 	}
 	if verified > ceiling {
 		t.Fatalf("sanity: verifications %d exceeded O(cap*S) ceiling %d", verified, ceiling)
 	}
-	t.Logf("RESTORED: with 2 honest ciphertexts in one epoch BOTH accrued their full %d shares (ct1=%d ct2=%d) in one block — cycle-8 would have starved ct2 to 0.", 4*8, stored1, stored2)
+	t.Logf("RESTORED: with 2 honest ciphertexts in one epoch BOTH accrued their full %d shares (ct1=%d ct2=%d) in one block — cycle-8 would have starved ct2 to 0.", 4*16, stored1, stored2)
 }
 
 // TestC9_BurstOfManyCiphertexts_NoTailStrand: the cross-block proof. A burst of K honest ciphertexts
@@ -93,7 +93,7 @@ func TestC9_MultiHonestCiphertextsPerEpoch_BothHeal(t *testing.T) {
 // "defers + heals" guarantee is intact, all-honest, no attacker. Cycle-8 hard-STRANDED the tail here.
 func TestC9_BurstOfManyCiphertexts_NoTailStrand(t *testing.T) {
 	c := c7Committee(t)
-	servers := []string{"honest_A", "honest_B", "honest_C"} // 24 pts >= t=22: enough to decrypt any ct
+	servers := []string{"honest_A", "honest_B", "honest_C"} // 48 pts >= t=46: enough to decrypt any ct
 	shareCap := c.k.GetParams(c.ctx).VoteExtShareCap()      // 256
 	const K = 40                                            // > grace(32): cycle-8 forced a tail strand here
 

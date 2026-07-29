@@ -53,10 +53,12 @@ func setupWeightedActiveRound(t *testing.T, mem []member, stake []int64, deal ma
 		vals[i] = bondedVal(m.op, stake[i])
 	}
 	k, ctx := newKeeperSK(t, 1, &mockStaking{vals: vals})
-	// Committee cap 4, budget 32 (= 8*4, the minimum coupling) — small + fast, and every
-	// member owns a multi-point range at these stakes.
+	// Committee cap 4, budget 64 (= 16*4) — small + fast, and every member owns a multi-point
+	// range at these stakes. Budget bumped from 32 to 64 for the v0.3.6 two-clause threshold
+	// t = floor(2S/3)+n: at S=32 the 3 present dealers own 24 < t=25 (round would not finalize),
+	// while at S=64 they own 48 >= t=46, preserving the "3-of-4 present finalizes" scenario.
 	p := transparentParams(2, 4)
-	p.DkgShareBudget = 32
+	p.DkgShareBudget = 64
 	if err := k.SetParams(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +88,8 @@ func setupWeightedActiveRound(t *testing.T, mem []member, stake []int64, deal ma
 }
 
 // TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected: with 4 equal-stake
-// members (each owning a 1/4 share of the 32-point budget = 8 points), ONE dealer is absent.
-// The round must still finalize (the 3 present dealers own 24 >= t points), the absent dealer
+// members (each owning a 1/4 share of the 64-point budget = 16 points), ONE dealer is absent.
+// The round must still finalize (the 3 present dealers own 48 >= t=46 points), the absent dealer
 // must be excluded from QUAL, and a decryption share posted at a point the submitting member
 // does NOT own must be rejected while its own point is accepted.
 func TestCycle6_Byzantine_AbsentDealerFinalizesAndWrongPointShareRejected(t *testing.T) {

@@ -45,6 +45,10 @@ func TestParamsWireCompat_GateOffEmitsNothingNew(t *testing.T) {
 		t.Fatal("an absent dkg_retain_active_dealings key must read as FALSE (the legacy rule), " +
 			"otherwise historical blocks replay under the new behaviour and diverge")
 	}
+	if p.DkgStrictConcentration {
+		t.Fatal("an absent dkg_strict_concentration key must read as FALSE (the legacy formula t=floor(2S/3)+1), " +
+			"otherwise historical DKG finalizations replay under the +n threshold and diverge on app hash")
+	}
 
 	reMarshalled, err := json.Marshal(p)
 	if err != nil {
@@ -57,19 +61,33 @@ func TestParamsWireCompat_GateOffEmitsNothingNew(t *testing.T) {
 			"Fix: tag the field `json:\"...,omitempty\"` and keep it LAST in the struct.\ngot: %s",
 			reMarshalled)
 	}
+	if strings.Contains(string(reMarshalled), "dkg_strict_concentration") {
+		t.Fatalf("CONSENSUS BREAK: re-marshalling a legacy params blob now EMITS dkg_strict_concentration.\n"+
+			"Every params write would then differ from what the previous binary wrote, breaking\n"+
+			"sync-from-genesis and state sync, and forking any node ahead of its plan height.\n"+
+			"Fix: tag the field `json:\"...,omitempty\"` and keep it LAST in the struct.\ngot: %s",
+			reMarshalled)
+	}
 
-	// The flag must still be expressible when it is genuinely on, or the upgrade handler is a no-op.
+	// The flags must still be expressible when genuinely on, or the upgrade handlers are no-ops.
 	p.DkgRetainActiveDealings = true
+	p.DkgStrictConcentration = true
 	on, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(on), `"dkg_retain_active_dealings":true`) {
-		t.Fatalf("the gate must serialise when true, got: %s", on)
+		t.Fatalf("the retain gate must serialise when true, got: %s", on)
+	}
+	if !strings.Contains(string(on), `"dkg_strict_concentration":true`) {
+		t.Fatalf("the strict-concentration gate must serialise when true, got: %s", on)
 	}
 
-	// A fresh genesis (mainnet) must be born with the fixed rule - it has no legacy history to match.
+	// A fresh genesis (mainnet) must be born with the fixed rules - it has no legacy history to match.
 	if !types.DefaultParams().DkgRetainActiveDealings {
-		t.Fatal("DefaultParams must enable the gate so a fresh chain never runs the legacy purge rule")
+		t.Fatal("DefaultParams must enable the retain gate so a fresh chain never runs the legacy purge rule")
+	}
+	if !types.DefaultParams().DkgStrictConcentration {
+		t.Fatal("DefaultParams must enable the strict-concentration gate so a fresh chain is born with the two-clause guard")
 	}
 }

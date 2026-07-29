@@ -249,16 +249,17 @@ func TestReg_HA_RuntimeCommitteeClamp(t *testing.T) {
 }
 
 // TestProbe_H3_ProductionBudget256 re-verifies HIGH-3 closure at the LIVE default budget
-// (S=256) with the strict threshold t = floor(2S/3)+1. A 1/3-stake seat-majority
-// must hold < t points and be unable to reconstruct off-chain.
+// (S=256) with the v0.3.6 two-clause threshold t = floor(2S/3)+n. A 1/3-stake seat-majority
+// must hold < t points and be unable to reconstruct off-chain (the higher +n threshold only
+// widens this safety margin).
 func TestProbe_H3_ProductionBudget256(t *testing.T) {
 	stakes := map[string]int64{"honest_A": 5000, "honest_B": 5000}
 	for i := 0; i < 5; i++ {
 		stakes["attacker_"+string(rune('a'+i))] = 1000 // total attacker 5000 = 1/3 of 15000
 	}
 	c := runTransparentDKG(t, stakes, 256)
-	// n=7 committee: t = floor(512/3) + 1 = 171.
-	if want := uint32(2*256/3 + 1); c.ak.Threshold != want {
+	// n=7 committee: t = floor(512/3) + n = 170 + 7 = 177.
+	if want := uint32(2*256/3 + len(c.round.Members)); c.ak.Threshold != want {
 		t.Fatalf("expected t=%d for S=256, n=7, got %d", want, c.ak.Threshold)
 	}
 	attackers := opsWithPrefix(c, "attacker")

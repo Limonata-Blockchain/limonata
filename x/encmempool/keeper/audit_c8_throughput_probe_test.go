@@ -40,7 +40,7 @@ func c8StoredAt(c h3Committee, e types.EncTx) int {
 // SEVERAL in-flight ciphertexts of one epoch in ONE block, and the per-(operator,ciphertext) budget
 // lets EVERY one of them accrue >= t shares that block — not just the oldest.
 func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.T) {
-	c := c7Committee(t) // S=32, n=4, each owns 8 points, t=22
+	c := c7Committee(t) // S=64, n=4, each owns 16 points, t=46
 	tThresh := int(c.ak.Threshold)
 	ops := []string{"attacker", "honest_A", "honest_B", "honest_C"} // canonical (operator-sorted) order
 
@@ -62,7 +62,7 @@ func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.
 
 	// Every operator serves REAL DLEQ-valid shares for ALL 3 ciphertexts, GROUPED oldest-first —
 	// byte-for-byte the wire shape app.buildDecryptShares emits (iterate in-flight oldest-first,
-	// inner loop over owned points). 4 ops * 3 cts * 8 points = 96 valid shares this block.
+	// inner loop over owned points). 4 ops * 3 cts * 16 points = 192 valid shares this block.
 	ing := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	var entries []keeper.VEEntry
 	total := 0
@@ -74,8 +74,8 @@ func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.
 		entries = append(entries, keeper.VEEntry{Operator: op, VE: types.VoteExtension{Shares: shares}})
 		total += len(shares)
 	}
-	if total != 4*3*8 {
-		t.Fatalf("precondition: expected 96 honest shares served, built %d", total)
+	if total != 4*3*16 {
+		t.Fatalf("precondition: expected 192 honest shares served, built %d", total)
 	}
 
 	c.k.ConsumeVoteExtensions(ing, entries)
@@ -89,15 +89,15 @@ func TestC9_HonestMultiCiphertextThroughput_AllDecryptableInOneBlock(t *testing.
 		t.Fatalf("verify bound violated: stored %v exceeds O(cap*S) ceiling %d", stored, ceiling)
 	}
 
-	t.Logf("owned points/op = 8, per-(op,ciphertext) budget = 8, O(cap*S) ceiling = %d, decrypt capacity/block = 2048", ceiling)
+	t.Logf("owned points/op = 16, per-(op,ciphertext) budget = 16, O(cap*S) ceiling = %d, decrypt capacity/block = 2048", ceiling)
 	t.Logf("stored shares after ONE block of the FULL committee serving 3 matured ciphertexts: ct1=%d ct2=%d ct3=%d (t=%d needed each)",
 		stored[0], stored[1], stored[2], tThresh)
 
 	// THE FIX: ALL THREE ciphertexts accrued a full 32 shares (>= t) in the SAME block — no starve.
 	decryptable := 0
 	for i, sc := range stored {
-		if sc != 4*8 {
-			t.Fatalf("cycle-9 liveness: ciphertext %d must accrue all %d honest shares in one block, got %d", i, 4*8, sc)
+		if sc != 4*16 {
+			t.Fatalf("cycle-9 liveness: ciphertext %d must accrue all %d honest shares in one block, got %d", i, 4*16, sc)
 		}
 		if sc >= tThresh {
 			decryptable++
@@ -134,9 +134,9 @@ func TestC9_ComputeBound_HoldsUnderFullCommitteeFlood(t *testing.T) {
 		es = append(es, c.k.SubmitEncTx(base, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	// (a) EXACT no-clamp full-committee flood: 5 ciphertexts, repeats=1. Each op serves 5*8=40 <= 256
-	// (no per-VE clamp); per ciphertext all 4 ops' 8 points == S=32 verify, so the block does exactly
-	// 5 * S = 160 verifications — the honest-liveness scaling, bounded by cap * S.
+	// (a) EXACT no-clamp full-committee flood: 5 ciphertexts, repeats=1. Each op serves 5*16=80 <= 256
+	// (no per-VE clamp); per ciphertext all 4 ops' 16 points == S=64 verify, so the block does exactly
+	// 5 * S = 320 verifications — the honest-liveness scaling, bounded by cap * S.
 	exactIng := base.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	var exact []keeper.VEEntry
 	for _, op := range []string{"attacker", "honest_A", "honest_B", "honest_C"} {
@@ -147,7 +147,7 @@ func TestC9_ComputeBound_HoldsUnderFullCommitteeFlood(t *testing.T) {
 		t.Fatalf("no-clamp full-committee flood over 5 cts must cost exactly 5*S=%d verifications, got %d", 5*s, v)
 	}
 
-	// (b) MASSIVE flood: 8 owned points * 20 ciphertexts * 15 repeats = 2400 chaff shares EACH, 9600
+	// (b) MASSIVE flood: 16 owned points * 20 ciphertexts * 15 repeats = 4800 chaff shares EACH, 19200
 	// across the committee — far above cap * S. VerifyVoteExtension would clamp a real 1-MiB extension,
 	// but we bypass it to prove the keeper's authoritative bound alone suffices.
 	var entries []keeper.VEEntry

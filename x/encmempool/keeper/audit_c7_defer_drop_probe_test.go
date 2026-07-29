@@ -107,20 +107,26 @@ func chaffVESharesAt(c h3Committee, e types.EncTx, op string) []types.VoteExtSha
 }
 
 // c7Committee builds the canonical cycle-7 committee: 4 equal-stake members (each 25% stake, each
-// owns 8 of the S=32 eval points), t = floor(2*32/3) + 1 = 22. honest_A + honest_B own 16
-// points (< t): their VALID shares alone cannot yet decrypt (the exact transient the grace
-// protects). honest_C is a lagging honest member. attacker is a single 25%-stake member — a
-// strict stake MINORITY (25% < 1/3).
+// owns 16 of the S=64 eval points), t = floor(2*64/3) + n = 42 + 4 = 46 under the v0.3.6 two-clause
+// guard (DkgStrictConcentration on in transparentParams). honest_A + honest_B own 32 points (< t):
+// their VALID shares alone cannot yet decrypt (the exact transient the grace protects). honest_C is
+// a lagging honest member whose 16 late points lift the honest total to 48 (>= t) so the ciphertext
+// HEALS. attacker is a single 25%-stake member — a strict stake MINORITY (25% < 1/3).
+//
+// Budget bumped from S=32 to S=64 (still 4 equal members) BECAUSE the new threshold t = floor(2S/3)+n
+// requires an honest supermajority to reach t: at S=32 the honest 3-of-4 own 24 < t=25 (the committee
+// would strand), whereas at S=64 the honest 3-of-4 own 48 >= t=46 while any 2 own 32 < t — preserving
+// the "matured-but-short defers, then heals from a late honest share" transient this suite exercises.
 func c7Committee(t *testing.T) h3Committee {
 	t.Helper()
 	stakes := map[string]int64{"honest_A": 100, "honest_B": 100, "honest_C": 100, "attacker": 100}
-	c := runTransparentDKG(t, stakes, 32) // S=32=8n, n=4 -> t=22, each owns 8 points
-	if int(c.ak.Threshold) != 22 {
-		t.Fatalf("precondition: expected t=22, got %d", c.ak.Threshold)
+	c := runTransparentDKG(t, stakes, 64) // S=64=16n, n=4 -> t=floor(128/3)+4=46, each owns 16 points
+	if int(c.ak.Threshold) != 46 {
+		t.Fatalf("precondition: expected t=46, got %d", c.ak.Threshold)
 	}
 	for _, op := range []string{"honest_A", "honest_B", "honest_C", "attacker"} {
-		if len(c.memberPoints(op)) != 8 {
-			t.Fatalf("precondition: %s should own 8 points, owns %d", op, len(c.memberPoints(op)))
+		if len(c.memberPoints(op)) != 16 {
+			t.Fatalf("precondition: %s should own 16 points, owns %d", op, len(c.memberPoints(op)))
 		}
 	}
 	total := c.coalitionStake([]string{"honest_A", "honest_B", "honest_C", "attacker"})
@@ -146,8 +152,8 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 	}
 	e := c.k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1) // matures @12
 
-	// Honest A + B contribute their 16 REAL points through the VOTE-EXTENSION ingest path
-	// (proving valid shares ARE accepted by the new ingest verification); the attacker sprays 8
+	// Honest A + B contribute their 32 REAL points through the VOTE-EXTENSION ingest path
+	// (proving valid shares ARE accepted by the new ingest verification); the attacker sprays 16
 	// chaff shares at its OWN owned points on the same block.
 	ing := ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	c.k.ConsumeVoteExtensions(ing, []keeper.VEEntry{
@@ -156,13 +162,13 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 		{Operator: "attacker", VE: types.VoteExtension{Shares: chaffVESharesAt(c, e, "attacker")}},
 	})
 
-	// FIX #1: chaff was REJECTED at ingest — only the 16 verified honest shares are in state.
+	// FIX #1: chaff was REJECTED at ingest — only the 32 verified honest shares are in state.
 	stored := c.k.CollectShares(ctx, e.DecryptHeight, e.Seq)
-	if len(stored) != 16 {
-		t.Fatalf("FIX #1 REGRESSION: expected 16 verified shares stored (chaff rejected), got %d", len(stored))
+	if len(stored) != 32 {
+		t.Fatalf("FIX #1 REGRESSION: expected 32 verified shares stored (chaff rejected), got %d", len(stored))
 	}
-	if n := countEvents(ing, "encmempool_dkg_ve_share_rejected"); n != 8 {
-		t.Fatalf("expected 8 chaff shares rejected at ingest with a loud event, got %d", n)
+	if n := countEvents(ing, "encmempool_dkg_ve_share_rejected"); n != 16 {
+		t.Fatalf("expected 16 chaff shares rejected at ingest with a loud event, got %d", n)
 	}
 	// The attacker owns none of the stored points (never marked present).
 	attackerIdx := idxByOp(c.round, "attacker")
@@ -172,7 +178,7 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 		}
 	}
 
-	// FIX #2: matured @12 with 16 < t=22 VERIFIED shares -> DEFER (heal-eligible), NOT hard-drop.
+	// FIX #2: matured @12 with 32 < t=46 VERIFIED shares -> DEFER (heal-eligible), NOT hard-drop.
 	b12 := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
@@ -195,8 +201,8 @@ func TestC7_ChaffRejectedAtIngest_DefersAndHeals(t *testing.T) {
 	c.k.ConsumeVoteExtensions(heal, []keeper.VEEntry{
 		{Operator: "honest_C", VE: types.VoteExtension{Shares: veSharesFor(t, c, ctx, e, ct, "honest_C")}},
 	})
-	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 24 {
-		t.Fatalf("after healing VE, expected 24 verified shares (16+8), got %d", n)
+	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 48 {
+		t.Fatalf("after healing VE, expected 48 verified shares (32+16), got %d", n)
 	}
 	b13 := c.ctx.WithBlockHeight(13).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b13); err != nil {
@@ -224,8 +230,8 @@ func TestC7_IngestVerifiesDLEQ_Unit(t *testing.T) {
 	e := c.k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1)
 
 	valid := veSharesFor(t, c, ctx, e, ct, "honest_A")
-	if len(valid) != 8 {
-		t.Fatalf("precondition: honest_A should have 8 shares, got %d", len(valid))
+	if len(valid) != 16 {
+		t.Fatalf("precondition: honest_A should have 16 shares, got %d", len(valid))
 	}
 
 	// (a) a VALID proved share is accepted and stored.
@@ -311,11 +317,11 @@ func TestC7_UnverifiedShareBypassingIngest_DefersNotDrops(t *testing.T) {
 	}
 	e := c.k.SubmitEncTx(ctx, "user2", 20, 2, ct.A, ct.Nonce, ct.Body, 1) // matures @22
 
-	// 16 REAL verified honest points (A+B) ...
-	if got := setValidShares(t, c, ctx, e, ct, "honest_A") + setValidShares(t, c, ctx, e, ct, "honest_B"); got != 16 {
-		t.Fatalf("expected 16 honest points, got %d", got)
+	// 32 REAL verified honest points (A+B) ...
+	if got := setValidShares(t, c, ctx, e, ct, "honest_A") + setValidShares(t, c, ctx, e, ct, "honest_B"); got != 32 {
+		t.Fatalf("expected 32 honest points, got %d", got)
 	}
-	// ... + 8 UNVERIFIED chaff at the attacker's own points, injected past the ingest gate.
+	// ... + 16 UNVERIFIED chaff at the attacker's own points, injected past the ingest gate.
 	for _, p := range c.memberPoints("attacker") {
 		if err := c.k.SetEncShare(ctx, types.EncShare{
 			Keyper: "attacker", DecryptHeight: e.DecryptHeight, Seq: e.Seq, Index: p,
@@ -324,12 +330,12 @@ func TestC7_UnverifiedShareBypassingIngest_DefersNotDrops(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := len(c.k.CollectShares(ctx, e.DecryptHeight, e.Seq)); n != 24 {
-		t.Fatalf("precondition: raw count must be padded to 24 (16 honest + 8 chaff), got %d", n)
+	if n := len(c.k.CollectShares(ctx, e.DecryptHeight, e.Seq)); n != 48 {
+		t.Fatalf("precondition: raw count must be padded to 48 (32 honest + 16 chaff), got %d", n)
 	}
 
-	// Matured @22: raw count 24 >= t=22 (count gate passes) and the attacker is present (stake
-	// gate passes), so control reaches RecoverVerified — which drops the chaff (16 verified < 18)
+	// Matured @22: raw count 48 >= t=46 (count gate passes) and the attacker is present (stake
+	// gate passes), so control reaches RecoverVerified — which drops the chaff (32 verified < 46)
 	// and returns ErrInsufficientVerified. Fix #3 routes that into the grace DEFER branch.
 	b22 := c.ctx.WithBlockHeight(22).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b22); err != nil {
@@ -346,7 +352,7 @@ func TestC7_UnverifiedShareBypassingIngest_DefersNotDrops(t *testing.T) {
 	}
 
 	// HEAL: the lagging honest member's real shares land inside the grace -> next block decrypts.
-	_ = setValidShares(t, c, b22, e, ct, "honest_C") // +8 verified -> 24 verified >= t=22
+	_ = setValidShares(t, c, b22, e, ct, "honest_C") // +16 verified -> 48 verified >= t=46
 	b23 := c.ctx.WithBlockHeight(23).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b23); err != nil {
 		t.Fatal(err)

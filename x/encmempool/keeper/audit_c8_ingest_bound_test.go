@@ -69,12 +69,12 @@ func c8ChaffAcross(t *testing.T, c h3Committee, es []types.EncTx, op string, rep
 }
 
 // TestC8_PerOperatorCap_ExcessDroppedBeforeVerify: an operator submitting MANY MORE shares than the
-// points it owns has the excess DROPPED before per-share verification. The attacker owns 8 points and
-// sprays them ×20 (160 chaff shares) at ONE ciphertext; the within-block eval-point dedup collapses
-// the 160 to its 8 distinct owned slots, so exactly 8 DLEQ verifications run (not 160), none store.
+// points it owns has the excess DROPPED before per-share verification. The attacker owns 16 points and
+// sprays them ×20 (320 chaff shares) at ONE ciphertext; the within-block eval-point dedup collapses
+// the 320 to its 16 distinct owned slots, so exactly 16 DLEQ verifications run (not 320), none store.
 func TestC8_PerOperatorCap_ExcessDroppedBeforeVerify(t *testing.T) {
 	c := c7Committee(t)
-	owned := len(c.memberPoints("attacker")) // 8
+	owned := len(c.memberPoints("attacker")) // 16
 	ctx := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 	ct, err := threshold.Encrypt(c.ak.Pub, []byte("per-op-cap"))
 	if err != nil {
@@ -112,11 +112,11 @@ func TestC8_PerOperatorCap_ExcessDroppedBeforeVerify(t *testing.T) {
 // owned points across 12 real ciphertexts; repeats do not inflate the cost past owned*12.
 func TestC9_PerCiphertextBudget_ScalesWithRealCiphertextsNotRepeats(t *testing.T) {
 	c := c7Committee(t)
-	owned := len(c.memberPoints("attacker")) // 8
+	owned := len(c.memberPoints("attacker")) // 16
 	ctx := c.ctx.WithBlockHeight(10).WithEventManager(sdk.NewEventManager())
 	s := c.k.GetParams(c.ctx).EffectiveShareBudget() // 32
 
-	const nct = 12
+	const nct = 8
 	var es []types.EncTx
 	for i := 0; i < nct; i++ {
 		ct, err := threshold.Encrypt(c.ak.Pub, []byte("multi-ct"))
@@ -126,7 +126,7 @@ func TestC9_PerCiphertextBudget_ScalesWithRealCiphertextsNotRepeats(t *testing.T
 		es = append(es, c.k.SubmitEncTx(ctx, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	// repeats 1 and 2 both stay under the per-VE cap (12*2*8=192 <= 256), so the ONLY variable is the
+	// repeats 1 and 2 both stay under the per-VE cap (8*2*16=256 <= 256), so the ONLY variable is the
 	// padding magnitude — which the within-block dedup collapses. Verifications must be owned*nct in BOTH.
 	for _, repeats := range []int{1, 2} {
 		branch, _ := ctx.CacheContext()
@@ -171,11 +171,11 @@ func TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS(t *testing.T) {
 		es = append(es, c.k.SubmitEncTx(base, "user", 10, 2, ct.A, ct.Nonce, ct.Body, 1))
 	}
 
-	// (a) NO-CLAMP EXACT case: with repeats=1 every ciphertext's 8 owned points fit under the per-VE cap
-	// (30*8=240 <= 256), so verifications are EXACTLY owned*floodCts — the per-ciphertext budget, proving
+	// (a) NO-CLAMP EXACT case: with repeats=1 every ciphertext's 16 owned points fit under the per-VE cap
+	// (15*16=240 <= 256), so verifications are EXACTLY owned*floodCts — the per-ciphertext budget, proving
 	// the honest-liveness scaling. (b) UPPER-BOUND case: whatever the flood magnitude (repeats), the cost
 	// never exceeds owned*min(floodCts,cap) and never the O(cap*S) ceiling — proving attacker-boundedness.
-	for _, floodCts := range []int{1, 5, 15, 30} {
+	for _, floodCts := range []int{1, 5, 15} {
 		for _, repeats := range []int{1, 10, 40} {
 			branch, _ := base.CacheContext()
 			ing := branch.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
@@ -184,7 +184,7 @@ func TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS(t *testing.T) {
 				{Operator: "attacker", VE: types.VoteExtension{Shares: chaff}},
 			})
 			rej := countEvents(ing, "encmempool_dkg_ve_share_rejected")
-			upper := owned * floodCts // floodCts <= 30 < cap, so min(floodCts,cap)=floodCts
+			upper := owned * floodCts // floodCts <= 15, owned*floodCts <= 240 <= per-VE cap 256, so no clamp
 			if rej > upper {
 				t.Fatalf("per-ciphertext budget breach: %d chaff shares forced %d verifications > owned*floodCts=%d", len(chaff), rej, upper)
 			}
@@ -198,7 +198,7 @@ func TestC9_ChaffSpammer_BoundedPerBlock_ByCapTimesS(t *testing.T) {
 	}
 
 	// HIGH-B: re-sending the SAME fat chaff every block cannot escalate — a FIXED per-block cost.
-	chaff := c8ChaffAcross(t, c, es, "attacker", 1) // 30 cts * 8 pts = 240 distinct slots, re-sent verbatim
+	chaff := c8ChaffAcross(t, c, es, "attacker", 1) // 30 cts * 16 pts = 480 distinct slots (clamped to the 256 per-VE cap), re-sent verbatim
 	var prev = -1
 	for h := int64(12); h <= 17; h++ {
 		branch, _ := base.CacheContext()
@@ -276,18 +276,18 @@ func TestC8_BoundPreservesCycle7Fix_NoHonestStarve(t *testing.T) {
 	})
 
 	stored := c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)
-	if len(stored) != 16 {
-		t.Fatalf("STARVE: the bound must still store all 16 honest shares despite an attacker-first flood, got %d", len(stored))
+	if len(stored) != 32 {
+		t.Fatalf("STARVE: the bound must still store all 32 honest shares despite an attacker-first flood, got %d", len(stored))
 	}
 	if rej := countEvents(ing, "encmempool_dkg_ve_share_rejected"); rej != len(c.memberPoints("attacker")) {
 		t.Fatalf("expected exactly %d chaff rejections (attacker's owned points), got %d", len(c.memberPoints("attacker")), rej)
 	}
-	// Total block verifications = 16 honest + 8 chaff = 24, comfortably under the O(S) ceiling.
-	if v := c8Verifications(t, c, ing, e, 0); v != 24 {
-		t.Fatalf("expected 24 verifications (16 honest stored + 8 chaff rejected), got %d", v)
+	// Total block verifications = 32 honest + 16 chaff = 48, comfortably under the O(S) ceiling.
+	if v := c8Verifications(t, c, ing, e, 0); v != 48 {
+		t.Fatalf("expected 48 verifications (32 honest stored + 16 chaff rejected), got %d", v)
 	}
 
-	// The short (16 < t=22) ciphertext must DEFER, never hard-drop.
+	// The short (32 < t=46) ciphertext must DEFER, never hard-drop.
 	b12 := c.ctx.WithBlockHeight(12).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b12); err != nil {
 		t.Fatal(err)
@@ -304,8 +304,8 @@ func TestC8_BoundPreservesCycle7Fix_NoHonestStarve(t *testing.T) {
 	c.k.ConsumeVoteExtensions(heal, []keeper.VEEntry{
 		{Operator: "honest_C", VE: types.VoteExtension{Shares: veSharesFor(t, c, ctx, e, ct, "honest_C")}},
 	})
-	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 24 {
-		t.Fatalf("after heal VE expected 24 verified shares (16+8), got %d", n)
+	if n := len(c.k.CollectShares(c.ctx, e.DecryptHeight, e.Seq)); n != 48 {
+		t.Fatalf("after heal VE expected 48 verified shares (32+16), got %d", n)
 	}
 	b13 := c.ctx.WithBlockHeight(13).WithEventManager(sdk.NewEventManager())
 	if err := c.k.BeginBlock(b13); err != nil {
@@ -352,8 +352,8 @@ func TestC8_Bound_OrderIndependent(t *testing.T) {
 
 	a := consumeOn(order("attacker", "honest_A", "honest_B"))
 	b := consumeOn(order("honest_B", "attacker", "honest_A"))
-	if len(a) != 16 || len(b) != 16 {
-		t.Fatalf("expected 16 verified shares each order under the bound, got %d and %d", len(a), len(b))
+	if len(a) != 32 || len(b) != 32 {
+		t.Fatalf("expected 32 verified shares each order under the bound, got %d and %d", len(a), len(b))
 	}
 	for i := range a {
 		if a[i].Index != b[i].Index {

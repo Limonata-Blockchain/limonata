@@ -323,14 +323,15 @@ func (k Keeper) openRound(ctx sdk.Context, epoch uint64, members []types.RoundMe
 	// HIGH-3: on the STAKE-WEIGHTED transparent path each member is allocated Shamir
 	// evaluation points proportional to its snapshotted stake within the budget S, HERE (at
 	// round-open) so the allocation is seeded with the round's EPOCH — the epoch-rotating
-	// remainder-seat tie-break (cycle-3 L-2). The threshold is t = floor(2S/3)+1. MembersHash
+	// remainder-seat tie-break (cycle-3 L-2). The threshold is t = floor(2S/3)+1 (legacy) or
+	// floor(2S/3)+n when DkgStrictConcentration is set (v0.3.6 two-clause guard). MembersHash
 	// covers only the operator set, so allocating after hashing cannot flap membership.
 	// On the legacy/declared path (unweighted, one point per member) the member COUNT
 	// threshold stays byte-identical.
 	var t uint32
 	if p.DkgTransparent {
 		members = AllocateEvalPoints(members, p.EffectiveShareBudget(), epoch)
-		t, _ = stakeThreshold(members)
+		t, _ = stakeThreshold(members, p.DkgStrictConcentration)
 	} else {
 		t = roundThreshold(p, len(members))
 	}

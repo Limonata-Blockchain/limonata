@@ -174,8 +174,36 @@ type Params struct {
 	// breaks sync-from-genesis, breaks any state sync whose replay window contains a params write,
 	// and would FORK a node running v0.3.5 before the plan height the moment a gov params update
 	// executed. With omitempty the gate-off blob is byte-identical to v0.3.4, while true still
-	// serialises normally. Keep this field LAST so the emitted field order is unchanged.
+	// serialises normally. Keep this field before the fields below (existing wire order preserved).
 	DkgRetainActiveDealings bool `json:"dkg_retain_active_dealings,omitempty"`
+
+	// DkgStrictConcentration gates the v0.3.6 TWO-CLAUSE concentration-guard fix (Limonata):
+	//
+	//   clause 1 (confidentiality): the WEIGHTED reconstruction threshold becomes t = floor(2S/3)+n
+	//     (n = committee size) instead of floor(2S/3)+1, so NO coalition holding <=2/3 of the
+	//     snapshotted stake can ever reach t after largest-remainder apportionment. The old +1 sat
+	//     BELOW the worst-case rounding of a legitimate <=2/3 coalition, so the fail-closed admission
+	//     guard tripped on ~every realistic committee (structurally unsatisfiable, 0/1600 pass).
+	//   clause 2 (strand / liveness): CommitteeConcentrationBreached ALSO fails closed when any
+	//     single operator alone owns >= S-t+1 eval points, since it could then unilaterally withhold
+	//     its shares and freeze decryption for the whole epoch.
+	//
+	// It is a PARAM, not plain code, for the SAME replay reason as DkgRetainActiveDealings above.
+	// stakeThreshold's result is WRITTEN to committed state (ActiveThresholdKey.Threshold) at every
+	// DKG finalization. Live chains already finalized ~16 epochs under the OLD +1 formula, so an
+	// unconditional switch to +n would recompute a different threshold when replaying those heights
+	// -> app-hash divergence -> broken sync-from-genesis and state sync. A chain upgraded from an
+	// older binary unmarshals a stored blob with no such key to FALSE (the exact legacy behaviour,
+	// replayed byte-for-byte), and the v0.3.6 upgrade handler (encmempool-strict-concentration-v1)
+	// flips it true at the plan height, from which every node computes t = floor(2S/3)+n together.
+	// The strand clause it also gates is only ever reached at SubmitEncrypted admission, which has
+	// never run on any live chain (EncSeqKey nil), so that half is replay-inert regardless; it is
+	// gated by the same flag purely so the two clauses ship and toggle as one unit.
+	//
+	// `omitempty` IS LOAD-BEARING (see DkgRetainActiveDealings): params persist as a raw json.Marshal
+	// of this struct, so a plain tag would lengthen EVERY params write vs what the previous binary
+	// wrote and fork the chain. Keep this field LAST so a legacy blob re-marshals byte-identically.
+	DkgStrictConcentration bool `json:"dkg_strict_concentration,omitempty"`
 }
 
 // DkgMember is a genesis-declared DKG participant. For this PoC the member set is
@@ -516,6 +544,12 @@ func DefaultParams() Params {
 		// chains get it from the v0.3.5 upgrade handler instead, because their history was produced
 		// under the old rule and must replay under it.
 		DkgRetainActiveDealings: true,
+		// STRICT-CONCENTRATION (v0.3.6): ON by default so a fresh genesis (mainnet included) is born
+		// with the two-clause guard (t = floor(2S/3)+n confidentiality threshold + single-operator
+		// strand check). Existing chains get it from the encmempool-strict-concentration-v1 upgrade
+		// handler instead, because their ~16 historical DKG finalizations stored the old-formula
+		// threshold and must replay under the old formula.
+		DkgStrictConcentration: true,
 	}
 }
 
