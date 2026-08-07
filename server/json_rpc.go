@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -42,6 +44,15 @@ func StartJSONRPC(
 	mempool backend.Mempool,
 ) (*http.Server, error) {
 	logger := srvCtx.Logger.With("module", "geth")
+
+	// SECURITY GATE (Limonata): never serve signing-capable JSON-RPC methods
+	// (eth_accounts / eth_sendTransaction / eth_sign / personal_*) on a public
+	// interface while the node's keyring holds keys. On a public listener the
+	// node signs txs and messages for those keys with no authentication, which
+	// is remote unauthenticated fund theft plus a signing oracle. Fail closed.
+	if err := guardExposedKeyring(config, clientCtx); err != nil {
+		return nil, err
+	}
 
 	evtClient, ok := clientCtx.Client.(rpcclient.EventsClient)
 	if !ok {
@@ -136,4 +147,67 @@ func StartJSONRPC(
 	wsSrv := rpc.NewWebsocketsServer(clientCtx, logger, stream, config)
 	wsSrv.Start()
 	return httpSrv, nil
+}
+
+// isPublicBind reports whether a "host:port" listen address is reachable from
+// off-box. An empty or unparsable host, or any non-loopback IP, is treated as
+// public (fail safe). "localhost" and loopback IPs are private.
+func isPublicBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return true // bind-all
+	}
+	if host == "localhost" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
+}
+
+// guardExposedKeyring refuses to start the JSON-RPC/WS server when it would
+// serve signing-capable methods (eth_accounts / eth_sendTransaction / eth_sign
+// via the "eth" namespace, or the "personal" namespace) on a public interface
+// while the node's keyring holds keys. That combination lets any anonymous
+// caller make the node sign and broadcast as those keys. Fail closed; a node on
+// a trusted private network can override with LIMONATA_ALLOW_EXPOSED_KEYRING=1.
+func guardExposedKeyring(config *serverconfig.Config, clientCtx client.Context) error {
+	if os.Getenv("LIMONATA_ALLOW_EXPOSED_KEYRING") == "1" {
+		return nil
+	}
+
+	public := isPublicBind(config.JSONRPC.Address) || isPublicBind(config.JSONRPC.WsAddress)
+
+	signing := false
+	for _, ns := range config.JSONRPC.API {
+		if ns == rpc.EthNamespace || ns == rpc.PersonalNamespace {
+			signing = true
+			break
+		}
+	}
+
+	if !public || !signing || clientCtx.Keyring == nil {
+		return nil
+	}
+
+	keys, err := clientCtx.Keyring.List()
+	if err != nil {
+		return fmt.Errorf("json-rpc keyring safety check failed: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"refusing to start JSON-RPC: %d key(s) in the keyring would be exposed for "+
+			"unauthenticated server-side signing (eth_accounts/eth_sendTransaction/eth_sign) "+
+			"on public listener http=%q ws=%q with namespaces %v. Remove the keys from this "+
+			"node's keyring, bind json-rpc to loopback, or drop the eth/personal namespaces. "+
+			"Override only on a trusted private network with LIMONATA_ALLOW_EXPOSED_KEYRING=1",
+		len(keys), config.JSONRPC.Address, config.JSONRPC.WsAddress, config.JSONRPC.API,
+	)
 }
