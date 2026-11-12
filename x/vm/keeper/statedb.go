@@ -1,0 +1,420 @@
+package keeper
+
+import (
+	"errors"
+	"math"
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	evmtrace "github.com/cosmos/evm/trace"
+	"github.com/cosmos/evm/x/vm/statedb"
+	"github.com/cosmos/evm/x/vm/types"
+
+	errorsmod "cosmossdk.io/errors"
+
+	"github.com/cosmos/cosmos-sdk/store/v2/prefix"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+)
+
+var _ statedb.Keeper = &Keeper{}
+
+// ----------------------------------------------------------------------------
+// StateDB Keeper implementation
+// ----------------------------------------------------------------------------
+
+// GetAccount returns nil if account is not exist
+func (k *Keeper) GetAccount(ctx sdk.Context, addr common.Address) *statedb.Account {
+	ctx, span := ctx.StartSpan(tracer, "GetAccount", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
+
+	cosmosAddr := sdk.AccAddress(addr.Bytes())
+	acct := k.accountKeeper.GetAccount(ctx, cosmosAddr)
+	if acct == nil {
+		return nil
+	}
+
+	return statedb.NewAccount(
+		acct.GetSequence(),
+		k.SpendableCoin(ctx, addr),
+		k.lockedCoin(ctx, addr),
+		k.GetCodeHash(ctx, addr).Bytes(),
+	)
+}
+
+// GetState loads contract state from database.
+func (k *Keeper) GetState(ctx sdk.Context, addr common.Address, key common.Hash) common.Hash {
+	ctx, span := ctx.StartSpan(tracer, "GetState", trace.WithAttributes(
+		attribute.String("address", addr.Hex()),
+		attribute.String("key", key.Hex()),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.AddressStoragePrefix(addr))
+
+	value := store.Get(key.Bytes())
+	if len(value) == 0 {
+		return common.Hash{}
+	}
+
+	return common.BytesToHash(value)
+}
+
+// GetFastState loads contract state from database.
+func (k *Keeper) GetFastState(ctx sdk.Context, addr common.Address, key common.Hash) []byte {
+	ctx, span := ctx.StartSpan(tracer, "GetFastState", trace.WithAttributes(
+		attribute.String("address", addr.Hex()),
+		attribute.String("key", key.Hex()),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.AddressStoragePrefix(addr))
+
+	return store.Get(key.Bytes())
+}
+
+// GetCodeHash loads the code hash from the database for the given contract address.
+func (k *Keeper) GetCodeHash(ctx sdk.Context, addr common.Address) common.Hash {
+	ctx, span := ctx.StartSpan(tracer, "GetCodeHash", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.KeyPrefixCodeHash)
+	bz := store.Get(addr.Bytes())
+	if len(bz) == 0 {
+		return common.BytesToHash(types.EmptyCodeHash)
+	}
+
+	return common.BytesToHash(bz)
+}
+
+// IterateContracts iterates over all smart contract addresses in the EVM keeper and
+// performs a callback function.
+//
+// The iteration is stopped when the callback function returns true.
+func (k Keeper) IterateContracts(ctx sdk.Context, cb func(addr common.Address, codeHash common.Hash) (stop bool)) {
+	ctx, span := ctx.StartSpan(tracer, "IterateContracts")
+	defer span.End()
+	store := ctx.KVStore(k.storeKey)
+	iterator := storetypes.KVStorePrefixIterator(store, types.KeyPrefixCodeHash)
+
+	defer iterator.Close()
+	for ; iterator.Valid(); iterator.Next() {
+		addr := common.BytesToAddress(iterator.Key())
+		codeHash := common.BytesToHash(iterator.Value())
+
+		if cb(addr, codeHash) {
+			break
+		}
+	}
+}
+
+// GetCode loads contract code from database, implements `statedb.Keeper` interface.
+func (k *Keeper) GetCode(ctx sdk.Context, codeHash common.Hash) []byte {
+	ctx, span := ctx.StartSpan(tracer, "GetCode", trace.WithAttributes(
+		attribute.String("code_hash", codeHash.Hex()),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.KeyPrefixCode)
+	return store.Get(codeHash.Bytes())
+}
+
+// ForEachStorage iterate contract storage, callback return false to break early
+func (k *Keeper) ForEachStorage(ctx sdk.Context, addr common.Address, cb func(key, value common.Hash) bool) {
+	ctx, span := ctx.StartSpan(tracer, "ForEachStorage", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
+	store := ctx.KVStore(k.storeKey)
+	prefix := types.AddressStoragePrefix(addr)
+
+	iterator := storetypes.KVStorePrefixIterator(store, prefix)
+	defer iterator.Close()
+
+	for ; iterator.Valid(); iterator.Next() {
+		key := common.BytesToHash(iterator.Key())
+		value := common.BytesToHash(iterator.Value())
+
+		// check if iteration stops
+		if !cb(key, value) {
+			return
+		}
+	}
+}
+
+// SetAccountBalance update account's balance, compare with current balance first,
+// then decide to mint or burn.
+//
+// If account has a Locked balance specified within it, that value is used in
+// order to compute the final balance. If Locked is nil, account's locked
+// balance is fetched from state first in order to compute the final balance.
+func (k *Keeper) SetAccountBalance(ctx sdk.Context, addr common.Address, account statedb.Account) error {
+	locked := account.LockedBalanceSnapshot()
+	if locked == nil {
+		return k.SetBalance(ctx, addr, account.Balance)
+	}
+	return k.SetBalanceWithLocked(ctx, addr, account.Balance, locked)
+}
+
+// SetBalance updates an account's balance, compare with current balance first,
+// then decide to mint or burn.
+func (k *Keeper) SetBalance(ctx sdk.Context, addr common.Address, amount *uint256.Int) (err error) {
+	cosmosAddr := sdk.AccAddress(addr.Bytes())
+	lockedCoin := k.bankWrapper.LockedCoins(ctx, cosmosAddr).AmountOf(types.GetEVMCoinDenom())
+	return k.SetBalanceWithLocked(ctx, addr, amount, lockedCoin.BigInt())
+}
+
+// SetBalanceWithLocked updates an account's balance, compare with current
+// balance first, then decide to mint or burn.
+//
+// Locked must be non nil and is used to compute the final balance instead of
+// looking it up from state at set time. If you do not know the locked balance
+// already, use SetBalance in order to look it up from state at set time.
+func (k *Keeper) SetBalanceWithLocked(ctx sdk.Context, addr common.Address, amount *uint256.Int, locked *big.Int) (err error) {
+	if amount == nil {
+		return nil
+	}
+
+	ctx, span := ctx.StartSpan(tracer, "SetBalanceWithLocked", trace.WithAttributes(attribute.String("address", addr.Hex()), attribute.String("amount", amount.String())))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
+	cosmosAddr := sdk.AccAddress(addr.Bytes())
+
+	// Only check blocked addresses when balance is increasing (receiving funds).
+	coin := k.bankWrapper.SpendableCoin(ctx, cosmosAddr, types.GetEVMCoinDenom())
+	if amount.ToBig().Cmp(coin.Amount.BigInt()) > 0 && k.bankWrapper.BlockedAddr(cosmosAddr) {
+		return errorsmod.Wrapf(errortypes.ErrUnauthorized, "%s is not allowed to receive funds", cosmosAddr)
+	}
+
+	newBalance := new(big.Int).Add(amount.ToBig(), locked)
+	return k.bankWrapper.SetBalance(ctx, cosmosAddr, newBalance)
+}
+
+// SetAccount updates nonce/balance/codeHash together.
+func (k *Keeper) SetAccount(ctx sdk.Context, addr common.Address, account statedb.Account) (err error) {
+	ctx, span := ctx.StartSpan(tracer, "SetAccount", trace.WithAttributes(
+		attribute.String("address", addr.Hex()),
+		attribute.Int64("nonce", int64(account.Nonce)), //nolint:gosec // G115
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
+	// update account
+	acct := k.accountKeeper.GetAccount(ctx, addr.Bytes())
+	if acct == nil {
+		acct = k.accountKeeper.NewAccountWithAddress(ctx, addr.Bytes())
+	}
+
+	if err := acct.SetSequence(account.Nonce); err != nil {
+		return err
+	}
+
+	if types.IsEmptyCodeHash(account.CodeHash) {
+		k.DeleteCodeHash(ctx, addr)
+	} else {
+		k.SetCodeHash(ctx, addr.Bytes(), account.CodeHash)
+	}
+	k.accountKeeper.SetAccount(ctx, acct)
+
+	if err := k.SetAccountBalance(ctx, addr, account); err != nil {
+		return err
+	}
+
+	k.Logger(ctx).Debug(
+		"account updated",
+		"ethereum-address", addr.Hex(),
+		"nonce", account.Nonce,
+		"codeHash", common.BytesToHash(account.CodeHash).Hex(),
+		"balance", account.Balance,
+		"locked-balance", account.LockedBalanceSnapshot(),
+	)
+	return nil
+}
+
+// SetState update contract storage.
+func (k *Keeper) SetState(ctx sdk.Context, addr common.Address, key common.Hash, value []byte) {
+	ctx, span := ctx.StartSpan(tracer, "SetState", trace.WithAttributes(
+		attribute.String("address", addr.Hex()),
+		attribute.String("key", key.Hex()),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.AddressStoragePrefix(addr))
+	store.Set(key.Bytes(), value)
+
+	k.Logger(ctx).Debug(
+		"state updated",
+		"ethereum-address", addr.Hex(),
+		"key", key.Hex(),
+	)
+}
+
+// DeleteState deletes the entry for the given key in the contract storage
+// at the defined contract address.
+func (k *Keeper) DeleteState(ctx sdk.Context, addr common.Address, key common.Hash) {
+	ctx, span := ctx.StartSpan(tracer, "DeleteState", trace.WithAttributes(
+		attribute.String("address", addr.Hex()),
+		attribute.String("key", key.Hex()),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.AddressStoragePrefix(addr))
+	store.Delete(key.Bytes())
+
+	k.Logger(ctx).Debug(
+		"state deleted",
+		"ethereum-address", addr.Hex(),
+		"key", key.Hex(),
+	)
+}
+
+// SetCodeHash sets the code hash for the given contract address.
+func (k *Keeper) SetCodeHash(ctx sdk.Context, addrBytes, hashBytes []byte) {
+	ctx, span := ctx.StartSpan(tracer, "SetCodeHash", trace.WithAttributes(
+		attribute.String("address", common.BytesToAddress(addrBytes).Hex()),
+		attribute.String("code_hash", common.BytesToHash(hashBytes).Hex()),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.KeyPrefixCodeHash)
+	store.Set(addrBytes, hashBytes)
+
+	k.Logger(ctx).Debug(
+		"code hash updated",
+		"address", common.BytesToAddress(addrBytes).Hex(),
+		"code hash", common.BytesToHash(hashBytes).Hex(),
+	)
+}
+
+// DeleteCodeHash deletes the code hash for the given contract address from the store.
+func (k *Keeper) DeleteCodeHash(ctx sdk.Context, addr common.Address) {
+	ctx, span := ctx.StartSpan(tracer, "DeleteCodeHash", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.KeyPrefixCodeHash)
+	store.Delete(addr.Bytes())
+
+	k.Logger(ctx).Debug(
+		"code hash deleted",
+		"address", addr.Hex(),
+	)
+}
+
+// SetCode sets the given contract code bytes for the corresponding code hash bytes key
+// in the code store.
+func (k *Keeper) SetCode(ctx sdk.Context, codeHash, code []byte) {
+	ctx, span := ctx.StartSpan(tracer, "SetCode", trace.WithAttributes(
+		attribute.String("code_hash", common.BytesToHash(codeHash).Hex()),
+		attribute.Int("code_size", len(code)),
+	))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.KeyPrefixCode)
+	store.Set(codeHash, code)
+
+	k.Logger(ctx).Debug(
+		"code updated",
+		"code-hash", common.BytesToHash(codeHash).Hex(),
+	)
+}
+
+// DeleteCode deletes the contract code for the given code hash bytes in
+// the corresponding store.
+func (k *Keeper) DeleteCode(ctx sdk.Context, codeHash []byte) {
+	ctx, span := ctx.StartSpan(tracer, "DeleteCode", trace.WithAttributes(attribute.String("code_hash", common.BytesToHash(codeHash).Hex())))
+	defer span.End()
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.KeyPrefixCode)
+	store.Delete(codeHash)
+
+	k.Logger(ctx).Debug(
+		"code deleted",
+		"code-hash", common.BytesToHash(codeHash).Hex(),
+	)
+}
+
+// hasStakingPositions reports whether the account has any staking positions:
+// delegations, redelegations or unbonding delegations.
+func (k *Keeper) hasStakingPositions(ctx sdk.Context, cosmosAddr sdk.AccAddress) (bool, error) {
+	delegations, err := k.stakingKeeper.GetAllDelegatorDelegations(ctx, cosmosAddr)
+	if err != nil {
+		return false, errorsmod.Wrapf(err, "failed to get delegations for account %s", cosmosAddr)
+	}
+	if len(delegations) > 0 {
+		return true, nil
+	}
+
+	redelegations, err := k.stakingKeeper.GetRedelegations(ctx, cosmosAddr, math.MaxUint16)
+	if err != nil {
+		return false, errorsmod.Wrapf(err, "failed to get redelegations for account %s", cosmosAddr)
+	}
+	if len(redelegations) > 0 {
+		return true, nil
+	}
+
+	unbondingDelegations, err := k.stakingKeeper.GetAllUnbondingDelegations(ctx, cosmosAddr)
+	if err != nil {
+		return false, errorsmod.Wrapf(err, "failed to get unbonding delegations for account %s", cosmosAddr)
+	}
+	if len(unbondingDelegations) > 0 {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// DeleteAccount handles contract's suicide call:
+// - clear balance
+// - remove code
+// - remove states
+// - remove the code hash
+// - remove auth account
+func (k *Keeper) DeleteAccount(ctx sdk.Context, addr common.Address) error {
+	ctx, span := ctx.StartSpan(tracer, "DeleteAccount", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
+	cosmosAddr := sdk.AccAddress(addr.Bytes())
+	acct := k.accountKeeper.GetAccount(ctx, cosmosAddr)
+	if acct == nil {
+		return nil
+	}
+
+	// NOTE: only Ethereum contracts can be self-destructed
+	if !k.IsContract(ctx, addr) {
+		return errors.New("only smart contracts can be self-destructed")
+	}
+
+	// Reject deleting an account that has open staking positions.
+	hasPositions, err := k.hasStakingPositions(ctx, cosmosAddr)
+	if err != nil {
+		return err
+	}
+	if hasPositions {
+		return errorsmod.Wrapf(errors.New("cannot self-destruct an account with staking positions"),
+			"account %s has delegations, redelegations or unbonding delegations", cosmosAddr)
+	}
+
+	// set account to a base account to set the whole balance as spendable
+	baseAccount := k.accountKeeper.GetAccount(ctx, cosmosAddr)
+	k.accountKeeper.SetAccount(ctx, authtypes.NewBaseAccount(cosmosAddr, baseAccount.GetPubKey(), baseAccount.GetAccountNumber(), baseAccount.GetSequence()))
+
+	if err := k.SetBalanceWithLocked(ctx, addr, new(uint256.Int), new(big.Int)); err != nil {
+		return err
+	}
+
+	var keys []common.Hash
+
+	// clear storage
+	k.ForEachStorage(ctx, addr, func(key, _ common.Hash) bool {
+		keys = append(keys, key)
+		return true
+	})
+
+	for _, key := range keys {
+		k.DeleteState(ctx, addr, key)
+	}
+
+	// clear code hash
+	k.DeleteCodeHash(ctx, addr)
+
+	// remove auth account
+	k.accountKeeper.RemoveAccount(ctx, acct)
+
+	k.Logger(ctx).Debug(
+		"account suicided",
+		"ethereum-address", addr.Hex(),
+		"cosmos-address", cosmosAddr.String(),
+	)
+
+	return nil
+}

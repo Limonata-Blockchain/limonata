@@ -1,0 +1,49 @@
+[
+  {
+    "type": "function",
+    "name": "deposit",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "target", "type": "address" },
+      { "name": "amount", "type": "uint256" }
+    ],
+    "outputs": [
+      { "name": "", "type": "bool" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "withdraw",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "target", "type": "address" },
+      { "name": "amount", "type": "uint256" }
+    ],
+    "outputs": [
+      { "name": "", "type": "bool" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "escrowOf",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "target", "type": "address" }
+    ],
+    "outputs": [
+      { "name": "", "type": "uint256" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "contributionOf",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "sponsor", "type": "address" },
+      { "name": "target", "type": "address" }
+    ],
+    "outputs": [
+      { "name": "", "type": "uint256" }
+    ]
+  }
+]

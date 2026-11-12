@@ -1,0 +1,665 @@
+package keeper
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strconv"
+
+	errorsmod "cosmossdk.io/errors"
+
+	sdkmath "cosmossdk.io/math"
+
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
+
+	"github.com/cosmos/evm/x/encmempool/dkg"
+	"github.com/cosmos/evm/x/encmempool/threshold"
+	"github.com/cosmos/evm/x/encmempool/types"
+)
+
+type msgServer struct{ Keeper }
+
+// NewMsgServerImpl returns the x/encmempool MsgServer backed by the keeper.
+func NewMsgServerImpl(k Keeper) types.MsgServer { return &msgServer{Keeper: k} }
+
+var _ types.MsgServer = msgServer{}
+
+// UpdateParams is the governance KILL-SWITCH for x/encmempool. It atomically REPLACES
+// the module params, letting the gov authority toggle DkgEnabled / EncEnabled (and the
+// safety-bounded DKG params) so that activating the dormant encrypted-mempool / validator
+// DKG is REVERSIBLE by a vote — a bad activation can be turned back OFF without another
+// coordinated chain upgrade (the module previously had NO params-mutation path at all, so
+// activation was a one-way door).
+//
+// SAFETY:
+//   - AUTHORITY-GATED: only the x/gov module account may call it (mirrors x/valgrant);
+//     any other signer is rejected with ErrUnauthorized. The runtime gov module address
+//     is compared directly, so no keeper/app.go re-wiring of an authority is required.
+//   - FULLY VALIDATED: the replacement params must pass the SAME Params.Validate (which
+//     calls ValidateDkgWindows) used at genesis — bounding DecryptDelay / thresholds /
+//     DKG windows / ceilings and requiring a well-formed member/keyper set whenever
+//     EncEnabled or DkgEnabled is true. An update that could strand EncTx state or panic
+//     BeginBlock/EndBlock is rejected BEFORE it is written; the current params are left
+//     untouched on any error.
+//   - SAFE DISABLE: flipping EncEnabled=false or DkgEnabled=false stops new DKG rounds /
+//     new encrypted-tx admission; already-in-flight EncTx are drained cleanly by
+//     BeginBlock (decrypted if a key path is still live, else GC'd via releaseEncTx +
+//     maybePruneEpoch), so no in-flight ciphertext is stranded and consensus never halts.
+//     Re-enabling opens a fresh round via the existing EndBlock DKG state machine.
+func (m msgServer) UpdateParams(goCtx context.Context, msg *types.MsgUpdateParams) (*types.MsgUpdateParamsResponse, error) {
+	govAddr := authtypes.NewModuleAddress(govtypes.ModuleName).String()
+	if msg.Authority != govAddr {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "expected gov authority %s, got %s", govAddr, msg.Authority)
+	}
+	// params carries the JSON encoding of types.Params (the module stores params as
+	// JSON-in-store, not proto). Decode then FULLY validate before writing.
+	var p types.Params
+	if err := json.Unmarshal(msg.Params, &p); err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid params json: %v", err)
+	}
+	if err := p.Validate(); err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid params: %v", err)
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	// ONE-WAY RATCHET (audit finding). A gov MsgUpdateParams carries a FULL Params JSON that is
+	// unmarshalled into a ZERO struct, so any params tune whose JSON omits a gate key would silently
+	// REVERT that gate to false (re-opening a hole a prior upgrade closed). Make the safety gates
+	// monotonic: once on, a later params write can never turn them off. Read the currently-stored
+	// value and OR it in. This is safe on replay because it only differs from the raw write when a
+	// gov update omits a key that is already stored true — the ratchet then keeps it true, which is
+	// the intended (and strictly fail-closed) direction. Params always exist by the time any gov
+	// update runs (InitGenesis wrote them), so GetParams here returns the real stored blob, not the
+	// DefaultParams fallback — the ratchet must NOT be moved into SetParams, where InitGenesis's
+	// empty-store GetParams would fall back to DefaultParams(true) and corrupt a legacy genesis replay.
+	//
+	// REPLAY-SAFETY (v0.3.6): read the stored gates through a THROWAWAY infinite gas meter so this read
+	// charges NO tx gas. v0.3.5's UpdateParams performed no params read at all, so a metered read here
+	// would raise gas_used for EVERY historical MsgUpdateParams and diverge the app hash (LastResultsHash)
+	// when a v0.3.6 binary replays those pre-upgrade blocks from genesis. The OR-in is a pure state no-op
+	// pre-upgrade anyway (the gates are false in stored state until their upgrade height), so reading them
+	// gas-free is exactly replay-equivalent to v0.3.5, while still enforcing monotonicity post-upgrade.
+	stored := m.GetParams(ctx.WithGasMeter(storetypes.NewInfiniteGasMeter()))
+	p.DkgRetainActiveDealings = p.DkgRetainActiveDealings || stored.DkgRetainActiveDealings
+	p.DkgStrictConcentration = p.DkgStrictConcentration || stored.DkgStrictConcentration
+	// HIGH-1: the TRANSPARENT in-node DKG rides ABCI++ vote extensions, which are governed by
+	// a SEPARATE consensus param (VoteExtensionsEnableHeight). Enabling DkgTransparent while
+	// vote extensions are not scheduled arms a path whose ProcessProposal would later reject
+	// every proposal carrying the injected commit -> chain HALT. Refuse the activation here so
+	// governance MUST schedule vote extensions (a consensus-params update) first. (The runtime
+	// veActive guard is the belt to this suspenders: it also no-ops the handlers until VE is
+	// actually active, so even a genesis misconfig cannot halt.)
+	if p.DkgEnabled && p.DkgTransparent {
+		cp := ctx.ConsensusParams()
+		if cp.Abci == nil || cp.Abci.VoteExtensionsEnableHeight == 0 {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"dkg_transparent requires CometBFT vote extensions to be scheduled first (consensus param vote_extensions_enable_height must be non-zero)")
+		}
+		if cp.Block != nil && cp.Block.MaxBytes > 0 && !p.DkgInjectedCommitFitsMaxTxBytes(cp.Block.MaxBytes) {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"transparent DKG vote-extension aggregate is estimated at %d bytes but consensus max_tx_bytes is %d; lower dkg_max_members/dkg_share_budget or raise consensus block max bytes",
+				p.DkgInjectedCommitBytesUpperBound(), cp.Block.MaxBytes)
+		}
+	}
+	if err := m.SetParams(goCtx, p); err != nil {
+		return nil, err
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_params_updated",
+		sdk.NewAttribute("enc_enabled", strconv.FormatBool(p.EncEnabled)),
+		sdk.NewAttribute("dkg_enabled", strconv.FormatBool(p.DkgEnabled)),
+	))
+	return &types.MsgUpdateParamsResponse{}, nil
+}
+
+// CommitTx records a hash-commitment at the current block height. It emits no
+// transaction content (only the commitment hash is stored).
+func (m msgServer) CommitTx(goCtx context.Context, msg *types.MsgCommitTx) (*types.MsgCommitTxResponse, error) {
+	if len(msg.CommitHash) != sha256.Size {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "commit_hash must be %d bytes", sha256.Size)
+	}
+	// EXTERNAL-REVIEW #4: ADMISSION CONTROL for the permissionless commit/reveal path (previously
+	// uncapped). Reject at ingress once the global OR per-sender in-flight commit ceiling is reached, so a
+	// spammer cannot grow un-revealed commit state without bound (which would also grow the O(N) BeginBlock
+	// GC scan). O(1) maintained ref-counts, never an O(backlog) scan.
+	if m.GetGlobalCommitCount(goCtx) >= maxInFlightCommits {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "commit mempool full: %d in-flight commits at the ceiling", maxInFlightCommits)
+	}
+	if m.GetSubmitterCommitCount(goCtx, msg.Sender) >= maxCommitsPerSender {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "sender is at its in-flight commit ceiling (%d commits)", maxCommitsPerSender)
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	height := uint64(ctx.BlockHeight())
+	seq := m.nextSeq(goCtx)
+
+	if err := m.SetCommit(goCtx, types.Commit{Sender: msg.Sender, CommitHash: msg.CommitHash, Height: height, Seq: seq}); err != nil {
+		return nil, err
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_commit",
+		sdk.NewAttribute("sender", msg.Sender),
+		sdk.NewAttribute("commit_height", strconv.FormatUint(height, 10)),
+		sdk.NewAttribute("seq", strconv.FormatUint(seq, 10)),
+	))
+	return &types.MsgCommitTxResponse{CommitHeight: height, Seq: seq}, nil
+}
+
+// RevealTx validates a reveal against its commitment and the reveal delay, then
+// QUEUES it for deterministic execution in BeginBlock. It deliberately does not
+// execute the payload or emit its contents here, so reveal ordering is decided by
+// consensus (BeginBlock), not by the proposer's mempool ordering of reveal txs.
+func (m msgServer) RevealTx(goCtx context.Context, msg *types.MsgRevealTx) (*types.MsgRevealTxResponse, error) {
+	ctx := sdk.UnwrapSDKContext(goCtx)
+
+	c, ok := m.GetCommit(goCtx, msg.CommitHeight, msg.Sender, msg.Seq)
+	if !ok {
+		return nil, errorsmod.Wrap(sdkerrors.ErrKeyNotFound, "no matching commit for (sender, commit_height, seq)")
+	}
+	if c.Sender != msg.Sender {
+		return nil, errorsmod.Wrap(sdkerrors.ErrUnauthorized, "sender is not the committer")
+	}
+	// Reveal delay is evaluated at RUNTIME against current params and height.
+	delay := m.GetParams(goCtx).RevealDelay
+	matureHeight := addSat(msg.CommitHeight, delay)
+	if uint64(ctx.BlockHeight()) < matureHeight {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"reveal too early: need height >= %d (commit %d + delay %d)", matureHeight, msg.CommitHeight, delay)
+	}
+	// round-12 #6: cap the reveal payload + salt at ingress. Without this a committer can queue
+	// arbitrarily large PendingReveal blobs that BeginBlock materializes ALL of into one slice - a
+	// needless memory/IO surface (MaxInFlightCommits * multi-MB). The reveal is a single tx, so the
+	// same body cap as a ciphertext is generous; the salt is a short nonce.
+	if len(msg.RevealTx) > maxCiphertextBodyBytes {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "reveal_tx exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.RevealTx))
+	}
+	if len(msg.Salt) > maxRevealSaltBytes {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "salt exceeds the %d-byte cap (got %d)", maxRevealSaltBytes, len(msg.Salt))
+	}
+	// Binding: sha256(reveal_tx || salt) must equal the recorded commitment.
+	h := sha256.Sum256(append(append([]byte{}, msg.RevealTx...), msg.Salt...))
+	if !bytes.Equal(h[:], c.CommitHash) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrUnauthorized, "reveal does not match commitment hash")
+	}
+
+	if err := m.SetPending(goCtx, types.PendingReveal{
+		Sender: msg.Sender, CommitHeight: msg.CommitHeight, Seq: msg.Seq, RevealTx: msg.RevealTx, Salt: msg.Salt,
+	}); err != nil {
+		return nil, err
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_reveal_queued",
+		sdk.NewAttribute("sender", msg.Sender),
+		sdk.NewAttribute("commit_height", strconv.FormatUint(msg.CommitHeight, 10)),
+		sdk.NewAttribute("seq", strconv.FormatUint(msg.Seq, 10)),
+	))
+	return &types.MsgRevealTxResponse{}, nil
+}
+
+// SubmitEncrypted stores a threshold-encrypted tx (ciphertext only), ordered by
+// (decrypt_height, seq). The body is unreadable until BeginBlock combines >= t
+// keyper shares — that ordering-before-readability is the anti-MEV property.
+func (m msgServer) SubmitEncrypted(goCtx context.Context, msg *types.MsgSubmitEncrypted) (*types.MsgSubmitEncryptedResponse, error) {
+	p := m.GetParams(goCtx)
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	if !p.EncEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
+	}
+	// round-10 #4 (fail-closed against silent user-tx loss): while EncExecEnabled is off, a matured
+	// ciphertext is decrypted and CONSUMED but NEVER executed - so a user's encrypted tx would be
+	// silently dropped (and its shares are public enough for off-chain reconstruction). Refuse USER
+	// submissions in that mode. The keeper decrypt path can still run inert during bring-up via direct
+	// SubmitEncTx (tests); only this permissionless message path is gated.
+	if !p.EncExecEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
+			"encrypted submissions are disabled while enc_exec_enabled is false: a matured ciphertext would be decrypted and consumed WITHOUT executing your transaction")
+	}
+	if len(msg.A) == 0 || len(msg.Body) == 0 {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing ciphertext (a/body)")
+	}
+	// A is the ciphertext's ephemeral EC point; it MUST be a valid compressed secp256k1 point, or no keyper
+	// can ever produce a decryption share for it (ProveShareFor / threshold.ProveShareFor parses A), so the
+	// ciphertext would gather zero shares and STRAND at grace. AUDIT FIX: without this, a permissionless
+	// flooder could submit invalid-A ciphertexts that deterministically strand and — via the decrypt-health
+	// streak (MED-2) — FARM forced rekeys (round churn). Reject a malformed A at ingress so it never enters
+	// state. (The decrypt-share path already validates its own A at msg_server.go via ValidCompressedPoint.)
+	if !dkg.ValidCompressedPoint(msg.A) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext ephemeral point A is not a valid compressed secp256k1 point")
+	}
+	// Reject malformed ciphertexts at ingress. The nonce is attacker-controlled and,
+	// if it reached the BeginBlock decrypt path with a wrong length, AES-GCM would
+	// PANIC (halting consensus). Enforce the exact GCM nonce length here so bad
+	// ciphertexts never enter state; the decrypt path is defended independently too.
+	if len(msg.Nonce) != threshold.NonceSize {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "nonce must be %d bytes, got %d", threshold.NonceSize, len(msg.Nonce))
+	}
+	// EXTERNAL-REVIEW #2: cap the ciphertext BODY size at ingress. The plaintext is one anti-MEV tx, so a
+	// GCM-sealed body far above a generous tx size is padding; without this, tx-size/gas is the only brake
+	// on per-ciphertext state + later AES-GCM decrypt work, and MaxInFlightEncTx ciphertexts each at the
+	// (multi-MB) tx limit is a real transient-state / decrypt-cost lever. maxCiphertextBodyBytes bounds it.
+	if len(msg.Body) > maxCiphertextBodyBytes {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "ciphertext body exceeds the %d-byte cap (got %d)", maxCiphertextBodyBytes, len(msg.Body))
+	}
+	// Re-audit: the transparent DKG decrypt-share path depends on proposer-injected vote extensions.
+	// If vote extensions are not active, or current consensus MaxBytes cannot fit the required injected
+	// commit, the app deliberately does not require injection (to avoid proposal halt), but then no DKG
+	// shares are consumed. Refuse new user ciphertexts in that state instead of accepting transactions
+	// that will strand/drop.
+	if st, unavailable := transparentDkgRuntimeUnavailable(ctx, p); unavailable {
+		switch st.reason {
+		case transparentDkgRuntimeVoteExtensionsInactive:
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"transparent DKG vote extensions are not active at height %d (vote_extensions_enable_height=%d); encrypted submissions are unavailable until vote extensions are active",
+				st.currentHeight, st.voteExtensionsEnableHeight)
+		case transparentDkgRuntimeInjectionOversize:
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+				"transparent DKG vote-extension aggregate is estimated at %d bytes but current consensus max_tx_bytes is %d; encrypted submissions are unavailable until dkg_max_members/dkg_share_budget or block max bytes is adjusted",
+				st.estimatedBytes, st.maxTxBytes)
+		}
+	}
+	// ADMISSION CONTROL: reject at INGRESS once the in-flight EncTx ceilings are reached, so a
+	// flooder cannot grow EncTx state (nor the per-block decrypt scan) without bound, nor starve
+	// honest ciphertexts. The checks read O(1) maintained counters (never an O(backlog) scan).
+	// A ceiling of 0 is disabled; the keeper's always-on absolute constant ceiling + the
+	// BeginBlock last-resort drop remain the unconditional 'bounded state' backstop.
+	if p.MaxInFlightEncTx > 0 && m.GetGlobalEncCount(goCtx) >= p.MaxInFlightEncTx {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "encrypted mempool full: %d in-flight ciphertexts at the global ceiling", p.MaxInFlightEncTx)
+	}
+	if p.MaxInFlightPerSubmitter > 0 && m.GetSubmitterEncCount(goCtx, msg.Submitter) >= p.MaxInFlightPerSubmitter {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "submitter is at its in-flight ceiling (%d ciphertexts)", p.MaxInFlightPerSubmitter)
+	}
+	// PER-SUBMITTER per-block admission RATE limit (Fix 1 C3'): the missing rate dimension on top of
+	// the standing per-submitter inventory cap. Being per-submitter (NOT a global slot) means no single
+	// address can monopolize ingress or let a proposer censor the encrypted mempool by ordering its own
+	// ciphertexts first. It bounds maturing-ciphertext inflow so the per-block DLEQ-verify work stays
+	// near marginal decryption progress (closing HIGH-U's "sustainable because there is no admission
+	// rate limit" clause).
+	if m.bumpEncSubmitsThisBlock(goCtx, msg.Submitter, uint64(ctx.BlockHeight())) > maxEncSubmitsPerBlockPerSubmitter {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"submitter exceeded the per-block admission rate (%d ciphertexts this block)", maxEncSubmitsPerBlockPerSubmitter)
+	}
+	if m.bumpGlobalEncSubmitsThisBlock(goCtx, uint64(ctx.BlockHeight())) > maxEncSubmitsPerBlockGlobal {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"encrypted mempool exceeded the global per-block admission rate (%d ciphertexts this block)", maxEncSubmitsPerBlockGlobal)
+	}
+	// Stamp the ciphertext with the DKG epoch whose active key it was encrypted to,
+	// so decryptMatured decrypts it under the SAME key/members even after a re-key.
+	// Epoch 0 = the legacy trusted-setup path (params.ThresholdPub).
+	epoch := uint64(0)
+	if p.DkgEnabled {
+		epoch = m.GetActiveEpoch(goCtx)
+		if epoch == 0 {
+			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "DKG enabled but no active threshold key yet")
+		}
+	}
+	// round-9 #4 (fail-closed whale guard): if a single operator in the active committee owns >= the
+	// reconstruction threshold of eval-points, it can decrypt this ciphertext ALONE - the encrypted
+	// mempool offers NO confidentiality in that stake topology. Refuse the submission rather than lull
+	// the user into sending a "private" tx a whale reads. This does not (and cannot) create
+	// confidentiality; decentralization does. Deterministic (committed round + key).
+	if epoch > 0 && m.Keeper.CommitteeConcentrationBreached(goCtx, epoch, p.DkgStrictConcentration) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
+			"encrypted mempool unavailable: validator stake is too concentrated for confidentiality (a <=2/3-stake coalition holds enough decryption power) - send a normal transaction, or wait for the committee to decentralize")
+	}
+	// DKG-GC-ACTIVE (belt, fail-closed): on the transparent path NO node persists a Shamir share -
+	// every member re-derives it from the epoch's committed dealings each block - so a ciphertext
+	// stamped to an epoch whose dealings are gone can NEVER be decrypted by anyone. Refuse rather
+	// than take the bond and hand back an accepted tx that is guaranteed to strand. The purge-side
+	// fix makes this unreachable going forward; this covers an active epoch already purged by an
+	// earlier binary, and fails closed until the next rekey installs a healthy key. No-op on the
+	// legacy path, where keypers hold their shares out-of-band.
+	if !m.Keeper.ActiveEpochCanDeriveShares(goCtx, p) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest,
+			"encrypted mempool unavailable: the active DKG epoch has no committed dealings, so no validator could derive a decryption share - send a normal transaction, or wait for the next rekey")
+	}
+	// CRITICAL A-BINDING (same-A replay): require a Schnorr proof of knowledge of r (A = r*G)
+	// bound to THIS submitter + ciphertext. A decryption share is x_i*A and the AES key is
+	// KDF(x*A), so any two ciphertexts sharing A share the decryption secret; the maturity gate
+	// alone does not prevent an attacker from getting a dummy ciphertext carrying a victim's A to
+	// mature earlier (a mempool race / a proposer that delays the victim) and leaking x*A before
+	// the victim's reveal. The PoK makes A non-replayable: the attacker cannot forge it for
+	// A_victim (Schnorr soundness) nor replay the victim's PoK (the challenge binds the submitter),
+	// so no second ciphertext can ever carry another party's A.
+	//
+	// round-11 #3 (DoS): this EC-heavy verification runs LAST among the rejection checks - after the
+	// O(1) admission / per-block-rate / active-key / concentration gates above - so a doomed
+	// valid-shaped spam tx is rejected cheaply and never forces the Schnorr verify in CheckTx.
+	pok, err := dkg.ParseEncKeyPoK(msg.Pok)
+	if err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "invalid ciphertext key proof: %s", err.Error())
+	}
+	if !dkg.VerifyEncKeyPoK(ctx.ChainID(), msg.A, msg.Submitter, msg.Nonce, msg.Body, pok) {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "ciphertext key proof does not bind A to the submitter (same-A replay is rejected)")
+	}
+	// round-9 #1: ESCROW the refundable anti-sybil bond. Done LAST, after every rejection check
+	// (PoK, admission, concentration) has passed, so a rejected submit never escrows; and BEFORE
+	// SubmitEncTx (which cannot fail), so the escrow and the stored ciphertext are all-or-nothing.
+	// A submitter that cannot fund the bond is rejected here with no state change. releaseEncTx
+	// refunds it in full when the ciphertext leaves state.
+	bond, bondDenom := p.EncSubmitBond, p.EncSubmitBondDenom
+	if bond > 0 {
+		if m.bankKeeper == nil {
+			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted submit bond is configured but the bank keeper is unavailable")
+		}
+		addr, aerr := sdk.AccAddressFromBech32(msg.Submitter)
+		if aerr != nil {
+			return nil, errorsmod.Wrap(sdkerrors.ErrInvalidAddress, "submitter must be a valid bech32 address to post the submit bond")
+		}
+		coins := sdk.NewCoins(sdk.NewCoin(bondDenom, sdkmath.NewIntFromUint64(bond)))
+		if err := m.bankKeeper.SendCoinsFromAccountToModule(goCtx, addr, types.ModuleName, coins); err != nil {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInsufficientFunds, "cannot escrow the %s submit bond: %s", coins, err.Error())
+		}
+	}
+	e := m.SubmitEncTx(goCtx, msg.Submitter, uint64(ctx.BlockHeight()), p.DecryptDelay, msg.A, msg.Nonce, msg.Body, epoch)
+	if bond > 0 {
+		// round-10 #1: stamp the burn portion (a real, non-refundable per-submit cost) so release
+		// burns exactly this and refunds the rest, immune to a later param change. Computed via big.Int
+		// so a large (18-decimal) bond * bps cannot overflow uint64.
+		burn := sdkmath.NewIntFromUint64(bond).MulRaw(int64(p.EncSubmitBondBurnBps)).QuoRaw(10000).Uint64() //#nosec G115 -- burnBps <= 10000 (validated)
+		m.stampBond(goCtx, e, bond, bondDenom, burn)
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_encrypted_submitted",
+		sdk.NewAttribute("submitter", msg.Submitter),
+		sdk.NewAttribute("decrypt_height", strconv.FormatUint(e.DecryptHeight, 10)),
+		sdk.NewAttribute("seq", strconv.FormatUint(e.Seq, 10)),
+		// epoch tells a keyper daemon WHICH DKG-derived share to use for this
+		// ciphertext (0 = legacy trusted share). It matters across a re-key.
+		sdk.NewAttribute("epoch", strconv.FormatUint(e.Epoch, 10)),
+		// a_hex is the ciphertext's ephemeral public key r*G. It is PUBLIC (not the
+		// body) and is what each keyper needs to compute its decryption share. Emitting
+		// it lets keyper daemons act on block events without a custom query endpoint.
+		sdk.NewAttribute("a_hex", hex.EncodeToString(msg.A)),
+	))
+	return &types.MsgSubmitEncryptedResponse{DecryptHeight: e.DecryptHeight, Seq: e.Seq}, nil
+}
+
+// SubmitDecryptionShare records an authorized keyper's partial decryption. On the
+// DKG path the signer must be a QUAL member of the epoch that the referenced EncTx
+// was encrypted to, and its index must match its member index; on the legacy path
+// it must be a configured keyper. The DLEQ proof (if present) is stored so the
+// decrypt path can route through dkg.RecoverVerified.
+func (m msgServer) SubmitDecryptionShare(goCtx context.Context, msg *types.MsgSubmitDecryptionShare) (*types.MsgSubmitDecryptionShareResponse, error) {
+	p := m.GetParams(goCtx)
+	if !p.EncEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "encrypted mempool is not enabled")
+	}
+	// EXTERNAL-REVIEW #7: replaced by the transparent vote-extension decryption-share path — reject under
+	// DkgTransparent so the tx path (member-index based) cannot write into a weighted round.
+	if p.DkgTransparent {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "transparent DKG is active: the vote-extension share path replaces MsgSubmitDecryptionShare")
+	}
+	if len(msg.D) == 0 {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "missing decryption share (d)")
+	}
+	// CRITICAL MATURITY GATE (anti-MEV confidentiality): reject a share for a ciphertext that has
+	// not matured. A stored share is public state and t of them reconstruct x*A = the AES key, so
+	// admitting an early share on this legacy tx path would let any observer decrypt the body before
+	// its decrypt_height. Mirrors the transparent consume-path gate; keyed on the msg's own height so
+	// it holds regardless of whether the referenced ciphertext still exists in state.
+	if msg.DecryptHeight > uint64(sdk.UnwrapSDKContext(goCtx).BlockHeight()) {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"decryption share submitted before maturity (decrypt_height %d > current height %d)",
+			msg.DecryptHeight, sdk.UnwrapSDKContext(goCtx).BlockHeight())
+	}
+	if p.DkgEnabled {
+		// Authorize against the active round for the EncTx's epoch. The EncTx tells us
+		// which epoch (=> which Qual member set) this share belongs to.
+		e, ok := m.GetEncTx(goCtx, msg.DecryptHeight, msg.Seq)
+		if !ok {
+			return nil, errorsmod.Wrap(sdkerrors.ErrKeyNotFound, "no matching encrypted tx for (decrypt_height, seq)")
+		}
+		round, ok := m.GetDkgRound(goCtx, e.Epoch)
+		if !ok {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrKeyNotFound, "no DKG round for epoch %d", e.Epoch)
+		}
+		// Authorize by ROUND MEMBERSHIP, not QUAL. In joint-Feldman every member holds
+		// a valid Shamir share X_m = Σ_{i∈QUAL} f_i(m) regardless of whether m itself
+		// qualified as a DEALER (QUAL is the set of dealers, not of share-holders). A
+		// member that cheated as a dealer — or merely failed to deal — still holds a
+		// valid share; the DLEQ proof + dkg.RecoverVerified drop any INVALID partial on
+		// the decrypt path, so admitting all members maximizes availability without
+		// weakening correctness.
+		idx := memberIndexByAccount(round, msg.Keyper)
+		if idx == 0 {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "%s is not a member of epoch %d", msg.Keyper, e.Epoch)
+		}
+		if msg.Index != idx {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "member index mismatch: expected %d, got %d", idx, msg.Index)
+		}
+	} else {
+		idx := keyperIndex(p.Keypers, msg.Keyper)
+		if idx == 0 {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "%s is not an authorized keyper", msg.Keyper)
+		}
+		if msg.Index != idx {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "keyper index mismatch: expected %d, got %d", idx, msg.Index)
+		}
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	// WRITE-ONCE (audit finding 8): the legacy tx share path performs no ingress DLEQ
+	// check, and SetEncShare overwrites the eval-point slot. Without this, an authorized
+	// keyper could submit a valid share, then OVERWRITE it with garbage before maturity to
+	// retract its contribution and push the ciphertext below threshold (a strand/halt lever).
+	// First-wins, mirroring the transparent VE ingest path's dedup: once a slot is filled,
+	// reject the resubmit. RecoverVerified still drops an invalid FIRST share on the decrypt
+	// path, so this closes only the retraction lever, never a correctness path.
+	if m.hasEncShareAt(goCtx, msg.DecryptHeight, msg.Seq, msg.Index) {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest,
+			"a decryption share is already recorded for (decrypt_height=%d, seq=%d, index=%d); shares are write-once",
+			msg.DecryptHeight, msg.Seq, msg.Index)
+	}
+	if err := m.SetEncShare(goCtx, types.EncShare{
+		Keyper: msg.Keyper, DecryptHeight: msg.DecryptHeight, Seq: msg.Seq, Index: msg.Index, D: msg.D, Proof: msg.Proof,
+	}); err != nil {
+		return nil, err
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_share_submitted",
+		sdk.NewAttribute("keyper", msg.Keyper),
+		sdk.NewAttribute("decrypt_height", strconv.FormatUint(msg.DecryptHeight, 10)),
+		sdk.NewAttribute("seq", strconv.FormatUint(msg.Seq, 10)),
+	))
+	return &types.MsgSubmitDecryptionShareResponse{}, nil
+}
+
+// keyperIndex returns the 1-based position of addr in keypers, or 0 if absent.
+func keyperIndex(keypers []string, addr string) uint64 {
+	for i, k := range keypers {
+		if k == addr {
+			return uint64(i + 1)
+		}
+	}
+	return 0
+}
+
+// memberIndexByAccount returns a round member's index by its account (signer)
+// address, or 0 if the address is not a member of the round.
+func memberIndexByAccount(round types.DkgRound, addr string) uint64 {
+	for _, m := range round.Members {
+		if m.AccountAddr == addr {
+			return m.Index
+		}
+	}
+	return 0
+}
+
+func memberByIndex(round types.DkgRound, idx uint64) (types.RoundMember, bool) {
+	for _, m := range round.Members {
+		if m.Index == idx {
+			return m, true
+		}
+	}
+	return types.RoundMember{}, false
+}
+
+// DkgDeal records a member/dealer's on-chain DKG dealing for the open epoch: its
+// public Feldman commitments plus one share encrypted to each member. Validated for
+// well-formedness (exactly t commitments, one share per member) so a qualified
+// dealer always lets every member derive its share.
+func (m msgServer) DkgDeal(goCtx context.Context, msg *types.MsgDkgDeal) (*types.MsgDkgDealResponse, error) {
+	p := m.GetParams(goCtx)
+	if !p.DkgEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "DKG is not enabled")
+	}
+	// EXTERNAL-REVIEW #7: the TRANSPARENT path (vote extensions) fully replaces this signed-tx deal path and
+	// uses weighted eval points, not the raw member indices this handler writes. Reject it under
+	// DkgTransparent so a stale/incompatible tx can never write semantically-wrong state into a weighted round.
+	if p.DkgTransparent {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "transparent DKG is active: the vote-extension deal path replaces MsgDkgDeal")
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	round, ok := m.GetDkgRound(goCtx, msg.Epoch)
+	if !ok || round.Status != types.DkgStatusOpen {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "no open DKG round for epoch %d", msg.Epoch)
+	}
+	if uint64(ctx.BlockHeight()) > round.DealDeadline {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "deal window closed for epoch %d (deadline %d)", msg.Epoch, round.DealDeadline)
+	}
+	idx := memberIndexByAccount(round, msg.Dealer)
+	if idx == 0 {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "%s is not a member of epoch %d", msg.Dealer, msg.Epoch)
+	}
+	if len(msg.Commitments) != int(round.Threshold) {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "expected %d commitments, got %d", round.Threshold, len(msg.Commitments))
+	}
+	// HIGH-1: every Feldman commitment must be a well-formed COMPRESSED secp256k1 point
+	// (parse + on-curve). A malformed commitment that only passed the count check would
+	// be silently dropped by FinalizePublic (excluding the dealer), but rejecting the
+	// whole dealing here keeps stored state well-formed and prevents a member from
+	// wasting its one deal slot on garbage.
+	if _, err := dkg.ParseCommitmentPoints(msg.Commitments); err != nil {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "malformed commitment (not a compressed secp256k1 point): %v", err)
+	}
+	// Require exactly one enc-share per member, covering every member index once, so
+	// each member can derive its final share from a qualified dealer.
+	n := len(round.Members)
+	if len(msg.EncShares) != n {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "expected %d enc_shares, got %d", n, len(msg.EncShares))
+	}
+	seen := make(map[uint64]bool, n)
+	stored := make([]types.DkgStoredEncShare, 0, n)
+	for _, s := range msg.EncShares {
+		if _, ismember := memberByIndex(round, s.MemberIndex); !ismember {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "enc_share for non-member index %d", s.MemberIndex)
+		}
+		if seen[s.MemberIndex] {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "duplicate enc_share for member %d", s.MemberIndex)
+		}
+		// HIGH-1 (root-cause fix): validate EVERY enc-share field so a structurally
+		// unopenable share can NEVER enter QUAL. `A` must be a valid compressed secp256k1
+		// point — the decrypt path (ComputeShare) and the complaint path
+		// (VerifyDecryptShare) both parse it, so a bad A made the dealer both underivable
+		// AND uncomplainable while it stayed in QUAL, corrupting every honest member's
+		// aggregate share (the reported keyless-liveness DoS). The nonce must be the exact
+		// AES-GCM length (else Decrypt cannot open the sealed share), and the body must be
+		// present. Any malformed field REJECTS the whole dealing at ingress.
+		if !dkg.ValidCompressedPoint(s.A) {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "enc_share for member %d has a malformed A (not a compressed secp256k1 point)", s.MemberIndex)
+		}
+		if len(s.Nonce) != threshold.NonceSize {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "enc_share for member %d has a %d-byte nonce, want %d", s.MemberIndex, len(s.Nonce), threshold.NonceSize)
+		}
+		if len(s.Body) == 0 {
+			return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "empty enc_share body for member %d", s.MemberIndex)
+		}
+		seen[s.MemberIndex] = true
+		stored = append(stored, types.DkgStoredEncShare{MemberIndex: s.MemberIndex, A: s.A, Nonce: s.Nonce, Body: s.Body})
+	}
+
+	// FIRST-WINS (round-8 #6): a dealer may deal ONCE per round. Without this, a legacy signed
+	// DkgDeal could OVERWRITE its already-stored dealing (the transparent VE-ingest path is already
+	// first-wins), letting a member swap a good dealing for a bad one before finalize - a
+	// validator-abuse strand lever. Mirror the transparent guard: reject a second deal.
+	if _, exists := m.GetDealing(goCtx, msg.Epoch, idx); exists {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "dealer %s already dealt for epoch %d (deals are first-wins)", msg.Dealer, msg.Epoch)
+	}
+	dealing := types.Dealing{Epoch: msg.Epoch, DealerIndex: idx, Dealer: msg.Dealer, Commitments: msg.Commitments, EncShares: stored}
+	if err := m.SetDealing(goCtx, dealing); err != nil {
+		return nil, err
+	}
+	// Emit the dealing so a member's node can pick out the enc-share addressed to it
+	// (and later sum QUAL dealers' shares) purely off block events.
+	dealJSON, _ := json.Marshal(dealing)
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_dkg_deal",
+		sdk.NewAttribute("epoch", strconv.FormatUint(msg.Epoch, 10)),
+		sdk.NewAttribute("dealer_index", strconv.FormatUint(idx, 10)),
+		sdk.NewAttribute("deal_json", string(dealJSON)),
+	))
+	return &types.MsgDkgDealResponse{}, nil
+}
+
+// DkgComplaint verifies a framing-resistant complaint (the accuser proves, via a
+// DLEQ over its own encryption key, that the dealer sealed it a share inconsistent
+// with the dealer's public commitments) and, if justified, records it so finalize
+// disqualifies the dealer.
+func (m msgServer) DkgComplaint(goCtx context.Context, msg *types.MsgDkgComplaint) (*types.MsgDkgComplaintResponse, error) {
+	p := m.GetParams(goCtx)
+	if !p.DkgEnabled {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "DKG is not enabled")
+	}
+	// EXTERNAL-REVIEW #7: replaced by the transparent vote-extension complaint path — reject under DkgTransparent.
+	if p.DkgTransparent {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "transparent DKG is active: the vote-extension complaint path replaces MsgDkgComplaint")
+	}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	round, ok := m.GetDkgRound(goCtx, msg.Epoch)
+	if !ok || round.Status != types.DkgStatusOpen {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "no open DKG round for epoch %d", msg.Epoch)
+	}
+	if uint64(ctx.BlockHeight()) > round.ComplaintDeadline {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrInvalidRequest, "complaint window closed for epoch %d", msg.Epoch)
+	}
+	accuserIdx := memberIndexByAccount(round, msg.Accuser)
+	if accuserIdx == 0 {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrUnauthorized, "%s is not a member of epoch %d", msg.Accuser, msg.Epoch)
+	}
+	accuser, _ := memberByIndex(round, accuserIdx)
+
+	dealing, ok := m.GetDealing(goCtx, msg.Epoch, msg.Against)
+	if !ok {
+		return nil, errorsmod.Wrapf(sdkerrors.ErrKeyNotFound, "no dealing from member %d in epoch %d", msg.Against, msg.Epoch)
+	}
+	// Locate the enc-share the dealer addressed to the accuser.
+	var enc *types.DkgStoredEncShare
+	for i := range dealing.EncShares {
+		if dealing.EncShares[i].MemberIndex == accuserIdx {
+			enc = &dealing.EncShares[i]
+			break
+		}
+	}
+	if enc == nil {
+		// The dealer never dealt to the accuser — that alone is a disqualifying fault.
+		return m.recordComplaint(ctx, goCtx, msg.Epoch, msg.Against, accuserIdx)
+	}
+
+	cheated, proofValid := dkg.VerifyJustifiedComplaint(
+		accuserIdx, accuser.EncPubKey, dealing.Commitments,
+		enc.A, enc.Nonce, enc.Body, msg.SharedPoint, msg.DleqProof,
+	)
+	if !proofValid {
+		return nil, errorsmod.Wrap(sdkerrors.ErrUnauthorized, "invalid complaint proof (cannot frame a dealer)")
+	}
+	if !cheated {
+		return nil, errorsmod.Wrap(sdkerrors.ErrInvalidRequest, "dealer's share is valid; frivolous complaint")
+	}
+	return m.recordComplaint(ctx, goCtx, msg.Epoch, msg.Against, accuserIdx)
+}
+
+func (m msgServer) recordComplaint(ctx sdk.Context, goCtx context.Context, epoch, against, accuserIdx uint64) (*types.MsgDkgComplaintResponse, error) {
+	if err := m.SetComplaint(goCtx, types.DkgComplaintRec{Epoch: epoch, Against: against, AccuserIndex: accuserIdx}); err != nil {
+		return nil, err
+	}
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		"encmempool_dkg_complaint",
+		sdk.NewAttribute("epoch", strconv.FormatUint(epoch, 10)),
+		sdk.NewAttribute("against", strconv.FormatUint(against, 10)),
+		sdk.NewAttribute("accuser_index", strconv.FormatUint(accuserIdx, 10)),
+	))
+	return &types.MsgDkgComplaintResponse{}, nil
+}

@@ -1,0 +1,7 @@
+The files in this directory (the Limonata transparent Validator-DKG package) are
+NOT licensed under Apache-2.0. They are source-available under the Business Source
+License 1.1 - see /LICENSE.dkg at the repository root for the full terms and
+parameters.
+
+This is a separately-licensed part of the repository. The rest of the repository
+remains under the Apache License, Version 2.0 (see /LICENSE and /NOTICE).

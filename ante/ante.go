@@ -1,0 +1,125 @@
+package ante
+
+import (
+	anteinterfaces "github.com/cosmos/evm/ante/interfaces"
+	antetypes "github.com/cosmos/evm/ante/types"
+	pmante "github.com/cosmos/evm/x/paymaster/ante"
+	"github.com/cosmos/evm/x/vm/types"
+	"github.com/cosmos/gogoproto/proto"
+	ibckeeper "github.com/cosmos/ibc-go/v11/modules/core/keeper"
+
+	errorsmod "cosmossdk.io/errors"
+
+	"github.com/cosmos/cosmos-sdk/codec"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
+	"github.com/cosmos/cosmos-sdk/types/tx/signing"
+	"github.com/cosmos/cosmos-sdk/x/auth/ante"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	txsigning "github.com/cosmos/cosmos-sdk/x/tx/signing"
+)
+
+// HandlerOptions defines the list of module keepers required to run the Cosmos EVM
+// AnteHandler decorators.
+type HandlerOptions struct {
+	Cdc                    codec.BinaryCodec
+	AccountKeeper          anteinterfaces.AccountKeeper
+	BankKeeper             anteinterfaces.BankKeeper
+	IBCKeeper              *ibckeeper.Keeper
+	FeeMarketKeeper        anteinterfaces.FeeMarketKeeper
+	EvmKeeper              anteinterfaces.EVMKeeper
+	FeegrantKeeper         ante.FeegrantKeeper
+	PaymasterKeeper        pmante.PaymasterResolver
+	PasskeyEnabled         func(sdk.Context) bool          // EXPERIMENTAL passkey ante gate (nil = off)
+	// PasskeyRPConfig returns the WebAuthn RP binding config from x/contest params:
+	// the relying-party id and the clientData.origin allowlist (nil = both unset).
+	PasskeyRPConfig func(sdk.Context) (rpID string, allowedOrigins []string)
+	GasSponsorKeeper       anteinterfaces.SponsorKeeper    // EVM gas sponsorship resolver (nil = off)
+	NetCapKeeper           anteinterfaces.NetCapChecker    // net-seller cap on native EVM transfers (nil = off)
+	ExtensionOptionChecker ante.ExtensionOptionChecker
+	SignModeHandler        *txsigning.HandlerMap
+	SigGasConsumer         func(meter storetypes.GasMeter, sig signing.SignatureV2, params authtypes.Params) error
+	MaxTxGasWanted         uint64
+	// use dynamic fee checker or the cosmos-sdk default one for native transactions
+	DynamicFeeChecker bool
+	PendingTxListener PendingTxListener
+}
+
+// Validate checks if the keepers are defined
+func (options HandlerOptions) Validate() error {
+	if options.Cdc == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "codec is required for AnteHandler")
+	}
+	if options.AccountKeeper == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "account keeper is required for AnteHandler")
+	}
+	if options.BankKeeper == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "bank keeper is required for AnteHandler")
+	}
+	if options.IBCKeeper == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "ibc keeper is required for AnteHandler")
+	}
+	if options.FeeMarketKeeper == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "fee market keeper is required for AnteHandler")
+	}
+	if options.EvmKeeper == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "evm keeper is required for AnteHandler")
+	}
+	if options.SigGasConsumer == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "signature gas consumer is required for AnteHandler")
+	}
+	if options.SignModeHandler == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "sign mode handler is required for AnteHandler")
+	}
+	if options.PendingTxListener == nil {
+		return errorsmod.Wrap(errortypes.ErrLogic, "pending tx listener is required for AnteHandler")
+	}
+	return nil
+}
+
+// NewAnteHandler returns an ante handler responsible for attempting to route an
+// Ethereum or SDK transaction to an internal ante handler for performing
+// transaction-level processing (e.g. fee payment, signature verification) before
+// being passed onto it's respective handler.
+func NewAnteHandler(options HandlerOptions) sdk.AnteHandler {
+	extensionOptionsEthereumTx := "/" + proto.MessageName(&types.ExtensionOptionsEthereumTx{})
+	extensionOptionsDynamicFeeTx := "/" + proto.MessageName(&antetypes.ExtensionOptionDynamicFeeTx{})
+	return func(
+		ctx sdk.Context, tx sdk.Tx, sim bool,
+	) (newCtx sdk.Context, err error) {
+		var anteHandler sdk.AnteHandler
+
+		txWithExtensions, ok := tx.(ante.HasExtensionOptionsTx)
+		if ok {
+			opts := txWithExtensions.GetExtensionOptions()
+			if len(opts) > 0 {
+				switch typeURL := opts[0].GetTypeUrl(); typeURL {
+				case extensionOptionsEthereumTx:
+					// handle as *evmtypes.MsgEthereumTx
+					anteHandler = newMonoEVMAnteHandler(ctx, options)
+				case extensionOptionsDynamicFeeTx:
+					// cosmos-sdk tx with dynamic fee extension
+					anteHandler = newCosmosAnteHandler(ctx, options)
+				default:
+					return ctx, errorsmod.Wrapf(
+						errortypes.ErrUnknownExtensionOptions,
+						"rejecting tx with unsupported extension option: %s", typeURL,
+					)
+				}
+
+				return anteHandler(ctx, tx, sim)
+			}
+		}
+
+		// handle as totally normal Cosmos SDK tx
+		switch tx.(type) {
+		case sdk.Tx:
+			anteHandler = newCosmosAnteHandler(ctx, options)
+		default:
+			return ctx, errorsmod.Wrapf(errortypes.ErrUnknownRequest, "invalid transaction type: %T", tx)
+		}
+
+		return anteHandler(ctx, tx, sim)
+	}
+}

@@ -1,0 +1,172 @@
+syntax = "proto3";
+package cosmos.evm.valgrant.v1;
+
+import "amino/amino.proto";
+import "cosmos/msg/v1/msg.proto";
+import "cosmos_proto/cosmos.proto";
+import "gogoproto/gogo.proto";
+
+option go_package = "github.com/cosmos/evm/x/valgrant/types";
+
+// Msg defines the x/valgrant Msg service: admin-gated issuance of locked
+// validator grants (PermanentLockedAccount + liquid gas allowance funded from
+// the valgrant reserve pool) and admin-gated clawback that force-undelegates
+// and sweeps the locked principal back to the pool.
+service Msg {
+  option (cosmos.msg.v1.service) = true;
+
+  // IssueLocked creates a PermanentLockedAccount for a validator candidate
+  // (admin-gated). Funds it with locked principal + a small liquid gas
+  // allowance, both sent from the valgrant module reserve pool.
+  rpc IssueLocked(MsgIssueLocked) returns (MsgIssueLockedResponse);
+
+  // Clawback force-undelegates the grantee's delegations and sweeps the locked
+  // principal back into the valgrant pool (admin-gated), leaving earned rewards
+  // and the gas allowance with the grantee, then marks the grant revoked.
+  rpc Clawback(MsgClawback) returns (MsgClawbackResponse);
+
+  // ClawbackGrant is the GOVERNANCE-gated clawback: only the x/gov module
+  // account (the authority) may call it. A passed proposal revokes a grant when
+  // the recipient is later found to be a sybil / faucet-farmer / node-abandoner.
+  // It force-undelegates ONLY the foundation-granted locked principal (never the
+  // validator's own self-bond), returns it to the foundation reserve pool,
+  // cancels any unvested rewards owed to the grant, forfeits any on-chain
+  // exogenous deposit, and marks the grant revoked. This closes the anti-sybil
+  // admission loop (imperfect admission + reliable clawback = safe).
+  rpc ClawbackGrant(MsgClawbackGrant) returns (MsgClawbackGrantResponse);
+
+  // BurnPool permanently DESTROYS LIMO from the valgrant reserve pool
+  // (admin-gated): the coins are removed from the module account AND from total
+  // supply, proving reclaimed bootstrap capital never comes back to anyone.
+  rpc BurnPool(MsgBurnPool) returns (MsgBurnPoolResponse);
+
+  // UpdateParams sets the x/valgrant params (the admin address). Gov-gated:
+  // only the x/gov module account (the authority) may call it — this is how
+  // governance rotates or revokes (admin="") the founder admin key, completing
+  // the on-chain governance handoff.
+  rpc UpdateParams(MsgUpdateParams) returns (MsgUpdateParamsResponse);
+}
+
+// MsgIssueLocked issues a locked grant to a fresh grantee account (admin-gated).
+message MsgIssueLocked {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/valgrant/MsgIssueLocked";
+
+  // admin is the bech32 address authorized to issue grants (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // grantee is the bech32 cosmos address receiving the locked account.
+  string grantee = 2 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // locked_amount is the principal in aLIMO (PermanentLockedAccount).
+  string locked_amount = 3;
+  // gas_allowance is the liquid gas allowance in aLIMO.
+  string gas_allowance = 4;
+  // validator_operator is the validator operator address (optional).
+  string validator_operator = 5;
+}
+
+message MsgIssueLockedResponse {}
+
+// MsgClawback claws back a grant from the grantee (admin-gated).
+message MsgClawback {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/valgrant/MsgClawback";
+
+  // admin is the bech32 address authorized to clawback (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // grantee is the bech32 cosmos address whose grant to clawback.
+  string grantee = 2 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+}
+
+message MsgClawbackResponse {
+  // undelegate_amount is the total amount undelegated before the clawback sweep.
+  string undelegate_amount = 1;
+  // swept_amount is the locked principal swept back to the pool immediately.
+  string swept_amount = 2;
+  // pending_amount is principal still unbonding; swept later via EndBlock.
+  string pending_amount = 3;
+}
+
+// MsgClawbackGrant revokes a grant by GOVERNANCE (gov-authority-gated). Only the
+// x/gov module account may sign it (as the msg's authority), so it can only be
+// executed by a passed governance proposal. Safety boundary: it can reclaim ONLY
+// the foundation-granted locked principal (grant.locked_amount) — never the
+// validator's own self-bond.
+message MsgClawbackGrant {
+  option (cosmos.msg.v1.signer) = "authority";
+  option (amino.name) = "cosmos/evm/valgrant/MsgClawbackGrant";
+
+  // authority MUST be the x/gov module account (runtime-checked).
+  string authority = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // grantee is the bech32 cosmos address whose grant is being clawed back.
+  string grantee = 2 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // reason is a free-text justification recorded in the loud clawback event.
+  string reason = 3;
+}
+
+message MsgClawbackGrantResponse {
+  // principal_returned is the locked principal swept back to the foundation
+  // reserve pool immediately (in-account, never-bonded portion).
+  string principal_returned = 1;
+  // principal_pending is the bonded locked principal now unbonding; it is swept
+  // back to the foundation reserve pool later via the EndBlock sweep.
+  string principal_pending = 2;
+  // rewards_cancelled is the unvested rewards owed to the grant that were
+  // cancelled (0 if the MVP escrows no rewards on-chain).
+  string rewards_cancelled = 3;
+  // deposit_forfeited is the on-chain exogenous deposit forfeited (0 if the
+  // deposit is off-chain in the MVP; a documented no-op event is still emitted).
+  string deposit_forfeited = 4;
+}
+
+// MsgBurnPool permanently destroys LIMO from the valgrant reserve pool
+// (admin-gated). The burned coins are removed from the module account AND from
+// total supply.
+message MsgBurnPool {
+  option (cosmos.msg.v1.signer) = "admin";
+  option (amino.name) = "cosmos/evm/valgrant/MsgBurnPool";
+
+  // admin is the bech32 address authorized to burn the pool (params.admin).
+  string admin = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // amount is the aLIMO amount to destroy. "0" or empty burns the ENTIRE current
+  // pool balance.
+  string amount = 2;
+}
+
+message MsgBurnPoolResponse {
+  // burned is the aLIMO amount actually destroyed (removed from total supply).
+  string burned = 1;
+}
+
+// MsgUpdateParams sets the x/valgrant params. Gov-gated: only the x/gov module
+// account (authority) may call it. Used by governance to rotate or revoke
+// (admin = "") the founder admin key, and to correct the foundation validator
+// list the decentralisation KPI is computed from.
+//
+// REPLACEMENT SEMANTICS: this message REPLACES the whole params struct. Until
+// foundation_validators existed the handler wrote only params.Admin and left the
+// list alone, which meant the foundation-VP KPI could never be corrected on a
+// live chain: a validator added to (or removed from) the foundation after genesis
+// was mis-counted forever. Both fields are now written on every update, so a
+// proposal that means to keep the current list MUST restate it.
+//
+// REPLAY NOTE: a MsgUpdateParams executed BEFORE this field existed decodes with
+// an empty foundation_validators, so replaying it under this binary clears the
+// list where the old binary left it untouched. This build line already cannot
+// replay limonata_10777-1 from block 1 for an unrelated reason (see
+// LIGNE-DE-BUILD.md section 1); it is a fresh-genesis binary and the divergence
+// is unreachable on a chain born from it.
+message MsgUpdateParams {
+  option (cosmos.msg.v1.signer) = "authority";
+  option (amino.name) = "cosmos/evm/valgrant/MsgUpdateParams";
+
+  // authority must be the x/gov module account.
+  string authority = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // admin is the new params.admin (bech32, or "" to disable admin actions).
+  string admin = 2;
+  // foundation_validators is the new params.foundation_validators: the valoper
+  // addresses counted as foundation/team by the decentralisation KPI. Empty
+  // clears the list (foundation VP is then reported as 0).
+  repeated string foundation_validators = 3;
+}
+
+message MsgUpdateParamsResponse {}

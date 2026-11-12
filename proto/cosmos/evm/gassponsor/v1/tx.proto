@@ -1,0 +1,57 @@
+syntax = "proto3";
+package cosmos.evm.gassponsor.v1;
+
+import "amino/amino.proto";
+import "cosmos/msg/v1/msg.proto";
+import "cosmos_proto/cosmos.proto";
+import "gogoproto/gogo.proto";
+
+option go_package = "github.com/cosmos/evm/x/gassponsor/types";
+
+// Msg defines the x/gassponsor Msg service.
+//
+// x/gassponsor mints the gasless subsidy. Before this service existed the
+// module had no Msg type at all, so its 13 params - including the master
+// kill-switch, the per-day mint cap and every anti-sybil ceiling - were
+// writable only at InitGenesis. A mainnet born with an unbounded
+// refill_daily_mint_cap could not have been tightened, and a live drain could
+// not have been stopped, without a coordinated binary upgrade.
+service Msg {
+  option (cosmos.msg.v1.service) = true;
+
+  // UpdateParams atomically REPLACES the x/gassponsor params (the governance
+  // KILL-SWITCH for the whole gasless subsidy). Gov-gated: only the x/gov
+  // module account (authority) may call it.
+  rpc UpdateParams(MsgUpdateParams) returns (MsgUpdateParamsResponse);
+}
+
+// MsgUpdateParams atomically REPLACES the x/gassponsor params. Gov-gated: only
+// the x/gov module account (authority) may call it.
+//
+// params carries the JSON encoding of the module's Params struct - x/gassponsor
+// stores its params as JSON-in-store (not proto), exactly like x/encmempool and
+// x/valgrant, so the whole struct is passed opaquely and re-decoded on chain.
+// The handler runs the SAME GenesisState.Validate used at genesis before
+// writing, so an update can never install params the genesis path would reject.
+//
+// REPLACEMENT SEMANTICS (SDK convention): the JSON is decoded into a ZERO
+// Params, so EVERY field must be supplied. A proposal that omits a field sets
+// it to its zero value. For the money-printing fields that is not a survivable
+// footgun - an omitted "enabled" would silently disable gasless, and an omitted
+// numeric CAP decodes as "" which this module reads as UNLIMITED. The handler
+// therefore REFUSES an incomplete payload: every field of Params must appear
+// explicitly, and unknown keys are refused too. It does NOT restrict the values
+// - governance can still move any cap in either direction, it just has to say
+// so.
+message MsgUpdateParams {
+  option (cosmos.msg.v1.signer) = "authority";
+  option (amino.name) = "cosmos/evm/gassponsor/MsgUpdateParams";
+
+  // authority must be the x/gov module account.
+  string authority = 1 [ (cosmos_proto.scalar) = "cosmos.AddressString" ];
+  // params is the JSON-encoded replacement Params (see
+  // x/gassponsor/types.Params).
+  bytes params = 2;
+}
+
+message MsgUpdateParamsResponse {}
